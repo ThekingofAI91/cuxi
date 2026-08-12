@@ -26,6 +26,7 @@ data/persona_chat/wangyangming/电子书（54本）/
 
 # 测试调试产物（一次性脚本/输出，不进入版本库）
 tests/_*
+tests/*_run.log
 
 # 一次性建议稿（历史 scratch，不入库）
 优化.py

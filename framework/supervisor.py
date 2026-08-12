@@ -14,7 +14,7 @@ import asyncio
 import threading
 from typing import Any, Optional
 
-from langchain_openai import ChatOpenAI
+from src.core.llm import get_chat_llm
 from langgraph.graph import END, START, StateGraph
 
 from framework.analysis_agent import analysis_agent
@@ -165,12 +165,9 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
             else:
                 context = turns_text
 
-            llm = ChatOpenAI(
-                model=settings.llm_model,
+            llm = get_chat_llm(
                 temperature=0.1,  # 降低温度，减少摘要时的数字幻觉
                 max_tokens=600,
-                api_key=settings.llm_api_key,
-                base_url=settings.llm_base_url,
             )
             response = await llm.ainvoke([
                 ("system", """你是一个对话摘要专家。请将以下对话历史压缩为一段简洁的摘要。
@@ -252,12 +249,9 @@ async def _generate_direct_response(
         # 名人对话回答通常需要更长篇幅，放宽 token 上限
         max_tokens = 800 if character_role_prompt else 500
 
-        llm = ChatOpenAI(
-            model=settings.llm_model,
+        llm = get_chat_llm(
             temperature=0.7,
             max_tokens=max_tokens,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
         )
 
         # 构建消息列表，注入对话历史

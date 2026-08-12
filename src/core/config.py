@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2000
+    # 稳定性：单次 LLM 请求超时（秒）+ 失败重试次数（默认重试 2 次）
+    llm_request_timeout: float = 60
+    llm_max_retries: int = 2
 
     # ---- Embedding 配置 ----
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
@@ -48,6 +51,8 @@ class Settings(BaseSettings):
     # ---- API 配置 ----
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    # CORS 允许来源，逗号分隔；上线后务必填具体域名（如 https://example.com）
+    cors_origins: str = "*"
     # 开发调试时设置 APP_RELOAD=1 启用热重载；默认关闭，避免文件变动触发服务重启
     app_reload: bool = False
 

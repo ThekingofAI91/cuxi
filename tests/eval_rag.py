@@ -19,8 +19,8 @@ from typing import Optional
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from langchain_openai import ChatOpenAI
 from src.core.config import settings
+from src.core.llm import get_chat_llm
 
 from tests.eval_dataset import EVAL_DATASET, get_dataset_by_difficulty
 
@@ -30,12 +30,9 @@ from tests.eval_dataset import EVAL_DATASET, get_dataset_by_difficulty
 # ============================================================
 def get_judge_llm() -> ChatOpenAI:
     """获取评判用 LLM"""
-    return ChatOpenAI(
-        model=settings.llm_model,
+    return get_chat_llm(
         temperature=0.1,  # 低温度，评判更稳定
         max_tokens=1000,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
     )
 
 

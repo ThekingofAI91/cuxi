@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from src.core.llm import get_chat_llm
 
 from src.core.config import settings
 from src.core.state import AgentState
@@ -97,12 +97,9 @@ async def _summarize_with_llm(history: list[dict]) -> str:
     Returns:
         摘要文本
     """
-    llm = ChatOpenAI(
-        model=settings.llm_model,
+    llm = get_chat_llm(
         temperature=0.1,  # 降低温度，减少摘要时的数字幻觉
         max_tokens=600,
-        api_key=settings.llm_api_key,
-        base_url=settings.llm_base_url,
     )
 
     # 格式化历史：用户输入完整保留，助手回答截断放宽

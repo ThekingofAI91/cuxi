@@ -58,16 +58,13 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
         print(f"[Retrieval Agent] 文档库中共 {count} 条文档片段")
 
         # ---- 2. 高级检索（Multi-Query + HyDE + BM25 + 向量 + 重排序）----
-        from langchain_openai import ChatOpenAI
+        from src.core.llm import get_chat_llm
         from src.retrieval.advanced_search import advanced_retrieval
 
         # 初始化 LLM（用于生成查询变体和 HyDE 文档；已合并为一次调用，256 足够）
-        retrieval_llm = ChatOpenAI(
-            model=settings.llm_model,
+        retrieval_llm = get_chat_llm(
             temperature=0.3,
             max_tokens=256,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
         )
 
         top_k = 15  # 与 HTTP 层 /persona/eval_query 保持一致

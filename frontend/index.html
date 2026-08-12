@@ -9,7 +9,11 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
 <meta http-equiv="Pragma" content="no-cache">
 <meta http-equiv="Expires" content="0">
-<title>书斋对话 · 多智能体 RAG 学术助手</title>
+<meta name="description" content="与荣格、阿德勒、王阳明、峰哥、张雪峰等名人对话的 AI 应用。每位名人独立人设、独立知识库、独立界面主题。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="书斋对话 · 与历史名人面对面">
+<meta property="og:description" content="与荣格、阿德勒、王阳明、峰哥、张雪峰等名人对话。AI 仿真角色，内容仅供娱乐与参考。">
+<title>书斋对话 · 与历史名人面对面</title>
 <style>  * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { height: 100%; }
   body { overflow: hidden; }
@@ -42,6 +46,48 @@
     z-index: 15; opacity: 0; transition: opacity 0.25s;
   }
   .sidebar-mask.show { display: block; opacity: 1; }
+  /* ===== 使用须知弹层 ===== */
+  .home-note { margin-top: 26px; font-size: 11px; letter-spacing: 1px; color: #6F6A62; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  .home-note p { margin: 0; }
+  .notice-link {
+    background: transparent; border: 1px solid rgba(140, 140, 140, 0.4); color: #8A8580;
+    font-family: inherit; font-size: 11px; letter-spacing: 1px; padding: 6px 14px; border-radius: 999px;
+    cursor: pointer; transition: border-color 0.2s ease, color 0.2s ease;
+  }
+  .notice-link:hover { border-color: #C9A86A; color: #C9A86A; }
+  .notice-link.side { margin-top: 8px; padding: 4px 10px; font-size: 10px; }
+  .modal-mask {
+    position: fixed; inset: 0; z-index: 200; background: rgba(6, 6, 10, 0.72);
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  }
+  .modal-mask[hidden] { display: none; }
+  .modal-card {
+    width: min(560px, 92vw); max-height: 78vh; overflow-y: auto;
+    background: #121218; border: 1px solid rgba(201, 168, 106, 0.22); border-radius: 16px;
+    padding: 26px 28px 28px; color: #CFC9BE; box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+  }
+  .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .modal-title {
+    font-size: 18px; letter-spacing: 3px; color: #EFE9E0;
+    font-family: "Cormorant Garamond", "Playfair Display", Georgia, "Noto Serif SC", "Songti SC", "SimSun", serif;
+    font-weight: 600;
+  }
+  .modal-close {
+    background: transparent; border: none; color: #8A8580; font-size: 22px; line-height: 1;
+    cursor: pointer; padding: 4px 8px; border-radius: 8px;
+  }
+  .modal-close:hover { color: #EFE9E0; }
+  .modal-body h4 { font-size: 13px; letter-spacing: 1px; color: #C9A86A; margin: 16px 0 6px; font-weight: 600; }
+  .modal-body h4:first-child { margin-top: 0; }
+  .modal-body p { font-size: 12.5px; line-height: 1.85; color: #9C958A; margin: 0; }
+  .modal-body b { color: #CFC9BE; font-weight: 600; }
+  .err-retry {
+    margin-left: 10px; background: transparent; border: 1px solid rgba(201, 168, 106, 0.5);
+    color: #C9A86A; font-family: inherit; font-size: 11px; letter-spacing: 1px;
+    padding: 5px 12px; border-radius: 999px; cursor: pointer;
+  }
+  .err-retry:hover { background: rgba(201, 168, 106, 0.12); }
   /* ===== 首页选择 ===== */
   .home-view {
     position: fixed; inset: 0; z-index: 50;
@@ -1744,7 +1790,7 @@ body[data-theme='original'] {
   <div class="home-brand">
     <div class="hb-mark">书</div>
     <h1>书斋对话</h1>
-    <p>多智能体 RAG 学术助手</p>
+    <p>与历史名人 · AI 对话</p>
   </div>
   <div class="home-title">选择对话对象<span class="home-count" id="homeCount"></span></div>
   <div class="home-cards-wrap">
@@ -1757,7 +1803,10 @@ body[data-theme='original'] {
     </button>
   </div>
   <div class="home-dots" id="homeDots"></div>
-  <p class="home-note">每位名人拥有独立的对话界面风格</p>
+  <div class="home-note">
+    <p>每位名人拥有独立的对话界面风格</p>
+    <button class="notice-link" id="homeNoticeBtn" type="button">使用须知 · AI 仿真声明</button>
+  </div>
 </div>
 
 <div class="app-layout">
@@ -1767,7 +1816,7 @@ body[data-theme='original'] {
       <div class="brand-mark" id="brandMark">✦</div>
       <div class="brand-text">
         <h1>书斋对话</h1>
-        <p>多智能体 RAG 学术助手</p>
+        <p>与历史名人 · AI 对话</p>
       </div>
     </div>
 
@@ -1788,7 +1837,10 @@ body[data-theme='original'] {
       <div class="conversation-list" id="conversationList"></div>
     </div>
 
-    <div class="sidebar-footer">LangGraph · 6 Agents · FastAPI · SSE</div>
+    <div class="sidebar-footer">
+      <span>LangGraph · RAG · FastAPI · SSE</span>
+      <button class="notice-link side" id="sideNoticeBtn" type="button">使用须知</button>
+    </div>
   </aside>
 
   <!-- ===== 主区域 ===== -->
@@ -1843,6 +1895,26 @@ body[data-theme='original'] {
 </div>
 
 <div class="sidebar-mask" id="sidebarMask"></div>
+
+<!-- ===== 使用须知弹层 ===== -->
+<div class="modal-mask" id="noticeModal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-label="使用须知">
+    <div class="modal-head">
+      <div class="modal-title">使用须知</div>
+      <button class="modal-close" id="noticeCloseBtn" type="button" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <h4>AI 仿真角色</h4>
+      <p>页面中的荣格、阿德勒、王阳明、峰哥、张雪峰均为 <b>AI 仿真角色</b>，回答基于公开著作、访谈与语录由 AI 生成，并非本人真实回复，也不代表其本人观点。</p>
+      <h4>内容性质</h4>
+      <p>对话内容由 AI 生成，可能存在不准确、不完整或与原始语境有出入之处，<b>仅供娱乐与参考</b>，请勿用于学业、医疗、投资、法律等重大决策。</p>
+      <h4>关于逝者资料</h4>
+      <p>张雪峰先生的语料仅收录其生前公开发表的言论（信息截止 2026-03），不含悼念或追思内容。</p>
+      <h4>数据与隐私</h4>
+      <p>对话记录保存在你的浏览器本地与服务器会话存储中，用于维持多轮对话上下文；服务不会将你的对话用于其他目的。</p>
+    </div>
+  </div>
+</div>
 
 
 <script>
@@ -2881,10 +2953,13 @@ function renderMessages() {
           </div>
         </div>`;
     } else if (msg.type === 'error') {
+      const retryBtn = msg.extra?.retryQuery
+        ? `<button class="err-retry" type="button" data-retry-query="${escapeHtml(msg.extra.retryQuery)}">重试</button>`
+        : '';
       html += `
         <div class="message-group${animClass}">
           <div class="message-row center-row">
-            <span class="err-chip">${escapeHtml(msg.content)}</span>
+            <span class="err-chip">${escapeHtml(msg.content)}</span>${retryBtn}
           </div>
         </div>`;
     }
@@ -2910,6 +2985,23 @@ function renderMessages() {
   }
 
   chatScroll.innerHTML = html;
+  // 失败消息附带"重试"：一键重发刚才的问题（先移除失败轮次，避免消息重复）
+  chatScroll.querySelectorAll('.err-retry').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (state.isLoading) return;
+      const q = btn.dataset.retryQuery;
+      if (!q || !state.currentConversation) return;
+      const msgs = state.currentConversation.messages;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].type === 'error' && msgs[i].extra?.retryQuery === q) {
+          if (i > 0 && msgs[i - 1].type === 'user' && msgs[i - 1].content === q) msgs.splice(i - 1, 2);
+          else msgs.splice(i, 1);
+          break;
+        }
+      }
+      sendQuery(q);
+    });
+  });
   scrollToBottom();
 }
 
@@ -3033,7 +3125,7 @@ async function sendQuery(query) {
     state._streamingText = '';
     state.isLoading = false;
     clearInterval(waitTimer);
-    addMessage('error', `查询失败: ${err.message}`);
+    addMessage('error', `查询失败：${err.message}，可点击"重试"再次发送。`, { retryQuery: query });
   }
 
   state.isLoading = false;
@@ -3222,6 +3314,16 @@ async function recoverPendingAnswer() {
 // ============================================================
 // 事件绑定
 // ============================================================
+// ============ 使用须知弹层 ============
+const noticeModal = document.getElementById('noticeModal');
+function openNotice() { noticeModal.hidden = false; }
+function closeNotice() { noticeModal.hidden = true; }
+document.getElementById('homeNoticeBtn').addEventListener('click', openNotice);
+document.getElementById('sideNoticeBtn').addEventListener('click', openNotice);
+document.getElementById('noticeCloseBtn').addEventListener('click', closeNotice);
+noticeModal.addEventListener('click', (e) => { if (e.target === noticeModal) closeNotice(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeNotice(); });
+
 sendBtn.addEventListener('click', () => sendQuery(queryInput.value));
 
 queryInput.addEventListener('keydown', (e) => {

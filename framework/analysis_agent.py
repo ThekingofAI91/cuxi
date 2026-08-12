@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from src.core.llm import get_chat_llm
 from pydantic import BaseModel, Field
 
 from src.core.config import settings
@@ -65,12 +65,9 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                 "route_history": state.get("route_history", []) + ["analysis_agent"],
             }
 
-        llm = ChatOpenAI(
-            model=settings.llm_model,
+        llm = get_chat_llm(
             temperature=0.5,
             max_tokens=settings.llm_max_tokens,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
         )
 
         # ---- 有检索结果：基于资料分析 ----

@@ -347,7 +347,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         from langchain_core.documents import Document
         from src.retrieval.embedder import get_embedder
         from src.retrieval.advanced_search import advanced_retrieval
-        from langchain_openai import ChatOpenAI
+        from src.core.llm import get_chat_llm
 
         # ---- 1. 高级检索：多查询 + HyDE 组合 ----
         embedder = get_embedder()
@@ -362,12 +362,9 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
 
         # 初始化 LLM（用于生成查询变体和 HyDE 文档；
         # max_tokens 已合并为一次调用，256 足够容纳短变体 + 3-5 句假设答案）
-        retrieval_llm = ChatOpenAI(
-            model=settings.llm_model,
+        retrieval_llm = get_chat_llm(
             temperature=0.3,
             max_tokens=256,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
         )
 
         # 执行高级检索

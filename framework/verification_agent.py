@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from langchain_openai import ChatOpenAI
+from src.core.llm import get_chat_llm
 
 from src.core.config import settings
 from src.core.state import AgentState
@@ -359,12 +359,9 @@ async def _llm_verification(query: str, analysis: str, docs: list) -> str:
     使用 LLM 辅助核查：评估回答中的观点是否都能在原著资料中找到依据
     """
     try:
-        llm = ChatOpenAI(
-            model=settings.llm_model,
+        llm = get_chat_llm(
             temperature=0.1,
             max_tokens=600,
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
         )
 
         # 构建文档摘要
