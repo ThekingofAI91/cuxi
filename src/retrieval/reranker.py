@@ -29,11 +29,11 @@ class Reranker:
     """
 
     # 类级锁：
-    # - 模型加载锁：防止并发请求同时加载 560M 模型（重复加载浪费 10-30s 与数 GB 内存）
-    # - 推理锁：Cross-Encoder CPU 推理是全局争抢点，多请求同时推理会把 CPU 打满、
-    #   所有请求一起变慢 3 倍以上；串行化后排队等待（每个 ~2-4s），体验远好于互相拖死
+    # - 模型加载锁：防止并发请求同时加载大模型（重复加载浪费 10-30s 与数 GB 内存）
+    # - 推理信号量：Cross-Encoder CPU 推理是有界并行（BoundedSemaphore），
+    #   全串行浪费多核（16 核只有 1 个在跑），全放开又互相抢占把 CPU 打满；
+    #   默认 rerank_max_concurrent=4，多核机器吞吐接近线性提升，单请求排队可控
     _LOAD_LOCK = threading.Lock()
-    _PREDICT_LOCK = threading.Lock()
 
     def __init__(
         self,
@@ -45,9 +45,10 @@ class Reranker:
             model_name: Cross-Encoder 模型名称
             device: 运行设备（cpu / cuda）
         """
-        self.model_name = model_name or "BAAI/bge-reranker-v2-m3"
+        self.model_name = model_name or settings.rerank_model
         self.device = device or "cpu"
         self._model = None
+        self._predict_sem = threading.BoundedSemaphore(max(1, settings.rerank_max_concurrent))
 
     @property
     def model(self):
@@ -57,6 +58,8 @@ class Reranker:
                 if self._model is None:  # 双重检查，防止并发重复加载
                     print(f"[Reranker] 加载模型: {self.model_name} (device={self.device})")
                     try:
+                        import torch
+                        torch.set_num_threads(max(1, settings.torch_num_threads))
                         from sentence_transformers import CrossEncoder
                         self._model = CrossEncoder(
                             self.model_name,
@@ -118,9 +121,9 @@ class Reranker:
         # 构造 (query, document) 对
         pairs = [(query, doc.page_content) for doc in candidates]
 
-        # 推理加锁：CPU 推理串行化，避免并发请求互相抢占 CPU 导致集体变慢
-        # （锁内持有时间 ~2-4s，排队等待远好于争抢 CPU 使所有请求一起卡死）
-        with self._PREDICT_LOCK:
+        # 推理有界并行：信号量内同时最多 rerank_max_concurrent 个 CPU 推理，
+        # 超出排队；比全串行吞吐高，比无界并发稳定
+        with self._predict_sem:
             # 限制输入长度：chunk 通常数百字，尾部对排序贡献小，
             # 截断到 256 token 可显著加速 CPU 推理（512→256 约省一半时间）；
             # 旧版 API 不支持则全量推理

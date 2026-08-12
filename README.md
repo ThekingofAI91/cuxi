@@ -16,6 +16,7 @@
 - **混合检索 + 来源加权**：向量 + BM25 双通道，Cross-Encoder 重排；语料按 original/oral/anchor/secondary 分级加权，二手解读强降权，防止"第三者评价"冒充名人原话
 - **防幻觉验证**：专业型角色回答前对引用做核查与置信度标注
 - **工程化打磨**：限流、上传限制、会话 SQLite 持久化（重启不丢）、答案内存缓存、成本监控看板
+- **并发可调**：BM25/向量/重排的 CPU 并发上限、torch 线程数、uvicorn worker 数全部走配置，低配机器和高并发场景各取所需
 
 ---
 
@@ -30,6 +31,24 @@
 | 前端 | 原生 HTML/CSS/JS 单文件（`frontend/index.html`，无构建步骤） |
 | 持久化 | SQLite（会话 / 用量统计）+ ChromaDB（向量库） |
 | 评估 | RAGAS（scripts/evaluate_ragas.py）+ pytest（20 个用例） |
+
+## 📈 并发容量（实测）
+
+在 16 核 CPU 机器上实测（完整检索 + 生成流水线，DeepSeek API）：
+
+| 并发数 | 单请求延迟（min / max） | 说明 |
+|--------|------------------------|------|
+| 1 | ~15-22s | 单请求基线 |
+| 5 | ~37-51s | 轻度排队 |
+| 10 | ~45-89s | 中度排队 |
+| 20 | ~70-200s | 全部成功，无超时/失败；延迟偏长 |
+
+瓶颈与对策：
+
+- **单进程内纯 Python 计算吃 GIL**（BM25 检索、RRF 融合），加上 rerank/embedding 的 CPU 推理有界并发（默认 4），高并发时延迟线性上涨
+- **LLM API 不是瓶颈**：20 并发纯 LLM 调用约 8s 完成
+- **要更低的 20 并发延迟**：设 `APP_WORKERS=2~4`（进程级并行，每 worker 独立加载模型约 2.5GB 内存；8GB 服务器建议 2，16GB 建议 4）。注意限流/答案缓存是进程内的，多 worker 时各算各的
+- 低配机器可换 `RERANK_MODEL=BAAI/bge-reranker-base`（~1.1GB，CPU 快 3-5 倍）
 
 ---
 
@@ -176,6 +195,8 @@ pytest                              # 20 个用例：智能体行为 + API 集�
 python scripts/evaluate_ragas.py     # 跑真实流水线，输出 faithfulness / answer_relevancy / context_precision
 python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志）
 ```
+
+12 题 LLM-as-Judge 基线（2026-08-12，DeepSeek 评判）：忠实度 8.2 / 相关性 9.6 / 上下文精确度 8.4 / 要点覆盖率 10.0（详见 `tests/eval_results.json`）。
 
 ---
 

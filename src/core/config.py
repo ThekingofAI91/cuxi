@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     llm_request_timeout: float = 60
     llm_max_retries: int = 2
 
+    # ---- 并发 / 性能 ----
+    # 重排序模型：默认保留高精度 v2-m3（2.27GB）；低配机器/高并发场景可换 BAAI/bge-reranker-base（~1.1GB，CPU 快 3-5 倍）
+    rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # 重排序与向量化并发上限（CPU 推理有界并行：全串行浪费多核，全放开会互相抢占）
+    rerank_max_concurrent: int = 4
+    embedding_max_concurrent: int = 4
+    # torch 推理线程数：默认 torch 每调用开满全部核（16），多并发时线程数爆炸互相抢占；
+    # 建议 = 物理核数 // rerank_max_concurrent（16 核 / 4 并发 = 4），吞吐最优
+    torch_num_threads: int = 4
+
     # ---- Embedding 配置 ----
     embedding_model: str = "BAAI/bge-small-zh-v1.5"
     embedding_dimension: int = 512
@@ -53,6 +63,10 @@ class Settings(BaseSettings):
     api_port: int = 8000
     # CORS 允许来源，逗号分隔；上线后务必填具体域名（如 https://example.com）
     cors_origins: str = "*"
+    # uvicorn worker 数：BM25 检索等纯 Python 计算吃 GIL，单 worker 下并发会串行排队；
+    # 多 worker 可线性提升并发吞吐（代价：每个 worker 独立加载模型 ~2.5GB 内存）。
+    # 8GB 服务器建议 2，16GB 建议 4；限流/答案缓存为进程内实现，多 worker 时各算各的。
+    app_workers: int = 1
     # 开发调试时设置 APP_RELOAD=1 启用热重载；默认关闭，避免文件变动触发服务重启
     app_reload: bool = False
 

@@ -11,6 +11,7 @@ RAG 评估脚本 - LLM-as-Judge
 
 import asyncio
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.config import settings
 from src.core.llm import get_chat_llm
+from src.core.llm_json import extract_json
 
 from tests.eval_dataset import EVAL_DATASET, get_dataset_by_difficulty
 
@@ -166,14 +168,24 @@ async def evaluate_single(
     # 解析结果
     def parse_json_response(text: str) -> dict:
         try:
-            # 尝试提取 JSON
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(text[start:end])
-        except:
+            obj = extract_json(text)  # 兼容纯 JSON / ```json 代码块 / 混在文本中的平衡大括号
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
             pass
         return {"score": 5, "reason": "解析失败"}
+
+    def norm_score(v) -> int:
+        """judge 可能返回 int / float / '8分' / '8/10'，统一归一为 0-10 整数"""
+        if isinstance(v, bool):
+            return 5
+        if isinstance(v, (int, float)):
+            return max(0, min(10, int(v)))
+        if isinstance(v, str):
+            m = re.search(r"(\d{1,2})\s*/?\s*10?", v)
+            if m:
+                return max(0, min(10, int(m.group(1))))
+        return 5
 
     faithfulness = parse_json_response(results[0].content)
     relevancy = parse_json_response(results[1].content)
@@ -181,10 +193,10 @@ async def evaluate_single(
     key_points_result = parse_json_response(results[3].content)
 
     return {
-        "faithfulness": faithfulness.get("score", 5),
-        "relevancy": relevancy.get("score", 5),
-        "context_precision": context_precision.get("score", 5),
-        "key_points_coverage": key_points_result.get("score", 5),
+        "faithfulness": norm_score(faithfulness.get("score", 5)),
+        "relevancy": norm_score(relevancy.get("score", 5)),
+        "context_precision": norm_score(context_precision.get("score", 5)),
+        "key_points_coverage": norm_score(key_points_result.get("score", 5)),
         "details": {
             "faithfulness_reason": faithfulness.get("reason", ""),
             "relevancy_reason": relevancy.get("reason", ""),

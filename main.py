@@ -5,6 +5,7 @@ FastAPI 应用启动入口
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,28 +16,32 @@ from src.api.routes import router
 from src.core.config import settings
 
 
-async def _warmup():
+def _warmup_sync():
     """
     后台预热：加载 embedding/rerank 模型 + 构建各 collection 的 BM25 索引。
 
     之前服务重启后的第一个请求要现场完成全部重型初始化
     （全量拉取文档 + BM25 分词构建 + 560M 模型加载，需 30~70 秒），
     该请求的用户会等得非常痛苦，并发请求还会重复构建互相拖死。
-    预热在启动时异步执行，用户请求到达时直接命中缓存。
+    预热在启动后的独立 daemon 线程中同步执行（用户请求到达时直接命中缓存）。
+
+    为什么不用 asyncio.to_thread：实测在 uvicorn 事件循环内用 to_thread 加载
+    torch 模型 / 构建 BM25 会偶发死锁（进程挂起、CPU 归零、executor worker 空闲），
+    而普通 threading.Thread 中同步执行稳定可复现。
     """
     try:
-        print("[Warmup] 🔥 开始后台预热（不影响服务启动与使用）...")
+        print("[Warmup] 🔥 开始后台预热（不影响服务启动与使用）...", flush=True)
 
         # 1. 预热 embedding 模型（触发模型文件加载）
         from src.retrieval.embedder import get_embedder
         embedder = get_embedder()
-        await asyncio.to_thread(embedder.embed_query, "预热")
-        print("[Warmup] ✅ Embedding 模型就绪")
+        embedder.embed_query("预热")
+        print("[Warmup] ✅ Embedding 模型就绪", flush=True)
 
         # 2. 预热 Cross-Encoder 重排序模型（560M 参数，首次加载 10-30s）
         from src.retrieval.reranker import get_reranker
-        await asyncio.to_thread(lambda: get_reranker().model)
-        print("[Warmup] ✅ Rerank 模型就绪")
+        get_reranker().model
+        print("[Warmup] ✅ Rerank 模型就绪", flush=True)
 
         # 3. 预热各角色 collection 的 BM25 索引（全量拉取 + 构建，耗时大头）
         from framework.supervisor import get_chroma_client
@@ -44,9 +49,11 @@ async def _warmup():
         from scenes.persona_chat.config import persona_chat_config
 
         names = {c.chroma_collection for c in persona_chat_config.characters.values()}
+        print(f"[Warmup] 待预热 collection: {sorted(names)}", flush=True)
 
 
         client = get_chroma_client()
+        print("[Warmup] ChromaDB client 就绪", flush=True)
         for name in names:
             try:
                 collection = client.get_or_create_collection(
@@ -54,17 +61,18 @@ async def _warmup():
                     metadata={"hnsw:space": "cosine"},
                 )
                 count = collection.count()
+                print(f"[Warmup] {name}: count={count}", flush=True)
                 if count == 0:
                     print(f"[Warmup] ⏭️ {name}: 文档库为空，跳过")
                     continue
-                await asyncio.to_thread(_ensure_bm25_ready, collection)
+                _ensure_bm25_ready(collection)
                 print(f"[Warmup] ✅ {name}: {count} 条文档，BM25 索引就绪")
             except Exception as e:
                 print(f"[Warmup] ⚠️ {name} 预热失败: {e}")
 
-        print("[Warmup] ✅ 预热全部完成")
+        print("[Warmup] ✅ 预热全部完成", flush=True)
     except Exception as e:
-        print(f"[Warmup] ⚠️ 预热失败（不影响使用，首个请求可能稍慢）: {e}")
+        print(f"[Warmup] ⚠️ 预热失败（不影响使用，首个请求可能稍慢）: {e}", flush=True)
 
 
 @asynccontextmanager
@@ -79,8 +87,9 @@ async def lifespan(app: FastAPI):
     print(f"📦 ChromaDB 路径: {settings.chroma_persist_dir}")
     print("=" * 60)
 
-    # 后台预热，不阻塞服务启动与响应
-    asyncio.create_task(_warmup())
+    # 后台预热，不阻塞服务启动与响应；用独立 daemon 线程同步执行，
+    # 避开 uvicorn 事件循环 + asyncio.to_thread 在 Windows 上的死锁问题
+    threading.Thread(target=_warmup_sync, daemon=True, name="warmup").start()
 
     # 启动时恢复近期会话（SQLite 写穿持久化），并启动过期清理任务
     import json as _json
@@ -174,11 +183,30 @@ if frontend_path.exists():
 
 if __name__ == "__main__":
     import uvicorn
+
+    # 单 worker 模式下预加载 AI 模型：实测 uvicorn 事件循环内用 asyncio.to_thread
+    # 加载 torch 模型（bge-small / bge-reranker-v2-m3）在 Windows 上会偶发死锁
+    # （进程挂起、CPU 归零），提前同步加载则稳定（代价是启动多等 ~1 分钟）。
+    # 多 worker（>1）时跳过：父进程预加载只会白占内存，各 worker 由预热线程自行加载。
+    if settings.app_workers <= 1:
+        try:
+            from src.retrieval.embedder import get_embedder
+            get_embedder().embed_query("预热")  # 触发 bge-small-zh-v1.5 加载
+            print("[Warmup] ✅ Embedding 模型预加载完成")
+        except Exception as e:
+            print(f"[Warmup] ⚠️ Embedding 模型预加载失败: {e}")
+        try:
+            from src.retrieval.reranker import get_reranker
+            get_reranker().model
+            print("[Warmup] ✅ Rerank 模型预加载完成")
+        except Exception as e:
+            print(f"[Warmup] ⚠️ Rerank 模型预加载失败: {e}")
     
     uvicorn.run(
         "main:app",
         host=settings.api_host,
         port=settings.api_port,
+        workers=settings.app_workers,
         # 热重载默认关闭（避免 tests/ 等目录下 .py 文件变动触发重启）；
         # 开发调试时设置环境变量 APP_RELOAD=1 再启动即可启用
         reload=settings.app_reload,

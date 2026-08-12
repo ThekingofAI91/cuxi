@@ -54,6 +54,9 @@ class Embedder:
         self.device = device or settings.embedding_device
         self._model = None  # 延迟加载
         self._dimension: Optional[int] = None
+        # 向量化有界并行：sentence-transformers CPU encode 是资源争抢点，
+        # 用信号量限制并发数，避免高并发时互相抢占（默认 embedding_max_concurrent=4）
+        self._encode_sem = threading.BoundedSemaphore(max(1, settings.embedding_max_concurrent))
 
         # 嵌入缓存（可选）
         self.cache_dir = Path(cache_dir) if cache_dir else None
@@ -68,6 +71,8 @@ class Embedder:
                 if self._model is None:  # 双重检查，防止并发重复加载
                     print(f"[Embedder] 加载模型: {self.model_name} (device={self.device})")
                     try:
+                        import torch
+                        torch.set_num_threads(max(1, settings.torch_num_threads))
                         from sentence_transformers import SentenceTransformer
                         self._model = SentenceTransformer(
                             self.model_name,
@@ -157,12 +162,13 @@ class Embedder:
             return rng.random((len(texts), self.dimension)).tolist()
 
         try:
-            embeddings = self.model.encode(
-                texts,
-                batch_size=32,
-                show_progress_bar=False,
-                normalize_embeddings=True,  # L2 归一化，提高余弦相似度计算效率
-            )
+            with self._encode_sem:
+                embeddings = self.model.encode(
+                    texts,
+                    batch_size=32,
+                    show_progress_bar=False,
+                    normalize_embeddings=True,  # L2 归一化，提高余弦相似度计算效率
+                )
             return embeddings.tolist()
         except Exception as e:
             print(f"[Embedder] ❌ 嵌入过程出错: {e}")
