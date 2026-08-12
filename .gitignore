@@ -1,0 +1,42 @@
+# 环境变量（千万别提交！）
+.env
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
+# ChromaDB 持久化数据
+chroma_db/
+
+# 运行时数据（会话 / 用量 / 日志，不入库）
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/session_meta.json
+logs/
+
+# 原始文档（不上传）
+data/raw/*
+
+# 大体积原始语料（均为公开书籍/资料，重灌即可再生成；不入库避免仓库膨胀）
+data/persona_chat/jung/荣格/
+data/persona_chat/wangyangming/电子书（54本）/
+
+# 测试调试产物（一次性脚本/输出，不进入版本库）
+tests/_*
+
+# 一次性建议稿（历史 scratch，不入库）
+优化.py
+
+# pytest 缓存
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# 系统文件
+.DS_Store
+Thumbs.db

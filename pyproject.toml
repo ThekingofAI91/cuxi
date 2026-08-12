@@ -1,0 +1,28 @@
+[project]
+name = "multi-agent-rag"
+version = "0.1.0"
+description = "多智能体RAG学术助手"
+requires-python = ">=3.10"
+dependencies = [
+    "langgraph",
+    "langchain-core",
+    "langchain-community",
+    "langchain-openai",
+    "chromadb",
+    "sentence-transformers",
+    "rank-bm25",
+    "fastapi",
+    "uvicorn[standard]",
+    "pypdf",
+    "python-multipart",
+    "python-dotenv",
+    "pydantic",
+    "pydantic-settings",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "ragas",
+]
