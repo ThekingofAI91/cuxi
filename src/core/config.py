@@ -32,11 +32,14 @@ class Settings(BaseSettings):
     # 重排序模型：默认保留高精度 v2-m3（2.27GB）；低配机器/高并发场景可换 BAAI/bge-reranker-base（~1.1GB，CPU 快 3-5 倍）
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     # 重排序与向量化并发上限（CPU 推理有界并行：全串行浪费多核，全放开会互相抢占）
-    rerank_max_concurrent: int = 4
+    rerank_max_concurrent: int = 2
     embedding_max_concurrent: int = 4
-    # torch 推理线程数：默认 torch 每调用开满全部核（16），多并发时线程数爆炸互相抢占；
-    # 建议 = 物理核数 // rerank_max_concurrent（16 核 / 4 并发 = 4），吞吐最优
-    torch_num_threads: int = 4
+    # 精排候选数：RRF 前 N 条交给 Cross-Encoder（其余按 RRF 顺序兜底），
+    # 候选越多 CPU 越慢（15 对 ≈ 20s+），10 对 ≈ 8s，排序质量损失很小
+    rerank_candidates: int = 10
+    # torch 推理线程数：建议 = 物理核数 // rerank_max_concurrent（16 核 / 2 并发 = 8），
+    # 单请求也够快（8 线程 ≈ 16 线程的 95%），并发时不互相抢占
+    torch_num_threads: int = 8
 
     # ---- Embedding 配置 ----
     embedding_model: str = "BAAI/bge-small-zh-v1.5"

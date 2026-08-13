@@ -440,15 +440,21 @@ async def advanced_retrieval(
             )
         )
 
-    # ---- Step 5: Cross-Encoder 重排序 ----
-    if use_rerank and len(candidate_docs) > 1:
+    # ---- Step 5: Cross-Encoder 重排序（只精排 RRF 前 N 条，其余按 RRF 顺序兜底）----
+    # 重组后块为完整段落（~1000 字符），全候选精排在 CPU 上 15 对要 20s+；
+    # 只精排 rerank_candidates（默认 10）对，剩余候选保持 RRF 顺序拼接，质量损失小、耗时减半。
+    rerank_n = settings.rerank_candidates
+    head = candidate_docs[:rerank_n]
+    tail = candidate_docs[rerank_n:]
+    if use_rerank and len(head) > 1:
         try:
             from src.retrieval.reranker import rerank_documents
             # CPU 推理（30 对 × 512 token）需数秒，同步调用会阻塞事件循环，放线程池
-            candidate_docs = await asyncio.to_thread(rerank_documents, question, candidate_docs, top_k=top_k)
-            print(f"[Advanced Retrieval] Cross-Encoder 重排序完成 → {len(candidate_docs)} 条")
+            head = await asyncio.to_thread(rerank_documents, question, head, top_k=rerank_n)
+            print(f"[Advanced Retrieval] Cross-Encoder 重排序完成（前 {len(head)} 条精排 + {len(tail)} 条 RRF 兜底）")
         except Exception as e:
             print(f"[Advanced Retrieval] ⚠️ 重排序失败，保持 RRF 顺序: {e}")
+    candidate_docs = head + tail
 
     retrieved_docs = candidate_docs[:top_k]
     contexts = [doc.page_content for doc in retrieved_docs]

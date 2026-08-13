@@ -123,7 +123,7 @@ class Reranker:
         # 不生效（bge-reranker-v2-m3 上 1200 字符文本带/不带 max_length 耗时几乎一样），
         # 长文本（重组后块 ~1000 字符）会导致 CPU 全量推理 60s+；截到 300 字符 ≈ 300 token，
         # 排序主要依赖开头语义，精度损失可忽略，耗时回落到 3-5s。
-        max_pair_chars = 300
+        max_pair_chars = 200
         pairs = [
             (query[:max_pair_chars], doc.page_content[:max_pair_chars])
             for doc in candidates

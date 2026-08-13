@@ -243,7 +243,9 @@ def _build_context(docs: list) -> str:
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get("source", "未知来源")
         heading = doc.metadata.get("heading", "未知章节")
-        content = doc.page_content[:800]  # 限制每条长度
+        content = doc.page_content[:450]  # 限制每条长度：检索用完整块，注入 LLM 只取头部
+        # （重组后块为 ~1000 字符完整段落，全量注入会让每次 LLM 调用 prefill 12K+ 字符，
+        #   单请求 40s+、高并发排队严重；截到 450 字符保留段落核心语义，速度显著回升）
         context_parts.append(f"[{i}] 来源: {source} | 章节: {heading}\n{content}")
 
     return "\n\n---\n\n".join(context_parts)
