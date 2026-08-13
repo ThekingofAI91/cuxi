@@ -119,7 +119,15 @@ class Reranker:
             return self._rerank_fallback(query, candidates, top_k)
 
         # 构造 (query, document) 对
-        pairs = [(query, doc.page_content) for doc in candidates]
+        # 手动截断输入：实测 sentence-transformers 的 max_length 参数在部分版本/模型上
+        # 不生效（bge-reranker-v2-m3 上 1200 字符文本带/不带 max_length 耗时几乎一样），
+        # 长文本（重组后块 ~1000 字符）会导致 CPU 全量推理 60s+；截到 300 字符 ≈ 300 token，
+        # 排序主要依赖开头语义，精度损失可忽略，耗时回落到 3-5s。
+        max_pair_chars = 300
+        pairs = [
+            (query[:max_pair_chars], doc.page_content[:max_pair_chars])
+            for doc in candidates
+        ]
 
         # 推理有界并行：信号量内同时最多 rerank_max_concurrent 个 CPU 推理，
         # 超出排队；比全串行吞吐高，比无界并发稳定
