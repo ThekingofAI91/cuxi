@@ -47,10 +47,15 @@ class UsageMonitor:
                     cost REAL DEFAULT 0,
                     latency_ms INTEGER DEFAULT 0,
                     cache_hit INTEGER DEFAULT 0,
-                    error INTEGER DEFAULT 0
+                    error INTEGER DEFAULT 0,
+                    stages TEXT DEFAULT ''
                 )
                 """
             )
+            # 旧库迁移：补 stages 列（阶段耗时瀑布，JSON 字符串）
+            cols = [r[1] for r in self._conn.execute("PRAGMA table_info(usage_log)").fetchall()]
+            if "stages" not in cols:
+                self._conn.execute("ALTER TABLE usage_log ADD COLUMN stages TEXT DEFAULT ''")
             self._conn.commit()
 
     @staticmethod
@@ -68,18 +73,22 @@ class UsageMonitor:
         latency_ms: int = 0,
         cache_hit: bool = False,
         error: bool = False,
+        stages: Optional[dict] = None,
     ) -> None:
         pt = prompt_tokens if prompt_tokens is not None else self._estimate_tokens(prompt_chars)
         ct = completion_tokens if completion_tokens is not None else self._estimate_tokens(answer_chars)
         cost = pt / 1_000_000 * self._cost_in + ct / 1_000_000 * self._cost_out
         try:
+            import json as _json
+
+            stages_json = _json.dumps(stages, ensure_ascii=False) if stages else ""
             with self._lock:
                 self._conn.execute(
                     """
                     INSERT INTO usage_log
                     (ts, request_id, character, prompt_chars, answer_chars,
-                     prompt_tokens, completion_tokens, cost, latency_ms, cache_hit, error)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                     prompt_tokens, completion_tokens, cost, latency_ms, cache_hit, error, stages)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         time.time(),
@@ -93,6 +102,7 @@ class UsageMonitor:
                         latency_ms,
                         1 if cache_hit else 0,
                         1 if error else 0,
+                        stages_json,
                     ),
                 )
                 self._conn.commit()
@@ -122,6 +132,25 @@ class UsageMonitor:
             d["cost"] = round(d["cost"] + i["cost"], 4)
             d["errors"] += i["error"]
 
+        # 最近带阶段耗时的请求（延迟瀑布用，最新的在前）
+        recent_stages: list[dict] = []
+        for i in reversed(items):
+            if not i.get("stages"):
+                continue
+            try:
+                import json as _json
+
+                recent_stages.append({
+                    "ts": i["ts"],
+                    "character": i["character"],
+                    "latency_ms": i["latency_ms"],
+                    "stages": _json.loads(i["stages"]),
+                })
+            except Exception:
+                continue
+            if len(recent_stages) >= 30:
+                break
+
         return {
             "requests": total_requests,
             "errors": errors,
@@ -131,6 +160,7 @@ class UsageMonitor:
             "total_tokens": total_tokens,
             "avg_latency_ms": avg_latency,
             "per_character": per_character,
+            "recent_stages": recent_stages,
         }
 
     def since_start_of_day(self) -> float:

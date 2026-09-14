@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>管理后台 · 促膝</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", serif;
+    background: #FAFAF7;
+    color: #161616;
+    line-height: 1.6;
+    padding: 24px;
+  }
+  a { color: #6B4A20; }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  header.top {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 22px;
+  }
+  .title {
+    font-size: 22px; font-weight: 600; letter-spacing: 4px; color: #161616;
+  }
+  .title small {
+    display: block; font-size: 12px; color: #6B6B66; font-weight: 400;
+    letter-spacing: 1px; margin-top: 4px;
+  }
+  .token-bar { display: flex; align-items: center; gap: 8px; }
+  .token-bar input {
+    background: #FFFFFF; border: 1px solid rgba(22,22,22,.18);
+    color: #161616; padding: 8px 10px; border-radius: 8px;
+    font-size: 13px; width: 220px;
+  }
+  .btn {
+    background: #161616; color: #FAFAF7; border: none;
+    padding: 8px 18px; border-radius: 999px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    font-family: inherit; transition: opacity .15s ease;
+  }
+  .btn:hover:not(:disabled) { opacity: .82; }
+  .btn.ghost { background: transparent; color: #161616; border: 1px solid rgba(22,22,22,.25); }
+  .btn.ghost:hover:not(:disabled) { background: rgba(22,22,22,.05); opacity: 1; }
+  .btn.sm { padding: 4px 12px; font-size: 12px; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+  .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 18px; }
+  .card {
+    background: #FFFFFF; border: 1px solid rgba(22,22,22,.08); border-radius: 12px;
+    padding: 18px; box-shadow: 0 2px 14px rgba(22,22,22,.04);
+  }
+  .card h3 {
+    font-size: 12px; color: #6B6B66; font-weight: 400;
+    letter-spacing: 2px; margin-bottom: 12px;
+  }
+  .card .big { font-size: 30px; font-weight: 600; letter-spacing: 1px; }
+  .card .sub { font-size: 12px; color: #6B6B66; margin-top: 8px; letter-spacing: 1px; }
+  .card .big.danger { color: #B04A3A; }
+  .card .big.ok { color: #2A7F4A; }
+
+  .section {
+    background: #FFFFFF; border: 1px solid rgba(22,22,22,.08);
+    border-radius: 14px; padding: 20px 22px; margin-bottom: 18px;
+    box-shadow: 0 2px 14px rgba(22,22,22,.04);
+  }
+  .section h2 {
+    font-size: 18px; font-weight: 600; color: #161616; letter-spacing: 3px;
+    margin-bottom: 16px; display: flex; align-items: center; gap: 10px;
+    padding-bottom: 10px; border-bottom: 1px solid rgba(22,22,22,.08);
+  }
+  .section h2 .badge {
+    font-size: 11px; background: #161616; color: #FAFAF7;
+    padding: 3px 10px; border-radius: 999px; font-weight: 500; letter-spacing: 1px;
+  }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(22,22,22,.06); }
+  th { color: #6B6B66; font-weight: 400; font-size: 12px; letter-spacing: 1px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tbody tr:hover { background: rgba(22,22,22,.02); }
+
+  .fb-item {
+    border: 1px solid rgba(22,22,22,.1); border-radius: 10px;
+    padding: 14px 16px; margin-bottom: 12px; background: #FAFAF7;
+  }
+  .fb-item .meta {
+    font-size: 11px; color: #6B6B66; display: flex; gap: 12px;
+    flex-wrap: wrap; margin-bottom: 8px; letter-spacing: 1px;
+  }
+  .fb-item .content { font-size: 14px; white-space: pre-wrap; word-break: break-word; color: #161616; }
+  .fb-item .reply {
+    font-size: 13px; color: #6B4A20; margin-top: 10px;
+    border-left: 2px solid #6B4A20; padding-left: 12px;
+  }
+  .fb-actions { margin-top: 12px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .fb-actions input {
+    flex: 1; min-width: 180px; background: #FFFFFF;
+    border: 1px solid rgba(22,22,22,.18); color: #161616;
+    padding: 7px 10px; border-radius: 7px; font-size: 13px;
+  }
+
+  .tag { font-size: 11px; padding: 3px 10px; border-radius: 999px; font-weight: 500; letter-spacing: 1px; }
+  .tag.pending { background: #F5E6C8; color: #8B6914; }
+  .tag.resolved { background: #DCEFE0; color: #2A7F4A; }
+  .tag.replied { background: #DDE7F1; color: #2A5F8A; }
+  .empty { color: #B0ACA3; font-size: 13px; padding: 10px 0; }
+  .err {
+    background: #FBE9E5; color: #B04A3A;
+    border: 1px solid #E8B8AE; padding: 10px 14px;
+    border-radius: 10px; margin-bottom: 16px;
+  }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 760px) {
+    .cards, .grid2 { grid-template-columns: 1fr; }
+    body { padding: 14px; }
+  }
+
+/* 延迟瀑布阶段胶囊 */
+.wf-chip {
+  display: inline-block;
+  padding: 1px 8px;
+  margin: 1px 2px;
+  border-radius: 10px;
+  background: #EEF3FB;
+  color: #2C5AA0;
+  font-size: 12px;
+  white-space: nowrap;
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="title">管理后台 · 促膝<small>使用情况 · 成本监控 · 意见反馈</small></div>
+    <div class="token-bar">
+      <input id="tokenInput" type="password" placeholder="管理令牌 monitor_token" autocomplete="off">
+      <button class="btn" id="refreshBtn">刷新</button>
+    </div>
+  </header>
+
+  <div id="errBox" class="err" style="display:none"></div>
+
+  <div id="overview"></div>
+
+  <div class="grid2">
+    <div class="section">
+      <h2>角色使用排行 <span class="badge" id="rankBadge"></span></h2>
+      <div id="rankTable"></div>
+    </div>
+    <div class="section">
+      <h2>延迟瀑布（最近带阶段耗时的请求）<span class="badge" id="waterfallBadge"></span></h2>
+      <div id="waterfallList"></div>
+    </div>
+    <div class="section">
+      <h2>知识图谱状态 <span class="badge" id="graphBadge"></span></h2>
+      <div id="graphList"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <h2>自定义角色 <span class="badge" id="customBadge"></span></h2>
+    <div id="customList"></div>
+  </div>
+
+  <div class="section">
+    <h2>圆桌会议 <span class="badge" id="rtBadge"></span></h2>
+    <div id="rtList"></div>
+  </div>
+
+  <div class="section">
+    <h2>意见反馈 <span class="badge" id="fbBadge"></span></h2>
+    <div id="fbCounts" style="margin-bottom:12px;font-size:12px;color:#8A8478;"></div>
+    <div id="fbList"></div>
+  </div>
+</div>
+
+<script>
+const TS = () => new Date().toLocaleString('zh-CN', { hour12: false });
+
+function getToken() {
+  return (localStorage.getItem('admin_token') || '').trim();
+}
+function setTokenUI() {
+  document.getElementById('tokenInput').value = getToken();
+}
+document.getElementById('tokenInput').addEventListener('input', e => {
+  localStorage.setItem('admin_token', e.target.value.trim());
+});
+setTokenUI();
+
+async function fetchJSON(url) {
+  const token = getToken();
+  const sep = url.includes('?') ? '&' : '?';
+  const resp = await fetch(url + sep + 'token=' + encodeURIComponent(token));
+  if (resp.status === 403) {
+    showErr('令牌无效或缺失：请在右上角输入 monitor_token 后刷新。');
+    throw new Error('403');
+  }
+  if (!resp.ok) {
+    showErr('请求失败：' + resp.status + ' ' + (await resp.text()).slice(0, 120));
+    throw new Error('http ' + resp.status);
+  }
+  return resp.json();
+}
+function showErr(msg) {
+  const b = document.getElementById('errBox');
+  b.textContent = msg; b.style.display = 'block';
+}
+function hideErr() { document.getElementById('errBox').style.display = 'none'; }
+
+function fmtMoney(v) { return '¥' + (v || 0).toFixed(2); }
+function fmtInt(v) { return (v || 0).toLocaleString('zh-CN'); }
+
+function renderOverview(usage) {
+  const t = usage.today || {}, w = usage.week || {}, a = usage.all || {};
+  const card = (h, big, sub, cls) =>
+    `<div class="card"><h3>${h}</h3><div class="big ${cls||''}">${big}</div><div class="sub">${sub}</div></div>`;
+  document.getElementById('overview').innerHTML =
+    `<div class="cards">
+      ${card('今日请求', fmtInt(t.requests), '本周 ' + fmtInt(w.requests) + ' · 总计 ' + fmtInt(a.requests))}
+      ${card('今日错误', fmtInt(t.errors), '本周 ' + fmtInt(w.errors) + ' · 总计 ' + fmtInt(a.errors), t.errors ? 'danger' : 'ok')}
+      ${card('今日费用', fmtMoney(t.total_cost), '本周 ' + fmtMoney(w.total_cost) + ' · 总计 ' + fmtMoney(a.total_cost))}
+      ${card('平均延迟', (t.avg_latency_ms || 0) + ' ms', '本周 ' + (w.avg_latency_ms || 0) + ' ms')}
+      ${card('缓存命中率', ((t.cache_hit_rate || 0) * 100).toFixed(1) + '%', '今日命中 ' + fmtInt(t.cache_hits))}
+      ${card('今日 Token', fmtInt(t.total_tokens), '本周 ' + fmtInt(w.total_tokens))}
+    </div>`;
+}
+
+function renderRank(usage, sessions) {
+  const pc = (usage.all && usage.all.per_character) || {};
+  const sc = (sessions && sessions.by_character) || {};
+  const names = new Set([...Object.keys(pc), ...Object.keys(sc)]);
+  const rows = [...names].map(ch => ({
+    ch,
+    req: (pc[ch] && pc[ch].requests) || 0,
+    cost: (pc[ch] && pc[ch].cost) || 0,
+    err: (pc[ch] && pc[ch].errors) || 0,
+    sess: (sc[ch] && sc[ch].sessions) || 0,
+    turns: (sc[ch] && sc[ch].turns) || 0,
+  })).sort((a, b) => b.req - a.req);
+  document.getElementById('rankBadge').textContent = rows.length + ' 个角色';
+  if (!rows.length) { document.getElementById('rankTable').innerHTML = '<div class="empty">暂无使用记录</div>'; return; }
+  document.getElementById('rankTable').innerHTML =
+    '<table><thead><tr><th>角色</th><th class="num">请求</th><th class="num">会话</th><th class="num">轮次</th><th class="num">费用</th><th class="num">错误</th></tr></thead><tbody>' +
+    rows.map(r => `<tr><td>${esc(r.ch)}</td><td class="num">${fmtInt(r.req)}</td><td class="num">${fmtInt(r.sess)}</td><td class="num">${fmtInt(r.turns)}</td><td class="num">${fmtMoney(r.cost)}</td><td class="num">${r.err ? '<span style="color:#B04A3A">'+r.err+'</span>' : '0'}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+function renderWaterfall(usage) {
+  const items = ((usage && usage.today && usage.today.recent_stages) || []).slice(0, 15);
+  document.getElementById('waterfallBadge').textContent = items.length + ' 条';
+  if (!items.length) {
+    document.getElementById('waterfallList').innerHTML = '<div class="empty">暂无阶段耗时数据（重启后端并完成至少一次对话后出现）</div>';
+    return;
+  }
+  const STAGES = [
+    ['retrieval_ms', '检索'],
+    ['rerank_ms', '重排'],
+    ['first_token_ms', '首字'],
+    ['verify_ms', '引用核查'],
+  ];
+  const fmtMs = v => v >= 1000 ? (v / 1000).toFixed(1) + 's' : Math.round(v) + 'ms';
+  const fmtTime = ts => { const d = new Date(ts * 1000); return d.toTimeString().slice(0, 8); };
+  document.getElementById('waterfallList').innerHTML =
+    '<table><thead><tr><th>时间</th><th>角色</th><th class="num">总延迟</th><th>阶段耗时（检索 → 重排 → 首字 → 引用核查）</th></tr></thead><tbody>' +
+    items.map(it => {
+      const chips = STAGES.map(([k, label]) => it.stages && it.stages[k] != null
+        ? `<span class="wf-chip">${label} ${fmtMs(it.stages[k])}</span>` : '').join(' ');
+      const total = fmtMs(it.latency_ms || 0);
+      return `<tr><td>${fmtTime(it.ts)}</td><td>${esc(it.character || '-')}</td><td class="num">${total}</td><td>${chips || '<span class="empty">—</span>'}</td></tr>`;
+    }).join('') +
+    '</tbody></table>';
+}
+
+function renderGraphs(graphs) {
+  document.getElementById('graphBadge').textContent = (graphs || []).length + ' 个';
+  if (!graphs || !graphs.length) {
+    document.getElementById('graphList').innerHTML = '<div class="empty">尚未构建任何知识图谱（角色首次被对话后由系统自动后台构建，也可在此手动触发）</div>';
+    return;
+  }
+  document.getElementById('graphList').innerHTML =
+    '<table><thead><tr><th>角色</th><th class="num">实体</th><th class="num">关系</th></tr></thead><tbody>' +
+    graphs.map(g => `<tr><td>${esc(g.character)}</td><td class="num">${fmtInt(g.entities)}</td><td class="num">${fmtInt(g.relations)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+function renderCustom(custom) {
+  document.getElementById('customBadge').textContent = (custom || []).length + ' 个';
+  if (!custom || !custom.length) {
+    document.getElementById('customList').innerHTML = '<div class="empty">暂无用户自建角色</div>';
+    return;
+  }
+  document.getElementById('customList').innerHTML =
+    '<table><thead><tr><th>名称</th><th>ID</th><th>创建时间</th></tr></thead><tbody>' +
+    custom.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.id)}</td><td>${c.created_at ? new Date(c.created_at * 1000).toLocaleString('zh-CN', {hour12:false}) : '-'}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+function renderRoundtables(rt) {
+  const total = (rt && rt.total) || 0;
+  const items = (rt && rt.recent) || [];
+  document.getElementById('rtBadge').textContent = total + ' 场';
+  if (!items.length) {
+    document.getElementById('rtList').innerHTML = '<div class="empty">暂无圆桌会议记录（完成一场圆桌辩论后自动落库）</div>';
+    return;
+  }
+  document.getElementById('rtList').innerHTML =
+    '<table><thead><tr><th>议题</th><th>与会者</th><th class="num">轮数</th><th>时间</th><th>操作</th></tr></thead><tbody>' +
+    items.map(it => {
+      const sp = (it.speakers || []).map(s => esc(s.name || s.id || '?')).join(' · ');
+      const url = '/persona/roundtable/' + encodeURIComponent(it.session_id);
+      return `<tr><td>${esc(it.topic)}</td><td>${sp}</td><td class="num">${it.rounds || 1}</td><td>${TS2(it.updated_at || it.created_at)}</td>` +
+        `<td><a href="${url}" target="_blank">查看</a> · <button class="btn sm ghost" onclick="delRoundtable('${it.session_id}')">删除</button></td></tr>`;
+    }).join('') +
+    '</tbody></table>';
+}
+
+async function delRoundtable(sessionId) {
+  if (!confirm('确认删除这场圆桌会议记录？')) return;
+  try {
+    const resp = await fetch('/persona/roundtable/' + encodeURIComponent(sessionId), { method: 'DELETE' });
+    if (resp.status === 403) { showErr('令牌无效或缺失'); return; }
+    if (!resp.ok) { showErr('删除失败：' + resp.status); return; }
+    await refresh();
+  } catch (e) { showErr('删除异常：' + e.message); }
+}
+
+function renderFeedback(fb) {
+  const counts = (fb && fb.counts) || {};
+  const pending = counts.pending || 0, resolved = counts.resolved || 0, replied = counts.replied || 0;
+  document.getElementById('fbBadge').textContent = '待处理 ' + pending;
+  document.getElementById('fbCounts').innerHTML =
+    `待处理 <b style="color:#E0B860">${pending}</b> · 已处理 <b style="color:#6FBf8F">${resolved}</b> · 已回复 <b style="color:#6FA8D8">${replied}</b>`;
+  const items = (fb && fb.recent) || [];
+  if (!items.length) { document.getElementById('fbList').innerHTML = '<div class="empty">暂无反馈</div>'; return; }
+  document.getElementById('fbList').innerHTML = items.map(it => {
+    const meta = [TS2(it.ts), it.character ? '角色：' + it.character : '角色：未指定', it.contact ? '联系方式：' + it.contact : '匿名']
+      .map(x => `<span>${esc(x)}</span>`).join('');
+    const reply = it.reply ? `<div class="reply">回复：${esc(it.reply)}</div>` : '';
+    const actions = it.status === 'pending'
+      ? `<button class="btn sm ghost" onclick="markStatus(${it.id},'resolved')">标记已处理</button>
+         <input id="r${it.id}" placeholder="填写回复内容…"><button class="btn sm" onclick="markStatus(${it.id},'replied')">回复并标记</button>`
+      : `<button class="btn sm ghost" onclick="markStatus(${it.id},'pending')">重置为待处理</button>`;
+    return `<div class="fb-item">
+      <div class="meta">${meta}</div>
+      <div class="content">${esc(it.content)}</div>
+      ${reply}
+      <div class="fb-actions">${actions}</div>
+    </div>`;
+  }).join('');
+}
+
+function TS2(ts) { return ts ? new Date(ts * 1000).toLocaleString('zh-CN', {hour12:false}) : '-'; }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+async function markStatus(id, status) {
+  let reply = '';
+  if (status === 'replied') {
+    reply = (document.getElementById('r' + id) || {}).value || '';
+    if (!reply.trim()) { alert('请先填写回复内容'); return; }
+  }
+  try {
+    const resp = await fetch('/admin/feedback/' + id + '/status?token=' + encodeURIComponent(getToken()), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status, reply }),
+    });
+    if (resp.status === 403) { showErr('令牌无效或缺失'); return; }
+    if (!resp.ok) { showErr('操作失败：' + resp.status); return; }
+    await refresh();
+  } catch (e) { showErr('操作异常：' + e.message); }
+}
+
+async function refresh() {
+  try {
+    const d = await fetchJSON('/admin/dashboard');
+    hideErr();
+    renderOverview(d.usage);
+    renderRank(d.usage, d.sessions);
+    renderWaterfall(d.usage);
+    renderGraphs(d.graphs);
+    renderCustom(d.custom_characters);
+    renderRoundtables(d.roundtables);
+    renderFeedback(d.feedback);
+  } catch (e) { /* 错误已在 fetchJSON 中展示 */ }
+}
+
+document.getElementById('refreshBtn').addEventListener('click', refresh);
+document.getElementById('tokenInput').addEventListener('keydown', e => { if (e.key === 'Enter') refresh(); });
+refresh();
+</script>
+</body>
+</html>

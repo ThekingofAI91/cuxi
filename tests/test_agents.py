@@ -16,7 +16,6 @@ from framework.supervisor import (
 from framework.retrieval_agent import retrieval_agent
 from framework.analysis_agent import analysis_agent
 from framework.verification_agent import verification_agent
-from framework.summarizer import summarizer
 from scenes.persona_chat.config import persona_chat_config
 
 
@@ -178,27 +177,6 @@ class TestAgentNodes:
         assert "verification" in result
         assert "route_history" in result
         assert "verification_agent" in result["route_history"]
-    
-    @pytest.mark.asyncio
-    async def test_summarizer(self):
-        """测试摘要 Agent"""
-        state: AgentState = {
-            "query": "测试摘要",
-            "session_id": "test",
-            "retrieved_docs": [],
-            "analysis": "",
-            "code_result": "",
-            "verification": "",
-            "final_answer": "",
-            "history": [],
-            "route_history": [],
-            "next_agent": None,
-            "error": None,
-        }
-        
-        result = await summarizer(state)
-        assert "route_history" in result
-        assert "summarizer" in result["route_history"]
 
 
 # ============================================================
@@ -221,5 +199,5 @@ class TestGraph:
         assert "retriever" in graph.nodes
         assert "analyzer" in graph.nodes
         assert "verifier" in graph.nodes
-        assert "summarizer" in graph.nodes
+        assert "summarizer" not in graph.nodes
         assert "coder" not in graph.nodes

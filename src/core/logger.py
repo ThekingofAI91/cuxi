@@ -15,6 +15,7 @@ import sys
 from contextvars import ContextVar
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Optional
 
 _request_id: ContextVar[str] = ContextVar("request_id", default="-")
 
@@ -73,3 +74,30 @@ def get_logger(name: str) -> logging.Logger:
     if name not in _loggers:
         _loggers[name] = _build_logger(name)
     return _loggers[name]
+
+
+# ============================================================
+# 阶段耗时埋点（延迟瀑布）
+# ============================================================
+# 一次请求内按阶段记录耗时（检索/重排/首字/核查…），随 monitor.record 落盘，
+# 管理后台渲染"最近请求的延迟瀑布"，性能问题一眼定位到阶段。
+# ContextVar 与 request_id 同机制：create_task 复制上下文，请求间天然隔离。
+
+_stages: ContextVar[Optional[dict]] = ContextVar("stage_timings", default=None)
+
+
+def stages_begin() -> None:
+    """请求入口调用：开始收集本请求的阶段耗时"""
+    _stages.set({})
+
+
+def stage_mark(name: str, ms: float) -> None:
+    """记录某阶段耗时（毫秒）；同名阶段取最大值（多次调用如两轮检索）"""
+    ctx = _stages.get()
+    if ctx is not None:
+        ctx[name] = max(ctx.get(name, 0), round(ms))
+
+
+def stages_snapshot() -> Optional[dict]:
+    """取走本请求的阶段耗时（record 后自动清空，防止串请求）"""
+    return _stages.get()

@@ -34,8 +34,23 @@ class AgentState(TypedDict):
     info_gap_questions: Optional[list[dict]]  # InfoGap Agent 检测到的信息缺口（追问用）
 
     # ---- 角色人设 ----
-    character_role_prompt: Optional[str]  # 角色 role_prompt（persona 场景注入）
+    character_role_prompt: Optional[str]  # 角色 role_prompt（persona 场景注入，已含酒馆式构件）
     enable_verification: Optional[bool]    # 是否启用引用核查（沉浸型人设关闭）
+    # 后历史指令：插在对话历史之后再钉一次角色（对应 SillyTavern Author's Note）。
+    # 模型对越靠后的内容越敏感，历史一长人设就会被稀释，靠这条防长对话漂移。
+    post_history_directive: Optional[str]
+    # 按角色的采样覆盖：{"temperature":..,"top_p":..,"frequency_penalty":..}；
+    # 仅 OpenAI 兼容参数，缺省/None 表示沿用代码默认值，让不同角色有不同的说话手感。
+    sampling: Optional[dict]
+
+    # ---- 分区与检索策略 ----
+    zone: Optional[str]                   # "education" | "entertainment"
+    light_retrieval: Optional[bool]       # 轻量召回：跳过改写/重排/图谱，仅原始问题 top-3
+    skip_retrieval: Optional[bool]        # 酒馆式零检索：角色卡构件齐全时完全不查向量库
+    graph_used: Optional[bool]            # 本轮是否触发了知识图谱增强
+
+    # ---- 用户长期记忆 ----
+    user_memory: Optional[str]            # 已渲染的记忆条目块（空串/None = 无记忆，不注入）
 
     # ---- 流式输出 ----
     stream_callback: Optional[Any]      # 流式 token 回调 (async callable, token: str) -> None

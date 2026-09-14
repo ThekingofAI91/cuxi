@@ -1,0 +1,21 @@
+# 一键起服务：docker compose up -d --build
+# 首次构建约 10-15 分钟（torch CPU + 依赖），启动后 20-30 秒模型预热
+services:
+  app:
+    build: .
+    container_name: gkrm-app
+    ports:
+      - "127.0.0.1:8000:8000"   # 只绑回环，外网流量一律走 nginx；没有 nginx 就改成 "8000:8000"
+    env_file: .env
+    volumes:
+      - ./chroma_db:/app/chroma_db      # 向量库（841MB，随代码一起传）
+      - ./data:/app/data                # 会话/账号 SQLite
+      - ./logs:/app/logs                # 应用日志
+      - model_cache:/app/models         # HF 模型缓存（首次启动自动下载，重启不重下）
+    restart: unless-stopped
+    # 4G 内存机器的保守参数（8G 可删掉这组）
+    environment:
+      TORCH_NUM_THREADS: "4"
+
+volumes:
+  model_cache:

@@ -7,12 +7,46 @@ reranker.py — Cross-Encoder 重排序
 
 from __future__ import annotations
 
+import hashlib
 import threading
+from collections import OrderedDict
 from typing import Optional
 
 from langchain_core.documents import Document
 
 from src.core.config import settings
+
+
+# ============================================================
+# 精排分数缓存（LRU）
+# ============================================================
+# 首页的"建议问题"、高频问题会被反复提问——同一 (query, doc) 对的精排分数
+# 完全确定，缓存后命中即零推理（省 ~1s/次）。键含文档内容指纹，语料重组后
+# 自动失效。进程内缓存，多 worker 各自维护（可接受）。
+_SCORE_CACHE: OrderedDict[tuple, float] = OrderedDict()
+_SCORE_CACHE_MAX = 2000
+_SCORE_CACHE_LOCK = threading.Lock()
+
+
+def _score_cache_get(key: tuple) -> Optional[float]:
+    with _SCORE_CACHE_LOCK:
+        v = _SCORE_CACHE.get(key)
+        if v is not None:
+            _SCORE_CACHE.move_to_end(key)
+        return v
+
+
+def _score_cache_put(key: tuple, score: float) -> None:
+    with _SCORE_CACHE_LOCK:
+        _SCORE_CACHE[key] = score
+        _SCORE_CACHE.move_to_end(key)
+        while len(_SCORE_CACHE) > _SCORE_CACHE_MAX:
+            _SCORE_CACHE.popitem(last=False)
+
+
+def _pair_cache_key(query_head: str, doc: Document) -> tuple:
+    doc_fp = hashlib.md5((doc.page_content or "")[:200].encode("utf-8")).hexdigest()
+    return (query_head, doc_fp)
 
 
 # ============================================================
@@ -65,12 +99,44 @@ class Reranker:
                             self.model_name,
                             device=self.device,
                         )
+                        if getattr(settings, "rerank_int8_quantize", False):
+                            self._apply_int8_quantization(self._model)
                         print("[Reranker] 模型加载完成")
                     except Exception as e:
                         print(f"[Reranker] ⚠️ 模型加载失败: {e}")
                         print("[Reranker] 使用降级方案（直接返回原始顺序）")
                         self._model = "fallback"
         return self._model
+
+    @staticmethod
+    def _apply_int8_quantization(model) -> None:
+        """
+        对 encoder 层的 Linear 做 int8 动态量化（CPU 推理实测 1.57x）。
+
+        只量化 encoder：整模型量化在 torch 2.13 上会破坏 transformers 的输入解包
+        （embeddings 层把 BatchEncoding 当 tensor 用，直接 AttributeError），且
+        embeddings / 分类头只占计算量的 ~1%，量化收益趋近于零。失败时静默回退
+        fp32（量化是加速项，不该让加载挂掉）。
+        """
+        try:
+            import time
+
+            import torch
+            # CrossEncoder 是包装层，transformers 模型在其 .model 属性里；
+            # XLM-RoBERTa 系的 encoder 路径是 .roberta.encoder，BERT 系是 .bert.encoder
+            target = getattr(model, "model", model)
+            core = getattr(target, "roberta", None) or getattr(target, "bert", None) or target
+            encoder = getattr(core, "encoder", None)
+            if encoder is None:
+                print("[Reranker] 未定位到 encoder 层，跳过 int8 量化")
+                return
+            t0 = time.time()
+            core.encoder = torch.ao.quantization.quantize_dynamic(
+                encoder, {torch.nn.Linear}, dtype=torch.qint8
+            )
+            print(f"[Reranker] int8 动态量化完成（转换 {time.time() - t0:.1f}s，一次性，CPU 推理 ~1.57x）")
+        except Exception as e:
+            print(f"[Reranker] ⚠️ int8 量化失败（回退 fp32）: {e}")
 
     def rerank(
         self,
@@ -124,25 +190,38 @@ class Reranker:
         # 长文本（重组后块 ~1000 字符）会导致 CPU 全量推理 60s+；截到 300 字符 ≈ 300 token，
         # 排序主要依赖开头语义，精度损失可忽略，耗时回落到 3-5s。
         max_pair_chars = 200
-        pairs = [
-            (query[:max_pair_chars], doc.page_content[:max_pair_chars])
-            for doc in candidates
-        ]
+        query_head = query[:max_pair_chars]
 
-        # 推理有界并行：信号量内同时最多 rerank_max_concurrent 个 CPU 推理，
-        # 超出排队；比全串行吞吐高，比无界并发稳定
-        with self._predict_sem:
-            # 限制输入长度：chunk 通常数百字，尾部对排序贡献小，
-            # 截断到 256 token 可显著加速 CPU 推理（512→256 约省一半时间）；
-            # 旧版 API 不支持则全量推理
-            try:
-                scores = m.predict(pairs, show_progress_bar=False, max_length=256)
-            except TypeError:
-                scores = m.predict(pairs, show_progress_bar=False)
+        # 分数缓存：命中的对不进推理，只精排未命中的（重复问题可整批命中 → 零推理）
+        cached_scores: dict[int, float] = {}
+        to_predict: list[tuple[int, tuple[str, str]]] = []
+        for idx, doc in enumerate(candidates):
+            key = _pair_cache_key(query_head, doc)
+            hit = _score_cache_get(key)
+            if hit is not None:
+                cached_scores[idx] = hit
+            else:
+                to_predict.append((idx, (query_head, doc.page_content[:max_pair_chars])))
+
+        if to_predict:
+            pairs = [p for _, p in to_predict]
+            # 推理有界并行：信号量内同时最多 rerank_max_concurrent 个 CPU 推理，
+            # 超出排队；比全串行吞吐高，比无界并发稳定
+            with self._predict_sem:
+                # 限制输入长度：chunk 通常数百字，尾部对排序贡献小，
+                # 截断到 256 token 可显著加速 CPU 推理（512→256 约省一半时间）；
+                # 旧版 API 不支持则全量推理
+                try:
+                    scores = m.predict(pairs, show_progress_bar=False, max_length=256)
+                except TypeError:
+                    scores = m.predict(pairs, show_progress_bar=False)
+            for (idx, _p), score in zip(to_predict, scores):
+                cached_scores[idx] = float(score)
+                _score_cache_put(_pair_cache_key(query_head, candidates[idx]), float(score))
 
         # 将分数附加到 metadata
-        for doc, score in zip(candidates, scores):
-            doc.metadata["rerank_score"] = float(score)
+        for idx, doc in enumerate(candidates):
+            doc.metadata["rerank_score"] = cached_scores.get(idx, 0.0)
 
         # 按分数降序排序
         ranked = sorted(candidates, key=lambda x: x.metadata.get("rerank_score", 0.0), reverse=True)

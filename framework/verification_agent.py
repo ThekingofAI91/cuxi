@@ -61,7 +61,7 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
 
         for i, claim in enumerate(claims, 1):
             # 在原著检索结果中查找支持证据
-            evidence, match_score = _find_evidence(claim, retrieved_docs)
+            evidence, match_score, inferred = _find_evidence(claim, retrieved_docs)
             verdict, confidence = _evaluate_claim(claim, evidence, match_score)
             print(f"[Verification Agent] 论断{i} 得分={match_score:.2f} 判定={verdict}")
             verification_parts.append(
@@ -77,7 +77,7 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
 
             # 有依据的论断收集进"引用出处"
             if evidence:
-                citation_parts.append(_format_citation_item(i, claim, evidence))
+                citation_parts.append(_format_citation_item(i, claim, evidence, inferred))
 
         # 复杂论断（数量较多时）用 LLM 辅助核查
         llm_verification = ""
@@ -256,7 +256,7 @@ def _char_ngrams(text: str, min_n: int = 2, max_n: int = 4) -> set[str]:
     return grams
 
 
-def _find_evidence(claim: str, docs: list) -> tuple[str, float]:
+def _find_evidence(claim: str, docs: list) -> tuple[str, float, bool]:
     """
     在原著检索结果中查找支持证据
 
@@ -264,7 +264,7 @@ def _find_evidence(claim: str, docs: list) -> tuple[str, float]:
     长句论断先按标点拆分子句，取子句最高重合度，避免整句 n-gram 被修饰成分稀释。
     """
     if not docs:
-        return "", 0.0
+        return "", 0.0, False
 
     # 按标点拆分子句（2-4 字 n-gram 至少需要若干有效字符才有意义）
     sub_sentences = [s.strip() for s in re.split(r"[，。；、！？：…,;!?:\n]", claim)]
@@ -273,10 +273,11 @@ def _find_evidence(claim: str, docs: list) -> tuple[str, float]:
     ]
     claim_gram_sets = [g for g in claim_gram_sets if len(g) >= 2]
     if not claim_gram_sets:
-        return "", 0.0
+        return "", 0.0, False
 
     best_evidence = ""
     best_score = 0.0
+    best_inferred = False
 
     for doc in docs:
         content = doc.page_content
@@ -293,14 +294,18 @@ def _find_evidence(claim: str, docs: list) -> tuple[str, float]:
             best_score = score
             source = doc.metadata.get("source", "未知来源")
             heading = doc.metadata.get("heading", "")
+            # 知识图谱证据：关系是图谱归纳的推断，非人物逐字原话
+            best_inferred = bool(doc.metadata.get("kg_inferred", False))
             preview = content[:200] + "..." if len(content) > 200 else content
 
             best_evidence = f"> 来源: {source}"
             if heading:
                 best_evidence += f" | 章节: {heading}"
+            if best_inferred:
+                best_evidence += "\n> ⚠️ 知识图谱推断关系，非人物逐字原话"
             best_evidence += f"\n> {preview}"
 
-    return best_evidence, best_score
+    return best_evidence, best_score, best_inferred
 
 
 def _evaluate_claim(claim: str, evidence: str, match_score: float = 0.0) -> tuple[str, float]:
@@ -341,7 +346,7 @@ def _format_verification_item(
     return item
 
 
-def _format_citation_item(index: int, claim: str, evidence: str) -> str:
+def _format_citation_item(index: int, claim: str, evidence: str, inferred: bool = False) -> str:
     """格式化"引用出处"条目（紧凑，适合拼到最终回答）"""
     # 从证据中提取来源与章节
     source_match = re.search(r"来源: (.+?)(?:\s*\||\n|$)", evidence)
@@ -351,6 +356,9 @@ def _format_citation_item(index: int, claim: str, evidence: str) -> str:
 
     claim_short = claim[:40] + ("…" if len(claim) > 40 else "")
     location = f"{source}｜{heading}" if heading else source
+    # 知识图谱证据是推断关系，标注出来，避免被当成人物原话出处
+    if inferred:
+        location += "（知识图谱推断）"
     return f"{index}. 《{location}》 ← 「{claim_short}」"
 
 
