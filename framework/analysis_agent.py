@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from src.core.llm import get_chat_llm
+from src.core.llm import get_chat_llm, astream_nonempty, ainvoke_nonempty
 from pydantic import BaseModel, Field
 
 from src.core.config import settings
@@ -39,6 +39,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
     history = state.get("history", [])
     character_role_prompt = state.get("character_role_prompt", "")
     stream_callback = state.get("stream_callback")
+    zone = state.get("zone", "education")  # "education" | "entertainment"
     print(f"\n[Analysis Agent] 🔍 正在分析: {query}")
     print(f"[Analysis Agent] 基于 {len(retrieved_docs)} 条检索结果")
     print(f"[Analysis Agent] 对话历史轮次: {len(history)}")
@@ -50,7 +51,24 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
         # supervisor 直接以 analysis 作为最终回答，省掉一次长 LLM 二次生成。
         if character_role_prompt:
             from framework.supervisor import _generate_direct_response
-            context = _build_context(retrieved_docs) if retrieved_docs else None
+            # 上下文格式按分区：教育区保留来源标注（要可溯源），
+            # 娱乐区换成轻量记忆式（标注来源会诱导模型说"根据《xxx》"，正是要压掉的 AI 味）
+            context = None
+            if retrieved_docs:
+                # 实验性上下文压缩（默认关）：生成前把 chunk 压成面向问题的摘要
+                if (
+                    getattr(settings, "context_compression_enabled", False)
+                    and zone != "entertainment"
+                ):
+                    try:
+                        from src.retrieval.context_compressor import compress_docs
+                        retrieved_docs = await compress_docs(query, retrieved_docs)
+                    except Exception as _ce:
+                        print(f"[Analysis Agent] ⚠️ 上下文压缩失败（用原文）: {_ce}")
+                context = (_build_light_context(retrieved_docs)
+                           if zone == "entertainment" else _build_context(retrieved_docs))
+            # 娱乐区：极短回答（~300 token / 约 200 字），像真人微信聊，不堆长篇
+            _mt = 300 if zone == "entertainment" else None
             answer = await _generate_direct_response(
                 query,
                 history,
@@ -58,6 +76,11 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                 stream_callback,
                 session_id=state.get("session_id"),
                 context=context,
+                max_tokens=_mt,
+                zone=zone,
+                post_history_directive=state.get("post_history_directive"),
+                sampling=state.get("sampling"),
+                user_memory=state.get("user_memory"),
             )
             print("[Analysis Agent] ✅ 角色口吻回答完成（流式）")
             return {
@@ -167,12 +190,18 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 
             # 构建消息列表，注入角色人设和对话历史
             if character_role_prompt:
+                from scenes.persona_chat.config import persona_chat_config
+                _voice = getattr(persona_chat_config, "persona_voice_directive", "")
                 system_msg = f"""{character_role_prompt}
 
 请始终保持角色设定的语气、风格和知识边界来回答问题。
 如果问题超出你的知识范围，诚实说明。
 回答要简洁友好，使用Markdown格式。
-直接回答问题，不需要提及内部处理流程。"""
+直接回答问题，不需要提及内部处理流程。
+
+{_voice}"""
+                # 角色无资料时同样需要更长篇幅与更强差异化
+                llm = get_chat_llm(temperature=0.8, max_tokens=1500)
             else:
                 system_msg = """你是一个友好、知识丰富的学术助手。
 
@@ -205,18 +234,17 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 
             messages.append(("user", query))
 
-            # 流式输出
+            # 流式输出（空响应容错：上游偶发返回 200 空壳，未推送任何 token 时安全重试）
             if stream_callback:
                 full_analysis = ""
-                async for chunk in llm.astream(messages):
-                    token = chunk.content if hasattr(chunk, 'content') else str(chunk)
+                async for token in astream_nonempty(llm, messages):
                     if token:
                         full_analysis += token
                         await stream_callback(token)
                 print(f"[Analysis Agent] ✅ LLM 流式回答完成")
             else:
-                response = await llm.ainvoke(messages)
-                full_analysis = response.content.strip()
+                response = await ainvoke_nonempty(llm, messages)
+                full_analysis = (response.content if hasattr(response, "content") else "").strip()
                 print(f"[Analysis Agent] ✅ LLM 直接回答完成")
 
         return {
@@ -249,6 +277,27 @@ def _build_context(docs: list) -> str:
         context_parts.append(f"[{i}] 来源: {source} | 章节: {heading}\n{content}")
 
     return "\n\n---\n\n".join(context_parts)
+
+
+def _build_light_context(docs: list) -> str:
+    """
+    娱乐区轻量上下文：每条只取头部（默认 150 字），且不带"来源 / 章节"标注。
+
+    两个刻意的设计：
+    1. 不标注来源——学术格式会诱导模型说出"根据《xxx》第三章"，娱乐区人设当场崩；
+       这里要的效果是"角色自己想起来了"，不是"模型在引用资料"。
+    2. 截得更短（150 字 vs 教育区 450 字）——娱乐区回答上限才 300 token，
+       塞 1350 字进去既撑大 prefill 拖慢首字，又容易把回答带成长篇大论。
+    """
+    if not docs:
+        return ""
+    per_doc = getattr(settings, "entertainment_context_chars", 150)
+    parts = []
+    for doc in docs:
+        content = " ".join((doc.page_content or "")[:per_doc].split())
+        if content:
+            parts.append("· " + content)
+    return "\n".join(parts)
 
 
 def _parse_analysis_response(text: str) -> dict:

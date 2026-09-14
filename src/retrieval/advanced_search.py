@@ -18,6 +18,7 @@ import asyncio
 import hashlib
 import pickle
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -165,11 +166,16 @@ def _load_all_documents(collection) -> list[Document]:
             limit=page_size,
             offset=offset,
         )
-        ids = raw["ids"]
+        if raw is None:
+            print("[Advanced Retrieval] ⚠️ collection.get() 返回 None，终止全量拉取")
+            break
+        ids = raw.get("ids") or []
         if not ids:
             break
-        for text, meta in zip(raw["documents"], raw["metadatas"]):
-            docs.append(Document(page_content=text, metadata=meta or {}))
+        documents = raw.get("documents") or []
+        metadatas = raw.get("metadatas") or []
+        for text, meta in zip(documents, metadatas):
+            docs.append(Document(page_content=text or "", metadata=meta or {}))
         offset += page_size
         if len(ids) < page_size:
             break
@@ -228,7 +234,13 @@ async def generate_query_variants_and_hyde(
     )
 
     try:
-        response = await llm.ainvoke([("user", prompt)])
+        # 超时保护：中转服务抖动时改写实测可达 24.8s（约 20% 概率白等）。
+        # 超过上限就放弃改写、退回原始查询检索——宁可召回略差，也不让用户干等。
+        _timeout = getattr(settings, "rewrite_timeout_sec", 10.0) or 10.0
+        response = await asyncio.wait_for(
+            llm.ainvoke([("user", prompt)]),
+            timeout=_timeout,
+        )
         content = response.content.strip()
 
         variants: list[str] = []
@@ -245,8 +257,107 @@ async def generate_query_variants_and_hyde(
             variants = [line.strip() for line in content.split("\n") if line.strip()]
 
         return variants[:num_variants], hyde_doc
+    except asyncio.TimeoutError:
+        print(f"[Multi-Query+HyDE] 超过 {getattr(settings, 'rewrite_timeout_sec', 10.0)}s 未返回，降级为原始查询检索")
+        return [], ""
     except Exception as e:
         print(f"[Multi-Query+HyDE] 生成失败: {e}")
+        return [], ""
+
+
+# ============================================================
+# 改写结果缓存 + 首字等待预算
+# ============================================================
+# 背景：改写是 1 次 LLM 往返，实测平均 8.8s、失败时 24.8s，是首字延迟的头号元凶。
+# 但改写结果对问题语义高度敏感，不能无脑复用，故用 embedding 做"近似问题"命中：
+# 命中即零等待复用，未命中才付费。embed 一次仅约 15ms，相对 8.8s 可以忽略。
+
+_rewrite_cache: list[dict] = []          # [{"vec", "variants", "hyde"}]
+_REWRITE_CACHE_MAX = 200                 # 上限，超出按 FIFO 淘汰
+_REWRITE_CACHE_MIN_SIM = 0.88            # 余弦相似度门槛：低于此值视为不同问题
+_bg_rewrite_tasks: set = set()           # 持有后台任务引用，防止被 GC
+
+
+def _norm_vec(text: str):
+    """把文本编码成单位向量（同步，调用方负责放线程）"""
+    from src.retrieval.embedder import get_embedder
+    import numpy as np
+    v = np.asarray(get_embedder().embed_query(text), dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else v
+
+
+async def _rewrite_cache_lookup(question: str):
+    """语义缓存查找；命中返回 (variants, hyde, sim)，否则返回 None"""
+    if not _rewrite_cache:
+        return None  # 缓存为空时不做 embed，避免为首次查询付模型加载成本
+    try:
+        import numpy as np
+        vec = await asyncio.to_thread(_norm_vec, question)
+        sims = [float(np.dot(vec, it["vec"])) for it in _rewrite_cache]
+        best = max(range(len(sims)), key=lambda i: sims[i])
+        if sims[best] >= _REWRITE_CACHE_MIN_SIM:
+            it = _rewrite_cache[best]
+            return it["variants"], it["hyde"], sims[best]
+    except Exception as e:
+        print(f"[改写缓存] 查询失败（忽略）: {e}")
+    return None
+
+
+async def _rewrite_cache_store(question: str, variants: list[str], hyde: str) -> None:
+    if not variants and not hyde:
+        return
+    try:
+        vec = await asyncio.to_thread(_norm_vec, question)
+        _rewrite_cache.append({"vec": vec, "variants": variants, "hyde": hyde})
+        while len(_rewrite_cache) > _REWRITE_CACHE_MAX:
+            _rewrite_cache.pop(0)
+    except Exception as e:
+        print(f"[改写缓存] 写入失败（忽略）: {e}")
+
+
+def _on_background_rewrite_done(question: str, task) -> None:
+    """超时放弃后，后台改写跑完的结果补进缓存——这次白等了，下次就能零等待"""
+    _bg_rewrite_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        variants, hyde = task.result()
+    except Exception:
+        return
+    if variants or hyde:
+        asyncio.create_task(_rewrite_cache_store(question, variants, hyde))
+
+
+async def _rewrite_with_budget(question: str, llm: ChatOpenAI, num_variants: int):
+    """
+    带缓存与等待预算的改写。
+
+    1) 缓存命中 → 零等待复用（省掉整次 LLM 往返）
+    2) 未命中 → 最多等 rewrite_deadline_sec 秒
+       - 按时返回 → 用改写结果，并写入缓存
+       - 超时    → 放弃改写（先用原始查询检索，保住首字延迟），
+                   但任务不取消，后台跑完后补进缓存
+    """
+    cached = await _rewrite_cache_lookup(question)
+    if cached is not None:
+        variants, hyde, sim = cached
+        print(f"[Advanced Retrieval] 改写缓存命中（相似度 {sim:.3f}），跳过 LLM 调用")
+        return variants, hyde
+
+    deadline = getattr(settings, "rewrite_deadline_sec", 2.0) or 2.0
+    task = asyncio.create_task(
+        generate_query_variants_and_hyde(question, llm, num_variants)
+    )
+    try:
+        # shield：超时只取消外层等待，不取消改写任务本身
+        variants, hyde = await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
+        await _rewrite_cache_store(question, variants, hyde)
+        return variants, hyde
+    except asyncio.TimeoutError:
+        _bg_rewrite_tasks.add(task)
+        task.add_done_callback(lambda t: _on_background_rewrite_done(question, t))
+        print(f"[Advanced Retrieval] 改写超过 {deadline}s，改用原始查询检索（后台继续补全缓存）")
         return [], ""
 
 
@@ -296,101 +407,154 @@ async def advanced_retrieval(
 
     embedder = get_embedder()
 
-    # ---- Step 1: 一次 LLM 调用同时生成查询变体和 HyDE 文档 ----
+    # ============================================================
+    # 改写与"原始查询检索"重叠执行（教育区延迟优化）
+    # ============================================================
+    # 旧流程串行：先等改写 LLM（预算 2s）→ 再做向量/BM25。
+    # 但改写只服务"变体 + HyDE"这几路查询，原始查询的向量 + BM25 根本不依赖它——
+    # 完全可以并行。新流程：
+    #   1) 改写任务直接 create_task 挂起（不 await）
+    #   2) 立即对原始查询跑向量 + BM25（与改写 LLM 重叠）
+    #   3) 原始路跑完后再收改写结果（_rewrite_with_budget 的等待预算从任务启动起算，
+    #      原始路通常几百 ms~2s，届时改写多半已就绪 → 实际额外等待趋近 0）
+    #   4) 有变体/HyDE 再补第二轮向量 + BM25，与原始路结果一起 RRF 合并
+    # 检索语义与旧实现完全一致（同样的查询集合、同样的合并方式），只是时序重叠。
     if use_multi_query or use_hyde:
-        query_variants, hyde_doc = await generate_query_variants_and_hyde(question, llm, num_variants)
+        rewrite_task = asyncio.create_task(
+            _rewrite_with_budget(question, llm, num_variants)
+        )
     else:
-        query_variants, hyde_doc = [], ""
-
-    # 构建所有查询列表
-    all_queries = [question]  # 原始查询
-    all_queries.extend(query_variants)
-    if hyde_doc:
-        all_queries.append(hyde_doc)
-
-    print(f"[Advanced Retrieval] 共 {len(all_queries)} 个查询:")
-    for i, q in enumerate(all_queries):
-        label = "原始" if i == 0 else (f"HyDE" if i == len(all_queries) - 1 and hyde_doc else "变体")
-        print(f"  [{label}] {q[:60]}...")
-
-    # ---- Step 2: 对全部查询做批量向量检索（一次批量 embed + 一次 collection.query）----
-    # 性能优化：之前每路单独 embed + 单独 query（4 次 ChromaDB 调用），
-    # SQLite 内部有锁导致互相竞争；合并为 1 次批量嵌入 + 1 次批量查询。
-    doc_candidates: dict[str, dict] = {}  # doc_id -> {doc, metadata}
-    query_results_list: list[list[str]] = []  # 每路的 ranked doc_ids
+        rewrite_task = None
 
     fetch_k = top_k * 2  # 多取一些用于合并
 
-    # 一次批量 encode 全部查询（sentence-transformers 内部 batch 并行）
-    embeddings = await asyncio.to_thread(embedder.embed_documents, all_queries)
-
-    # 一次 ChromaDB 查询全部向量（单次调用返回 len(all_queries) 组结果）
-    query_result = await asyncio.to_thread(
-        collection.query,
-        query_embeddings=embeddings,
-        n_results=min(fetch_k, 50),
-        include=["documents", "metadatas", "distances"],
-    )
-
-    if query_result and query_result["documents"]:
-        for group_idx in range(len(query_result["documents"])):
-            ranked_ids: list[str] = []
-            group_texts = query_result["documents"][group_idx] or []
-            group_metas = query_result["metadatas"][group_idx] if query_result["metadatas"] else None
-            group_dists = query_result["distances"][group_idx] if query_result["distances"] else None
-            for i, text in enumerate(group_texts):
-                metadata = (group_metas or [{}] * len(group_texts))[i] if group_metas else {}
-                distance = (group_dists or [0.0] * len(group_texts))[i] if group_dists else 0
-
-                doc_id = _get_doc_id(text)
-
-                if doc_id not in doc_candidates:
-                    doc_candidates[doc_id] = {
-                        "text": text,
-                        "metadata": metadata,
-                        "distance": distance,
-                    }
-
-                ranked_ids.append(doc_id)
-            query_results_list.append(ranked_ids)
-
-    # ---- Step 2.5: BM25 关键词检索 ----
-    if use_bm25:
-        try:
-            # 全量拉取与索引构建/加载都是同步 CPU/IO 密集操作，放线程池避免阻塞事件循环；
-            # 内部整体加锁，并发请求只构建一次，其余直接复用缓存
-            all_docs, bm25_index = await asyncio.to_thread(_ensure_bm25_ready, collection)
-
-            print(f"[Advanced Retrieval] BM25 索引就绪: {bm25_index.document_count} 条文档")
-
-            # BM25 查询：原始 + 变体
-            # （变体含补充关键词（如“正面意义”“双重性”），BM25 精确命中可弥补
-            #  向量检索漏召回的文档；6 题小评估验证：仅原查询使 Q5 阴影
-            #  上下文 8→6、要点 8→6，故保留变体查询）
-            bm25_queries = [question] + query_variants
-            # 打分 O(10万条)，同步调用会卡死服务器，必须放线程池；
-            # 3 路并行（多核 CPU）替代串行，10 万条库从 ~3-6s 降到 ~1-2s
-            bm25_tasks = [
-                asyncio.to_thread(bm25_index.search, bq, top_k * 2)
-                for bq in bm25_queries
-            ]
-            for bq, bm25_results in zip(bm25_queries, await asyncio.gather(*bm25_tasks)):
-                if not bm25_results:
-                    continue
-
-                ranked_ids = []
-                for doc, _score in bm25_results:
-                    doc_id = _get_doc_id(doc.page_content)
+    async def _vector_pass(queries: list[str]) -> list[list[str]]:
+        """批量向量检索：一次批量 embed + 一次 ChromaDB 批量查询，返回每路 ranked doc_ids。"""
+        if not queries:
+            return []
+        embeddings = await asyncio.to_thread(embedder.embed_documents, queries)
+        query_result = await asyncio.to_thread(
+            collection.query,
+            query_embeddings=embeddings,
+            n_results=min(fetch_k, 50),
+            include=["documents", "metadatas", "distances"],
+        )
+        ranked_groups: list[list[str]] = []
+        if query_result and query_result["documents"]:
+            for group_idx in range(len(query_result["documents"])):
+                ranked_ids: list[str] = []
+                group_texts = query_result["documents"][group_idx] or []
+                group_metas = query_result["metadatas"][group_idx] if query_result["metadatas"] else None
+                group_dists = query_result["distances"][group_idx] if query_result["distances"] else None
+                for i, text in enumerate(group_texts):
+                    if text is None:
+                        continue
+                    metadata = (group_metas or [{}] * len(group_texts))[i] if group_metas else {}
+                    distance = (group_dists or [0.0] * len(group_texts))[i] if group_dists else 0
+                    doc_id = _get_doc_id(text)
                     if doc_id not in doc_candidates:
                         doc_candidates[doc_id] = {
-                            "text": doc.page_content,
-                            "metadata": doc.metadata,
-                            "distance": 0.0,
+                            "text": text,
+                            "metadata": metadata or {},
+                            "distance": distance,
                         }
                     ranked_ids.append(doc_id)
-                query_results_list.append(ranked_ids)
+                ranked_groups.append(ranked_ids)
+        return ranked_groups
+
+    async def _bm25_pass(queries: list[str], bm25_index) -> list[list[str]]:
+        """BM25 关键词检索（多路并行放线程池），返回每路 ranked doc_ids。"""
+        ranked_groups: list[list[str]] = []
+        tasks = [asyncio.to_thread(bm25_index.search, bq, top_k * 2) for bq in queries]
+        for _bq, bm25_results in zip(queries, await asyncio.gather(*tasks)):
+            if not bm25_results:
+                continue
+            ranked_ids = []
+            for doc, _score in bm25_results:
+                doc_id = _get_doc_id(doc.page_content)
+                if doc_id not in doc_candidates:
+                    doc_candidates[doc_id] = {
+                        "text": doc.page_content,
+                        "metadata": doc.metadata,
+                        "distance": 0.0,
+                    }
+                ranked_ids.append(doc_id)
+            ranked_groups.append(ranked_ids)
+        return ranked_groups
+
+    doc_candidates: dict[str, dict] = {}   # doc_id -> {text, metadata, distance}
+    query_results_list: list[list[str]] = []  # 每路的 ranked doc_ids（供 RRF）
+
+    # 阶段耗时埋点（延迟瀑布；无请求上下文时 stage_mark 自动忽略）
+    from src.core.logger import stage_mark
+
+    _retrieval_t0 = time.perf_counter()
+
+    # ---- 第一轮：原始查询的向量 + BM25（两者相互独立，并行执行）----
+    # 向量路只依赖 embedder，先发车；BM25 索引加载/构建（磁盘冷启动可达数秒）
+    # 放到并行任务里，不再阻塞向量路。RRF 按各路内部名次打分，两路结果的
+    # 合并顺序不影响得分。并发写 doc_candidates 的代码段内无 await，事件循环
+    # 单线程语义下天然互斥，无需加锁。
+    vec_task = asyncio.create_task(_vector_pass([question]))
+
+    async def _bm25_first_pass():
+        bm25_ready = await asyncio.to_thread(_ensure_bm25_ready, collection)
+        print(f"[Advanced Retrieval] BM25 索引就绪: {bm25_ready[1].document_count} 条文档")
+        return bm25_ready[1], await _bm25_pass([question], bm25_ready[1])
+
+    bm25_task = asyncio.create_task(_bm25_first_pass()) if use_bm25 else None
+    bm25_index = None
+
+    try:
+        query_results_list.extend(await vec_task)
+    except Exception:
+        # 向量路失败时取消仍在跑的 BM25 任务，避免"异常从未被读取"告警
+        if bm25_task is not None and not bm25_task.done():
+            bm25_task.cancel()
+        raise
+
+    if bm25_task is not None:
+        try:
+            bm25_index, first_groups = await bm25_task
+            query_results_list.extend(first_groups)
         except Exception as e:
-            print(f"[Advanced Retrieval] ⚠️ BM25 检索不可用，跳过: {e}")
+            print(f"[Advanced Retrieval] ⚠️ BM25 检索失败，跳过: {e}")
+
+    # ---- 收改写结果（预算从任务启动时已开始计算，此处通常只需极短等待）----
+    if rewrite_task is not None:
+        try:
+            query_variants, hyde_doc = await rewrite_task
+        except Exception as e:
+            print(f"[Advanced Retrieval] ⚠️ 改写任务异常，退化为仅原始查询: {e}")
+            query_variants, hyde_doc = [], ""
+    else:
+        query_variants, hyde_doc = [], ""
+
+    # 构建第二路查询列表（变体 + HyDE）
+    extra_queries: list[str] = []
+    extra_queries.extend(query_variants)
+    if hyde_doc:
+        extra_queries.append(hyde_doc)
+
+    if extra_queries:
+        print(f"[Advanced Retrieval] 改写补充 {len(extra_queries)} 路查询:")
+        for q in extra_queries:
+            print(f"  [改写] {q[:60]}...")
+
+        # 第二轮：变体 + HyDE 的向量检索
+        try:
+            query_results_list.extend(await _vector_pass(extra_queries))
+        except Exception as e:
+            print(f"[Advanced Retrieval] ⚠️ 变体向量检索失败，跳过: {e}")
+
+        # 第二轮：变体的 BM25 检索（HyDE 是长文档，不进 BM25；与旧实现一致）
+        if bm25_index is not None and query_variants:
+            try:
+                query_results_list.extend(await _bm25_pass(query_variants, bm25_index))
+            except Exception as e:
+                print(f"[Advanced Retrieval] ⚠️ 变体 BM25 检索失败，跳过: {e}")
+
+    stage_mark("retrieval_ms", (time.perf_counter() - _retrieval_t0) * 1000)
 
     # ---- Step 3: RRF 合并（按语料来源类型加权）----
     rrf_k = 60
@@ -406,7 +570,8 @@ async def advanced_retrieval(
             if doc_id not in doc_rrf_scores:
                 doc_rrf_scores[doc_id] = 0.0
             if use_source_weight:
-                source = doc_candidates[doc_id]["metadata"].get("source", "")
+                meta = doc_candidates[doc_id].get("metadata") or {}
+                source = meta.get("source", "")
                 weight = get_source_weight(source)
             else:
                 weight = 1.0
@@ -450,7 +615,9 @@ async def advanced_retrieval(
         try:
             from src.retrieval.reranker import rerank_documents
             # CPU 推理（30 对 × 512 token）需数秒，同步调用会阻塞事件循环，放线程池
+            _rerank_t0 = time.perf_counter()
             head = await asyncio.to_thread(rerank_documents, question, head, top_k=rerank_n)
+            stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
             print(f"[Advanced Retrieval] Cross-Encoder 重排序完成（前 {len(head)} 条精排 + {len(tail)} 条 RRF 兜底）")
         except Exception as e:
             print(f"[Advanced Retrieval] ⚠️ 重排序失败，保持 RRF 顺序: {e}")

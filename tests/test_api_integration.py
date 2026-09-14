@@ -167,7 +167,7 @@ def test_upload_size_limit(client, monkeypatch):
 
 def test_upload_rate_limit(client):
     c, _ = client
-    routes._RATE_STORE["testclient"] = {
+    routes._RATE_STORE["main::testclient"] = {
         "min": time.time(),
         "min_count": 0,
         "day": time.time(),

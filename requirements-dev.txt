@@ -1,0 +1,6 @@
+# 开发/评估用依赖（生产部署不需要）
+# 来源：pyproject.toml 的 [project.optional-dependencies].dev
+# 安装：pip install -r requirements-dev.txt
+pytest
+pytest-asyncio
+ragas

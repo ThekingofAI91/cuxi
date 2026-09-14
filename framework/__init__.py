@@ -15,7 +15,6 @@ from framework.supervisor import (
 from framework.retrieval_agent import retrieval_agent
 from framework.analysis_agent import analysis_agent
 from framework.verification_agent import verification_agent
-from framework.summarizer import summarizer
 
 # 默认注入名人对话场景配置（启动时自动初始化）
 from scenes.persona_chat.config import persona_chat_config
@@ -35,5 +34,4 @@ __all__ = [
     "retrieval_agent",
     "analysis_agent",
     "verification_agent",
-    "summarizer",
 ]

@@ -39,6 +39,19 @@ class SessionStore:
                 )
                 """
             )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS roundtables (
+                    session_id TEXT PRIMARY KEY,
+                    topic TEXT DEFAULT '',
+                    speakers TEXT DEFAULT '[]',
+                    rounds INTEGER DEFAULT 1,
+                    transcript TEXT DEFAULT '[]',
+                    created_at REAL,
+                    updated_at REAL
+                )
+                """
+            )
             self._conn.commit()
 
     def _ensure(self, session_id: str, now: float) -> None:
@@ -125,8 +138,111 @@ class SessionStore:
                 self._conn.executemany(
                     "DELETE FROM sessions WHERE session_id=?", [(i,) for i in ids]
                 )
-                self._conn.commit()
+            self._conn.execute(
+                "DELETE FROM roundtables WHERE updated_at < ?", (cutoff,)
+            )
+            self._conn.commit()
         return ids
+
+    # ---- 圆桌会议会话 ----
+
+    def save_roundtable(
+        self,
+        session_id: str,
+        topic: str,
+        speakers: list,
+        rounds: int,
+        transcript: list,
+    ) -> None:
+        """保存一场圆桌会议（topic / 与会者 / 完整发言记录），按 session_id 覆盖。"""
+        now = time.time()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT OR REPLACE INTO roundtables
+                    (session_id, topic, speakers, rounds, transcript, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?)
+                """,
+                (
+                    session_id,
+                    topic or "",
+                    json.dumps(speakers or [], ensure_ascii=False),
+                    int(rounds or 1),
+                    json.dumps(transcript or [], ensure_ascii=False),
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+
+    def get_roundtable(self, session_id: str) -> Optional[dict[str, Any]]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM roundtables WHERE session_id=?", (session_id,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        for k in ("speakers", "transcript"):
+            try:
+                d[k] = json.loads(d[k] or "[]")
+            except Exception:
+                d[k] = []
+        return d
+
+    def list_roundtables(self, ttl_days: int = 30) -> list[dict[str, Any]]:
+        """列出 TTL 内最近的圆桌会议（按更新时间倒序），transcript 不返回（省流量）。"""
+        cutoff = time.time() - ttl_days * 86400
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT session_id, topic, speakers, rounds, created_at, updated_at
+                FROM roundtables WHERE updated_at >= ? ORDER BY updated_at DESC
+                """,
+                (cutoff,),
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d["speakers"] = json.loads(d["speakers"] or "[]")
+            except Exception:
+                d["speakers"] = []
+            out.append(d)
+        return out
+
+    def delete_roundtable(self, session_id: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM roundtables WHERE session_id=?", (session_id,)
+            )
+            self._conn.commit()
+
+    def stats(self, ttl_days: int) -> dict[str, Any]:
+        """管理后台用：按角色聚合会话数与对话轮次（TTL 内活跃会话）。"""
+        cutoff = time.time() - ttl_days * 86400
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT character, history FROM sessions WHERE updated_at >= ?", (cutoff,)
+            ).fetchall()
+        by_character: dict[str, dict[str, int]] = {}
+        total_turns = 0
+        for r in rows:
+            ch = r["character"] or "unknown"
+            d = by_character.setdefault(ch, {"sessions": 0, "turns": 0})
+            d["sessions"] += 1
+            try:
+                hist = json.loads(r["history"] or "[]")
+                turns = len(hist) if isinstance(hist, list) else 0
+                d["turns"] += turns
+                total_turns += turns
+            except Exception:
+                pass
+        return {
+            "total_sessions": len(rows),
+            "total_turns": total_turns,
+            "by_character": by_character,
+        }
 
 
 _store: Optional[SessionStore] = None
