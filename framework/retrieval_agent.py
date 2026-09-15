@@ -1,5 +1,5 @@
 """
-Retrieval Agent — 图书管理员 📚
+Retrieval Agent — 图书管理员
 负责文档检索：高级混合检索（Multi-Query + HyDE + BM25 + 向量）+ Cross-Encoder 重排序
 
 与 HTTP 层（/persona/eval_query）共用 src.retrieval.advanced_search.advanced_retrieval，

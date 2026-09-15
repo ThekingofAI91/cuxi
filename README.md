@@ -6,7 +6,7 @@
 
 ---
 
-## ✨ 功能亮点
+## 功能亮点
 
 - **账号系统（可选登录）**：邮箱/用户名 + 密码注册登录（pbkdf2 哈希 + HttpOnly Cookie 会话）；登录后对话额度按账号计算——共享出口 IP 不再互相误伤、换 IP 无法绕过；不登录也可直接使用
 - **5 位可对话人物**：首页轮播选择 → 进入各自专属 UI；对话页只显示当前人物，可一键退回首页换人
@@ -25,7 +25,7 @@
 
 ---
 
-## 🧱 技术栈
+## 技术栈
 
 | 层 | 技术 |
 |----|------|
@@ -37,7 +37,7 @@
 | 持久化 | SQLite（会话 / 账号 / 用量统计）+ ChromaDB（向量库） |
 | 评估 | RAGAS（scripts/evaluate_ragas.py）+ pytest（163 个用例） |
 
-## 📈 并发容量（实测）
+## 并发容量（实测）
 
 在 16 核 CPU 机器上实测（完整检索 + 生成流水线，DeepSeek API；知识库碎片重组后）：
 
@@ -59,7 +59,7 @@
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 环境要求：Python 3.10+
 
@@ -74,7 +74,7 @@ python init_persona_data.py  # 只重灌某个人物见下方"数据维护"
 python main.py               # 默认 http://localhost:8000
 ```
 
-### 🔑 配置自己的大模型 API
+### 配置自己的大模型 API
 
 **本项目不内置任何 API Key，也不预置任何私有中转地址，需要你自己填。** 两种方式选一个即可：
 
@@ -109,13 +109,13 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 ### 意见反馈渠道
 
-用户在对话页右上角点「💬 反馈」即可提交意见 / bug / 建议（无需登录，可留联系方式）。
+用户在对话页右上角点「反馈」即可提交意见 / bug / 建议（无需登录，可留联系方式）。
 反馈落盘 SQLite（`data/feedback.db`），管理后台 `/admin` 的「意见反馈」区直接查看，
 并支持一键「标记已处理」或「回复并标记」——反馈直达你的管理端，闭环处理。
 
 ---
 
-## 🗂️ 项目结构
+## 项目结构
 
 ```
 .
@@ -163,7 +163,7 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 ---
 
-## 🧑‍🤝‍🧑 人物与知识库
+## 人物与知识库
 
 | 人物 | 定位 | ChromaDB collection | 语料构成 |
 |------|------|---------------------|----------|
@@ -179,7 +179,7 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 ---
 
-## 🧠 多智能体架构
+## 多智能体架构
 
 ```
 用户提问
@@ -223,7 +223,7 @@ Supervisor（规则路由，不调 LLM）
 
 ---
 
-## 🔍 检索管线
+## 检索管线
 
 1. **查询增强**：一次 LLM 调用同时生成查询变体（Multi-Query）与假设文档（HyDE）
 2. **双通道召回**：变体查询批量向量检索 + 原问 BM25 关键词检索（精确命中专有名词）
@@ -292,7 +292,7 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 
 ---
 
-## 📡 API 一览
+## API 一览
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -324,7 +324,7 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 
 ---
 
-## 🧪 测试与评估
+## 测试与评估
 
 ```bash
 pytest                              # 163 个用例：智能体行为 + API 集成 + 对话操作（重答/编辑/轻聊通道/角色卡）+ 设置页配置
@@ -349,14 +349,14 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 
 ---
 
-## ✍️ 自建角色（用户创建人物）
+## 自建角色（用户创建人物）
 
 除了内置的 5 位名人，任何人都能在前端「对话对象」侧栏点 **＋ 创建人物**，提交人物设定与背景，亲手造一个可对话角色。
 
 ### 两种创建方式
 
 1. **完整手写**：填名字 + 背景知识（谁、生平、代表观点、名言、说话风格）+ 可选角色人设 prompt + 主题，直接创建。
-2. **热门人物智能生成**：填名字（背景可空）→ 点 **🔍 智能收集资料**：后端联网搜索该人物的公开资料（Bing/百度/DuckDuckGo 多引擎兜底），交给 DeepSeek 合成一段人设提示词与结构化背景知识库草稿；你微调后点 **创建并开始对话**。
+2. **热门人物智能生成**：填名字（背景可空）→ 点 **智能收集资料**：后端联网搜索该人物的公开资料（Bing/百度/DuckDuckGo 多引擎兜底），交给 DeepSeek 合成一段人设提示词与结构化背景知识库草稿；你微调后点 **创建并开始对话**。
 
 ### 后端发生了什么
 
@@ -386,7 +386,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 
 > 网络搜索默认开启（`WEB_SEARCH_ENABLED`）。若部署环境无外网或希望纯手工录入，设为 `false` 即可；此时"智能收集资料"仅基于你填的背景生成。
 
-## 🕸️ 知识图谱 RAG（GraphRAG 增强层）
+## 知识图谱 RAG（GraphRAG 增强层）
 
 在原有的「向量 + BM25 + Cross-Encoder 重排」混合检索之外，叠加一层**实体-关系知识图谱**检索，
 专治纯 chunk 检索的软肋：跨段落的概念网络、因果/从属/对立关系，向量检索很难一次性召回，
@@ -444,7 +444,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 | `framework/retrieval_agent.py` | 在混合检索后并入图谱证据文档 |
 | `src/api/routes.py` | `graph/build` / `graph/status` 端点 |
 
-## 📝 备注
+## 备注
 
 - 前端已模块化：`index.html` 只留页面骨架，样式与交互逻辑拆分到 `assets/css/` 与 `assets/js/`（10 个按功能划分的文件，按依赖顺序加载，无打包工具）；五套主题通过 CSS 变量切换
 - 账号数据：`data/accounts.db`（用户 + 登录会话，pbkdf2 哈希存储密码；Cookie 为 HttpOnly，前端 JS 不可读）
@@ -452,7 +452,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 
 ---
 
-## ⚖️ 许可与合规
+## 许可与合规
 
 | 文档 | 内容 |
 |---|---|
