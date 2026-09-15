@@ -1,5 +1,5 @@
 """
-Supervisor Agent — 整个系统的大脑 🧠
+Supervisor Agent — 整个系统的大脑
 通用框架层，通过 scene_config 注入场景特定的prompt和配置
 
 当前项目只保留名人对话场景（persona_chat）：
