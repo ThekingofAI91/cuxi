@@ -160,7 +160,7 @@ def _persist_session_db(session_id: str) -> None:
             final_answer=data.get("final_answer", ""),
         )
     except Exception as e:
-        print(f"[History] ⚠️ 写入会话持久化失败: {e}")
+        print(f"[History] 写入会话持久化失败: {e}")
 
 
 @router.get("/admin/stats")
@@ -221,7 +221,7 @@ async def submit_feedback(payload: FeedbackIn, request: Request):
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    print(f"[Feedback] 📨 收到反馈 from={ip} char={payload.character or '无'}: {payload.content[:50]}")
+    print(f"[Feedback] 收到反馈 from={ip} char={payload.character or '无'}: {payload.content[:50]}")
     return {"ok": True, "id": row["id"]}
 
 
@@ -376,7 +376,7 @@ def get_current_user(request: Request) -> Optional[dict]:
     try:
         return accounts.get_user_by_session(_current_session_token(request))
     except Exception as e:
-        print(f"[Auth] ⚠️ 会话解析失败（按未登录处理）: {e}")
+        print(f"[Auth] 会话解析失败（按未登录处理）: {e}")
         return None
 
 
@@ -403,7 +403,7 @@ async def auth_register(http_request: Request, payload: AuthRegisterIn, response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     _set_auth_cookie(response, token)
-    print(f"[Auth] ✅ 新用户注册: {user['account']} ip={_client_ip(http_request)}")
+    print(f"[Auth] 新用户注册: {user['account']} ip={_client_ip(http_request)}")
     return {"user": {"id": user["id"], "account": user["account"], "display_name": user["display_name"]}}
 
 
@@ -450,10 +450,10 @@ async def auth_delete_account(http_request: Request):
         from src.core.memory import get_memory_store
         n = get_memory_store().delete_user(f"u:{user['id']}")
         if n:
-            print(f"[Auth] 🗑️ 已删除用户长期记忆 {n} 条: {user['account']}")
+            print(f"[Auth] 已删除用户长期记忆 {n} 条: {user['account']}")
     except Exception as _me:
-        print(f"[Auth] ⚠️ 用户记忆删除失败（忽略）: {_me}")
-    print(f"[Auth] 🗑️ 账号已注销: {user['account']} ip={_client_ip(http_request)}")
+        print(f"[Auth] 用户记忆删除失败（忽略）: {_me}")
+    print(f"[Auth] 账号已注销: {user['account']} ip={_client_ip(http_request)}")
     return {"deleted": True}
 
 
@@ -472,7 +472,7 @@ def _persist_session_meta():
         meta = {sid: d.get("character", "") for sid, d in _session_store.items() if d.get("character")}
         _SESSION_META_FILE.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
-        print(f"[History] ⚠️ 写入会话归属记录失败: {e}")
+        print(f"[History] 写入会话归属记录失败: {e}")
 
 
 def _load_session_meta():
@@ -490,9 +490,9 @@ def _load_session_meta():
                         "final_answer": "",
                     }
             if raw:
-                print(f"[History] ✅ 已加载 {len(raw)} 条会话归属记录")
+                print(f"[History] 已加载 {len(raw)} 条会话归属记录")
     except Exception as e:
-        print(f"[History] ⚠️ 加载会话归属记录失败: {e}")
+        print(f"[History] 加载会话归属记录失败: {e}")
 
 
 _load_session_meta()
@@ -513,9 +513,9 @@ def _load_deleted_sessions():
             raw = json.loads(_DELETED_SESSIONS_FILE.read_text(encoding="utf-8"))
             _deleted_sessions.update(raw)
             if raw:
-                print(f"[History] ✅ 已加载 {len(raw)} 条已删除会话记录")
+                print(f"[History] 已加载 {len(raw)} 条已删除会话记录")
     except Exception as e:
-        print(f"[History] ⚠️ 加载已删除会话记录失败: {e}")
+        print(f"[History] 加载已删除会话记录失败: {e}")
 
 
 def _persist_deleted_sessions():
@@ -526,7 +526,7 @@ def _persist_deleted_sessions():
             json.dumps(sorted(_deleted_sessions), ensure_ascii=False), encoding="utf-8"
         )
     except Exception as e:
-        print(f"[History] ⚠️ 写入已删除会话记录失败: {e}")
+        print(f"[History] 写入已删除会话记录失败: {e}")
 
 
 _load_deleted_sessions()
@@ -545,7 +545,7 @@ def _restore_history_from_frontend(session_id: str, history: list[dict]):
         return
     # 用户已在前端删除该会话：拒绝用前端历史恢复（防止重复提问误判）
     if session_id in _deleted_sessions:
-        print(f"[History] ⚠️ 会话 {session_id} 已删除，忽略前端发来的历史（防止重复提问误判）")
+        print(f"[History] 会话 {session_id} 已删除，忽略前端发来的历史（防止重复提问误判）")
         return
     # 只在后端历史为空时恢复（避免覆盖已有数据）
     with _history_restore_lock:
@@ -573,13 +573,13 @@ def _restore_history_from_frontend(session_id: str, history: list[dict]):
         to_summarize = []
         if restored:
             _conversation_history_store[session_id] = restored
-            print(f"[History] ✅ 从前端恢复会话历史: session={session_id}, 轮次={len(restored)}")
+            print(f"[History] 从前端恢复会话历史: session={session_id}, 轮次={len(restored)}")
             # 恢复的历史超过存储上限时，超出部分异步压缩为摘要，避免早期上下文直接丢失
             max_turns = settings.max_history_turns if hasattr(settings, 'max_history_turns') else 10
             if len(restored) > max_turns:
                 to_summarize = restored[:-max_turns]
                 _conversation_history_store[session_id] = restored[-max_turns:]
-                print(f"[History] 📝 恢复历史超限，压缩 {len(to_summarize)} 轮旧对话为摘要")
+                print(f"[History] 恢复历史超限，压缩 {len(to_summarize)} 轮旧对话为摘要")
     if to_summarize:
         asyncio.create_task(_summarize_old_turns(session_id, to_summarize))
 
@@ -615,7 +615,7 @@ async def delete_conversation(session_id: str):
     _deleted_sessions.add(session_id)
     _persist_session_meta()
     _persist_deleted_sessions()
-    print(f"[History] 🗑️ 删除会话: session={session_id}, history={deleted_history}, session_store={deleted_session}")
+    print(f"[History] 删除会话: session={session_id}, history={deleted_history}, session_store={deleted_session}")
     return {
         "session_id": session_id,
         "deleted": deleted_history or deleted_session,
@@ -892,7 +892,7 @@ async def research_character(http_request: Request, request: CharacterResearchRe
             provided_role_prompt=None,  # 草稿阶段不绑定用户人设，始终由 LLM 生成建议
         )
     except Exception as e:
-        print(f"[Research] ❌ 生成失败: {e}")
+        print(f"[Research] 生成失败: {e}")
         raise HTTPException(status_code=500, detail=f"资料收集失败: {str(e)}")
 
     return {
@@ -947,7 +947,7 @@ async def _run_graph_build(collection_name: str, force: bool = False):
             if tp.exists():
                 tp.unlink()
         except Exception as ex:
-            print(f"[GraphBuild] ⚠️ force 清理失败（继续构建）: {ex}")
+            print(f"[GraphBuild] force 清理失败（继续构建）: {ex}")
     with _graph_job_lock:
         _graph_jobs[collection_name] = {
             "status": "building", "started_at": time.time(), "stats": None, "error": None,
@@ -965,9 +965,9 @@ async def _run_graph_build(collection_name: str, force: bool = False):
                 "status": "done", "started_at": _graph_jobs.get(collection_name, {}).get("started_at"),
                 "stats": graph.get("stats"), "error": None,
             }
-        print(f"[GraphBuild] ✅ 后台构建完成: {collection_name} -> {graph.get('stats')}")
+        print(f"[GraphBuild] 后台构建完成: {collection_name} -> {graph.get('stats')}")
     except Exception as e:
-        print(f"[GraphBuild] ❌ 构建失败 {collection_name}: {e}")
+        print(f"[GraphBuild] 构建失败 {collection_name}: {e}")
         with _graph_job_lock:
             _graph_jobs[collection_name] = {
                 "status": "error", "started_at": _graph_jobs.get(collection_name, {}).get("started_at"),
@@ -1117,7 +1117,7 @@ async def create_character(http_request: Request, request: CharacterCreateReques
             provided_role_prompt=provided_role,
         )
     except Exception as e:
-        print(f"[Create] ❌ 构建人设失败: {e}")
+        print(f"[Create] 构建人设失败: {e}")
         raise HTTPException(status_code=500, detail=f"构建人设失败: {str(e)}")
 
     if not role_prompt:
@@ -1131,7 +1131,7 @@ async def create_character(http_request: Request, request: CharacterCreateReques
     try:
         n_chunks = await ingest_texts_async(collection_name, cid, background)
     except Exception as e:
-        print(f"[Create] ❌ 背景入库失败: {e}")
+        print(f"[Create] 背景入库失败: {e}")
         raise HTTPException(status_code=500, detail=f"背景入库失败: {str(e)}")
 
     # 组装 CharacterDef 并落盘 + 注册
@@ -1165,10 +1165,10 @@ async def create_character(http_request: Request, request: CharacterCreateReques
     try:
         save_custom_character(char)
     except Exception as e:
-        print(f"[Create] ⚠️ 落盘失败（内存已注册）: {e}")
+        print(f"[Create] 落盘失败（内存已注册）: {e}")
     persona_chat_config.characters[cid] = char
 
-    print(f"[Create] ✅ 自建角色 '{name}' (id={cid}) 已创建，背景 {n_chunks} 块")
+    print(f"[Create] 自建角色 '{name}' (id={cid}) 已创建，背景 {n_chunks} 块")
     return {
         "character": CharacterInfo(
             id=char.id,
@@ -1218,9 +1218,9 @@ async def delete_character(char_id: str):
         from src.retrieval.knowledge_graph import invalidate_graph
         invalidate_graph(char.chroma_collection)
     except Exception as e:
-        print(f"[Delete] ⚠️ 删除 collection 失败（可忽略）: {e}")
+        print(f"[Delete] 删除 collection 失败（可忽略）: {e}")
 
-    print(f"[Delete] 🗑️ 已删除自建角色: {char_id}")
+    print(f"[Delete] 已删除自建角色: {char_id}")
     return {"deleted": True, "id": char_id}
 
 
@@ -1243,7 +1243,7 @@ async def export_character_card(char_id: str):
             from scenes.persona_chat.card_io import background_from_collection
             background = background_from_collection(get_chroma_client().get_collection(char.chroma_collection))
         except Exception as e:
-            print(f"[CardExport] ⚠️ 反查背景失败（导出为空背景卡）: {e}")
+            print(f"[CardExport] 反查背景失败（导出为空背景卡）: {e}")
 
     card = export_card(char, background=background)
     fname = f"{char_id}-card.json"
@@ -1316,7 +1316,7 @@ async def import_character_card(http_request: Request, request: CardImportReques
         try:
             n_chunks = await ingest_texts_async(collection_name, cid, fields["background"])
         except Exception as e:
-            print(f"[CardImport] ⚠️ 背景入库失败（角色仍创建，无检索兜底）: {e}")
+            print(f"[CardImport] 背景入库失败（角色仍创建，无检索兜底）: {e}")
 
     from scenes.persona_chat.models import CharacterDef
     char = CharacterDef(
@@ -1343,10 +1343,10 @@ async def import_character_card(http_request: Request, request: CardImportReques
     try:
         save_custom_character(char)
     except Exception as e:
-        print(f"[CardImport] ⚠️ 落盘失败（内存已注册）: {e}")
+        print(f"[CardImport] 落盘失败（内存已注册）: {e}")
     persona_chat_config.characters[cid] = char
 
-    print(f"[CardImport] ✅ 已导入角色卡 '{name}' (id={cid})，背景 {n_chunks} 块")
+    print(f"[CardImport] 已导入角色卡 '{name}' (id={cid})，背景 {n_chunks} 块")
     return {
         "character": CharacterInfo(
             id=char.id,
@@ -1505,7 +1505,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                         from src.core.memory import retrieve_memory_block
                         _memory_block = await retrieve_memory_block(_user_key, request.query)
                     except Exception as _me:
-                        print(f"[Memory] ⚠️ 记忆检索失败（忽略）: {_me}")
+                        print(f"[Memory] 记忆检索失败（忽略）: {_me}")
 
                 initial_state: AgentState = {
                     "query": request.query,
@@ -1581,9 +1581,9 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                             _ANSWER_CACHE.pop(k, None)
                         while len(_ANSWER_CACHE) > 512:
                             _ANSWER_CACHE.pop(next(iter(_ANSWER_CACHE)), None)
-                    print(f"[Persona Query] 💾 已缓存答案: {cache_key}")
+                    print(f"[Persona Query] 已缓存答案: {cache_key}")
             except GraphRecursionError:
-                print("[Persona Query] ⚠️ 图执行超出递归限制")
+                print("[Persona Query] 图执行超出递归限制")
                 fallback = await _generate_direct_response(
                     request.query, get_conversation_history(session_id),
                     build_character_prompt(character, query=request.query), stream_callback,
@@ -1694,7 +1694,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                         character_id, getattr(settings, "verify_deadline_sec", 15.0),
                     )
                 except Exception as _ve:
-                    print(f"[Persona Query] ⚠️ 异步引用核查失败（忽略）: {_ve}")
+                    print(f"[Persona Query] 异步引用核查失败（忽略）: {_ve}")
 
             # ---- 知识图谱自动构建：推迟到回答返回之后再触发 ----
             # 避免后台构建的成百次 LLM 调用与本次回答争夺 DeepSeek API / CPU（见上方注释）。
@@ -1714,7 +1714,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                             asyncio.create_task(_run_graph_build(_col, force=False))
                             logger.info("auto_build_graph char=%s col=%s", character_id, _col)
                 except Exception as _ae:
-                    print(f"[GraphAutoBuild] ⚠️ 自动构建触发失败（忽略）: {_ae}")
+                    print(f"[GraphAutoBuild] 自动构建触发失败（忽略）: {_ae}")
 
             logger.info(
                 "done ip=%s char=%s elapsed_ms=%d answer_chars=%d",
@@ -1733,7 +1733,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     stages=stages_snapshot(),
                 )
             except Exception as e:
-                print(f"[Monitor] ⚠️ 用量记录失败: {e}")
+                print(f"[Monitor] 用量记录失败: {e}")
             yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
 
         except Exception as e:
@@ -2023,7 +2023,7 @@ async def persona_upload_document(
         from src.retrieval.advanced_search import invalidate_bm25_cache
         invalidate_bm25_cache(character.chroma_collection)
 
-        print(f"[Persona Upload] ✅ 文档已存入 {character.chroma_collection}: {len(chunks)} 个向量")
+        print(f"[Persona Upload] 文档已存入 {character.chroma_collection}: {len(chunks)} 个向量")
 
         return UploadResponse(
             document_id=document_id,
@@ -2032,7 +2032,7 @@ async def persona_upload_document(
         )
 
     except Exception as e:
-        print(f"[Persona Upload] ❌ 文档处理失败: {e}")
+        print(f"[Persona Upload] 文档处理失败: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"文档处理失败: {str(e)}",

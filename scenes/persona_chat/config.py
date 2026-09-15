@@ -122,9 +122,9 @@ try:
         # 防御：自建 id 不应覆盖同名内置角色
         _dup = set(_custom_chars) & set(persona_chat_config.characters)
         for _dup_id in _dup:
-            print(f"[Config] ⚠️ 自建角色 id '{_dup_id}' 与内置角色冲突，已跳过加载")
+            print(f"[Config] 自建角色 id '{_dup_id}' 与内置角色冲突，已跳过加载")
             _custom_chars.pop(_dup_id, None)
         persona_chat_config.characters.update(_custom_chars)
-        print(f"[Config] ✅ 已加载 {len(_custom_chars)} 个自建角色")
+        print(f"[Config] 已加载 {len(_custom_chars)} 个自建角色")
 except Exception as e:
-    print(f"[Config] ⚠️ 加载自建角色失败: {e}")
+    print(f"[Config] 加载自建角色失败: {e}")

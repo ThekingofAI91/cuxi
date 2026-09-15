@@ -81,7 +81,7 @@ class Embedder:
                         self._dimension = self._model.get_embedding_dimension()
                         print(f"[Embedder] 模型加载完成，嵌入维度: {self._dimension}")
                     except Exception as e:
-                        print(f"[Embedder] ⚠️ 模型加载失败: {e}")
+                        print(f"[Embedder] 模型加载失败: {e}")
                         print("[Embedder] 使用降级方案（随机向量）— 仅用于测试")
                         self._dimension = settings.embedding_dimension
         return self._model
@@ -157,7 +157,7 @@ class Embedder:
         """实际执行嵌入的核心方法"""
         if self.model is None:
             # 降级方案：返回随机向量（仅用于测试）
-            print("[Embedder] ⚠️ 使用降级嵌入（随机向量）")
+            print("[Embedder] 使用降级嵌入（随机向量）")
             rng = np.random.default_rng(42)
             return rng.random((len(texts), self.dimension)).tolist()
 
@@ -171,7 +171,7 @@ class Embedder:
                 )
             return embeddings.tolist()
         except Exception as e:
-            print(f"[Embedder] ❌ 嵌入过程出错: {e}")
+            print(f"[Embedder] 嵌入过程出错: {e}")
             # 降级
             rng = np.random.default_rng(42)
             return rng.random((len(texts), self.dimension)).tolist()

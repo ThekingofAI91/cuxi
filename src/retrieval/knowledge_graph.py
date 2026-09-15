@@ -101,7 +101,7 @@ def load_graph(collection_name: str) -> Optional[dict]:
             _graph_cache[collection_name] = (mtime, data)
         return data
     except Exception as e:
-        print(f"[KnowledgeGraph] ⚠️ 图谱加载失败 {collection_name}: {e}")
+        print(f"[KnowledgeGraph] 图谱加载失败 {collection_name}: {e}")
         return None
 
 
@@ -111,10 +111,10 @@ def invalidate_graph(collection_name: str) -> None:
         p = graph_path(collection_name)
         if p.exists():
             p.unlink()
-            print(f"[KnowledgeGraph] 🗑️ 图谱已失效: {p}")
+            print(f"[KnowledgeGraph] 图谱已失效: {p}")
         _graph_cache_clear(collection_name)
     except Exception as e:
-        print(f"[KnowledgeGraph] ⚠️ 图谱删除失败: {e}")
+        print(f"[KnowledgeGraph] 图谱删除失败: {e}")
 
 
 # ============================================================
@@ -227,7 +227,7 @@ async def _llm_extract_triples(llm, text: str) -> list[dict]:
             })
         return out
     except Exception as ex:
-        print(f"[KnowledgeGraph] ⚠️ 三元组抽取失败: {ex}")
+        print(f"[KnowledgeGraph] 三元组抽取失败: {ex}")
         return []
 
 
@@ -366,7 +366,7 @@ async def build_knowledge_graph(
                 resumed = True
                 print(f"[KnowledgeGraph] 续传恢复: {processed}/{len(docs)} chunk 已完成，跳过")
         except Exception as ex:
-            print(f"[KnowledgeGraph] ⚠️ 续传临时文件损坏，从头构建: {ex}")
+            print(f"[KnowledgeGraph] 续传临时文件损坏，从头构建: {ex}")
             entities, rel_index, processed = {}, {}, 0
 
     empty_streak = 0          # 连续 0 三元组的批数（上游空响应/抽取失败的信号）
@@ -455,7 +455,7 @@ async def build_knowledge_graph(
         tmp_path.replace(final_path)
     else:
         final_path.write_text(json.dumps(graph, ensure_ascii=False), encoding="utf-8")
-    print(f"[KnowledgeGraph] ✅ 图谱构建完成: {len(entities)} 实体 / {len(relations)} 关系 "
+    print(f"[KnowledgeGraph] 图谱构建完成: {len(entities)} 实体 / {len(relations)} 关系 "
           f"| 耗时 {round(time.time() - t0, 1)}s | 落盘 {final_path}")
     return graph
 

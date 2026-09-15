@@ -218,7 +218,7 @@ async def extract_and_store(user_key: str, query: str, answer: str) -> None:
         # 合并：与已有同 kind 条目近似（余弦 ≥ 0.85）→ 更新该条；否则新增
         merge_items(existing, items, store, user_key)
     except Exception as e:
-        print(f"[Memory] ⚠️ 记忆提取失败（忽略）: {e}")
+        print(f"[Memory] 记忆提取失败（忽略）: {e}")
 
 
 def merge_items(existing: list[dict], items: list[dict], store: MemoryStore, user_key: str) -> None:
@@ -278,7 +278,7 @@ async def retrieve_memory_block(user_key: str, query: str) -> str:
             lines.append(f"- {m['text']}")
         return "\n".join(lines)
     except Exception as e:
-        print(f"[Memory] ⚠️ 记忆检索失败（忽略）: {e}")
+        print(f"[Memory] 记忆检索失败（忽略）: {e}")
         return ""
 
 

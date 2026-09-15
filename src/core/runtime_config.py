@@ -43,13 +43,13 @@ def _read_file(path: Path) -> dict[str, str]:
     except FileNotFoundError:
         return {}
     except OSError as e:
-        print(f"[Config] ⚠️ 读取用户配置失败（按未配置处理）：{e}")
+        print(f"[Config] 读取用户配置失败（按未配置处理）：{e}")
         return {}
 
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
-        print(f"[Config] ⚠️ 用户配置不是合法 JSON（按未配置处理）：{e}")
+        print(f"[Config] 用户配置不是合法 JSON（按未配置处理）：{e}")
         return {}
 
     if not isinstance(data, dict):
@@ -148,5 +148,5 @@ def reset() -> dict[str, str]:
     except FileNotFoundError:
         pass
     except OSError as e:
-        print(f"[Config] ⚠️ 清除用户配置失败：{e}")
+        print(f"[Config] 清除用户配置失败：{e}")
     return load(force=True)

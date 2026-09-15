@@ -34,7 +34,7 @@ async def build_one(collection, force: bool, delay: float) -> bool:
     """构建单库图谱，带退避重试；返回是否最终成功"""
     name = collection.name
     if graph_exists(name) and not force:
-        print(f"[campaign] ⏭️ {name} 图谱已存在，跳过（--force 可重建）")
+        print(f"[campaign] {name} 图谱已存在，跳过（--force 可重建）")
         return True
 
     for attempt in range(1, MAX_ATTEMPTS_PER_COL + 1):
@@ -44,14 +44,14 @@ async def build_one(collection, force: bool, delay: float) -> bool:
                 collection, resume=True, inter_batch_delay=delay,
             )
             stats = graph["stats"]
-            print(f"[campaign] ✅ {name}: {stats['chunks']} chunk → "
+            print(f"[campaign] {name}: {stats['chunks']} chunk → "
                   f"{stats['entities']} 实体 / {stats['relations']} 关系"
                   f" | 耗时 {time.time() - t0:.0f}s")
             return True
         except RuntimeError as e:
             # 构建函数的空批熔断（上游持续空响应）：等待后续传重试
-            print(f"[campaign] ⚠️ {name} 第 {attempt} 轮中止: {e}")
-            print(f"[campaign] ⏳ {UPSTREAM_BACKOFF_SEC}s 后续传重试…")
+            print(f"[campaign] {name} 第 {attempt} 轮中止: {e}")
+            print(f"[campaign] {UPSTREAM_BACKOFF_SEC}s 后续传重试…")
             await asyncio.sleep(UPSTREAM_BACKOFF_SEC)
         except Exception as e:
             msg = str(e)
@@ -59,11 +59,11 @@ async def build_one(collection, force: bool, delay: float) -> bool:
                 wait = UPSTREAM_BACKOFF_SEC
             else:
                 wait = 30
-            print(f"[campaign] ⚠️ {name} 第 {attempt} 轮异常: {msg[:120]}")
-            print(f"[campaign] ⏳ {wait}s 后续传重试…")
+            print(f"[campaign] {name} 第 {attempt} 轮异常: {msg[:120]}")
+            print(f"[campaign] {wait}s 后续传重试…")
             await asyncio.sleep(wait)
 
-    print(f"[campaign] ❌ {name} 达到最大尝试轮数，放弃（进度已存 .tmp，可直接重跑续传）")
+    print(f"[campaign] {name} 达到最大尝试轮数，放弃（进度已存 .tmp，可直接重跑续传）")
     return False
 
 
@@ -91,7 +91,7 @@ async def main() -> None:
         count = col.count()
         print(f"\n[campaign] === {name}（{count} 条 chunk）===")
         if count == 0:
-            print(f"[campaign] ⏭️ {name} 文档库为空，跳过")
+            print(f"[campaign] {name} 文档库为空，跳过")
             results[name] = "empty"
             continue
         results[name] = await build_one(col, args.force, args.delay)
@@ -99,7 +99,7 @@ async def main() -> None:
     print("\n" + "=" * 60)
     print(f"[campaign] 战役结束（总耗时 {(time.time() - t0) / 60:.1f} 分钟）:")
     for name, ok in results.items():
-        mark = {"empty": "⏭️ 空库"}.get(ok, "✅" if ok else "❌")
+        mark = {"empty": "[空库]", "True": "[完成]", "False": "[失败]"}.get(str(ok), str(ok))
         print(f"  {mark} {name}")
 
 

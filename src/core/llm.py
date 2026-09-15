@@ -77,7 +77,7 @@ def _shared_async_http_client():
         # 无运行中的事件循环（同步上下文）：同步路径本就有独立的 client，不需要共享
         return None
     except Exception as e:
-        print(f"[LLM] ⚠️ 共享连接池创建失败（回退默认行为）: {e}")
+        print(f"[LLM] 共享连接池创建失败（回退默认行为）: {e}")
         return None
 
 
@@ -159,14 +159,14 @@ async def ainvoke_nonempty(
         resp = await llm.ainvoke(messages)
         if not _is_empty_response(resp):
             return resp
-        print(f"[LLM] ⚠️ 上游返回空响应（第 {i + 1} 次），重试…")
+        print(f"[LLM] 上游返回空响应（第 {i + 1} 次），重试…")
     if fallback_llm is not None:
-        print("[LLM] ⚠️ 主模型持续空响应，切换备用模型重试")
+        print("[LLM] 主模型持续空响应，切换备用模型重试")
         for i in range(attempts + 1):
             resp = await fallback_llm.ainvoke(messages)
             if not _is_empty_response(resp):
                 return resp
-            print(f"[LLM] ⚠️ 备用模型返回空响应（第 {i + 1} 次），重试…")
+            print(f"[LLM] 备用模型返回空响应（第 {i + 1} 次），重试…")
     return resp  # 全空则原样返回，由调用方按空内容走既有兜底
 
 
@@ -186,10 +186,10 @@ async def astream_nonempty(llm: Runnable, messages: Any, attempts: int = _EMPTY_
             if got:
                 return
             # 整个流空：未向调用方推送任何内容，安全重试
-            print(f"[LLM] ⚠️ 上游返回空流（第 {i + 1} 次），重试…")
+            print(f"[LLM] 上游返回空流（第 {i + 1} 次），重试…")
         except Exception:
             if got:
                 raise  # 已推送部分内容，交由调用方既有逻辑处理
             if i >= attempts:
                 raise
-            print(f"[LLM] ⚠️ 流式调用异常且无输出（第 {i + 1} 次），重试…")
+            print(f"[LLM] 流式调用异常且无输出（第 {i + 1} 次），重试…")

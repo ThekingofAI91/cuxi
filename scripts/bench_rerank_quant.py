@@ -40,7 +40,7 @@ def _load_corpus(n: int = 12) -> list[str]:
             print(f"[bench] 使用真实语料 {len(docs)} 条（persona_jung）")
             return [d[:200] for d in docs[:n]]
     except Exception as e:
-        print(f"[bench] ⚠️ ChromaDB 取语料失败，改用内置文本: {e}")
+        print(f"[bench] ChromaDB 取语料失败，改用内置文本: {e}")
     base = (
         "集体无意识是人类心理的一部分，它不同于个体无意识。个体无意识由被压抑的情结构成，"
         "而集体无意识则由原型组成，是从祖先世代经验中沉淀下来的心理倾向。原型包括阴影、"
@@ -123,7 +123,7 @@ def main() -> None:
             results[f"base_fp32_{k}"] = {"times": times, "scores": scores}
             print(f"  {k} 对: median {statistics.median(times):.0f} ms  min {min(times):.0f} ms")
     except Exception as e:
-        print(f"  ⚠️ base 加载失败: {e}")
+        print(f"  base 加载失败: {e}")
 
     print("\n[bench] ===== 汇总 =====")
     for k in (5, 10):

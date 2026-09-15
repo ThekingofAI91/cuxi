@@ -369,11 +369,11 @@ class PDFParser:
 
         if not elements:
             # 文本提取失败，尝试 OCR
-            print(f"[PDFParser] ⚠️ 文本提取失败，尝试 OCR 解析: {source}")
+            print(f"[PDFParser] 文本提取失败，尝试 OCR 解析: {source}")
             elements = self._parse_with_ocr(file_path, source)
 
         if not elements:
-            print(f"[PDFParser] ⚠️ 未能从 {source} 提取到文本内容")
+            print(f"[PDFParser] 未能从 {source} 提取到文本内容")
             elements.append(ParsedElement(
                 content=f"[PDF 文件: {source} — 未能提取文本内容]",
                 element_type="paragraph",
@@ -440,7 +440,7 @@ class PDFParser:
             print("[PDFParser] OCR 需要 rapidocr-onnxruntime，请先安装: pip install rapidocr-onnxruntime")
             return []
 
-        print(f"[PDFParser] 🔍 正在 OCR 解析: {source}（这可能需要几分钟）")
+        print(f"[PDFParser] 正在 OCR 解析: {source}（这可能需要几分钟）")
         
         elements: list[ParsedElement] = []
         ocr_engine = RapidOCR()
@@ -509,11 +509,11 @@ class PDFParser:
                     print(f"[PDFParser] OCR 进度: {page_num}/{total_pages} 页")
 
             doc.close()
-            print(f"[PDFParser] ✅ OCR 完成，共提取 {len(elements)} 个元素"
+            print(f"[PDFParser] OCR 完成，共提取 {len(elements)} 个元素"
                   f"（噪声清洗: 丢弃 {total_dropped_lines}/{total_raw_lines} 行，跳过 {dropped_pages} 个目录/噪声页）")
 
         except Exception as e:
-            print(f"[PDFParser] ❌ OCR 解析失败: {e}")
+            print(f"[PDFParser] OCR 解析失败: {e}")
 
         return elements
 
@@ -578,7 +578,7 @@ class CodeParser:
             try:
                 text = file_path.read_text(encoding="gbk")
             except UnicodeDecodeError:
-                print(f"[CodeParser] ⚠️ 无法解码文件: {source}")
+                print(f"[CodeParser] 无法解码文件: {source}")
                 return []
 
         elements: list[ParsedElement] = []

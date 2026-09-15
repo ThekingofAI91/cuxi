@@ -49,12 +49,12 @@ def main() -> None:
         if judged >= threshold:
             out = ROOT / "output" / f"eval_final_{total}.json"
             out.write_text(RES_PATH.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"✅ 达标，已归档 → {out}", flush=True)
+            print(f"达标，已归档 → {out}", flush=True)
             return
         if attempt < args.max_attempts:
             print("中转故障窗口未过，5 分钟后重试…", flush=True)
             time.sleep(300)
-    print("❌ 重试耗尽仍未达标", flush=True)
+    print("重试耗尽仍未达标", flush=True)
     sys.exit(1)
 
 

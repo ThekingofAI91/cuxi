@@ -74,7 +74,7 @@ function renderMessages() {
       const actions = (i === lastAssistantIdx && !state.isLoading) ? `
               <div class="msg-actions">
                 <button class="msg-act" type="button" data-regen="1" title="换个说法，重新回答这条消息">↻ 重新生成</button>
-                <button class="msg-act${state._ttsIdx === i ? ' tts-on' : ''}" type="button" data-tts-idx="${i}" title="朗读这段回答">${state._ttsIdx === i ? '⏹ 停止' : '🔊 朗读'}</button>
+                <button class="msg-act${state._ttsIdx === i ? ' tts-on' : ''}" type="button" data-tts-idx="${i}" title="朗读这段回答">${state._ttsIdx === i ? '停止' : '朗读'}</button>
               </div>` : '';
       html += `
         <div class="message-group${animClass}">

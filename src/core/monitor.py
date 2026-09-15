@@ -107,7 +107,7 @@ class UsageMonitor:
                 )
                 self._conn.commit()
         except Exception as e:
-            print(f"[Monitor] ⚠️ 记录失败: {e}")
+            print(f"[Monitor] 记录失败: {e}")
 
     def summary(self, since_ts: float) -> dict[str, Any]:
         with self._lock:

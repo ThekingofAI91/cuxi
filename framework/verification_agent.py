@@ -31,14 +31,14 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
     analysis = state.get("analysis", "")
     retrieved_docs = state.get("retrieved_docs", [])
     query = state.get("query", "")
-    print(f"\n[Verification Agent] ✅ 正在核查原著引用...")
+    print(f"\n[Verification Agent] 正在核查原著引用...")
 
     # 收集需要核查的论断
     claims = _extract_claims(analysis)
     if not claims:
         print("[Verification Agent] 没有发现需要核查的论断")
         return {
-            "verification": "✅ 未发现需要核查的内容。",
+            "verification": "未发现需要核查的内容。",
             "route_history": state.get("route_history", []) + ["verification_agent"],
         }
 
@@ -68,9 +68,9 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
                 _format_verification_item(i, claim, verdict, confidence, evidence)
             )
 
-            if verdict == "✅ 原著有据":
+            if verdict == "原著有据":
                 supported_count += 1
-            elif verdict == "⚠️ 部分依据":
+            elif verdict == "部分依据":
                 partial_count += 1
             else:
                 unsupported_count += 1
@@ -90,13 +90,13 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
         overall_confidence = min(overall_confidence, 1.0)
 
         # 组装核查报告
-        report_lines = ["## 🔍 原著引用核查", ""]
+        report_lines = ["## 原著引用核查", ""]
         report_lines.append("### 核查摘要")
         report_lines.append(f"- 核心论断数: {total}")
-        report_lines.append(f"- ✅ 原著有据: {supported_count}")
-        report_lines.append(f"- ⚠️ 部分依据: {partial_count}")
-        report_lines.append(f"- ❌ 原著无据: {unsupported_count}")
-        report_lines.append(f"- 📊 引用可信度: {overall_confidence:.0%}")
+        report_lines.append(f"- 原著有据: {supported_count}")
+        report_lines.append(f"- 部分依据: {partial_count}")
+        report_lines.append(f"- 原著无据: {unsupported_count}")
+        report_lines.append(f"- 引用可信度: {overall_confidence:.0%}")
 
         if citation_parts:
             report_lines.append("")
@@ -105,21 +105,21 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
 
         if llm_verification:
             report_lines.append("")
-            report_lines.append(f"### 🤖 LLM 辅助评估")
+            report_lines.append(f"### LLM 辅助评估")
             report_lines.append(llm_verification.strip())
 
         # 可信度阈值检查
         if overall_confidence < settings.verifier_confidence_threshold:
             report_lines.append("")
             report_lines.append("---")
-            report_lines.append("### ⚠️ 引用可信度提示")
+            report_lines.append("### 引用可信度提示")
             report_lines.append(
                 f"整体引用可信度 ({overall_confidence:.0%}) 低于阈值 "
                 f"({settings.verifier_confidence_threshold:.0%})，回答中部分观点在检索到的原著资料中缺乏直接依据，请注意甄别。"
             )
-            print(f"[Verification Agent] ⚠️ 引用可信度 {overall_confidence:.0%} 低于阈值")
+            print(f"[Verification Agent] 引用可信度 {overall_confidence:.0%} 低于阈值")
         else:
-            print(f"[Verification Agent] ✅ 引用可信度 {overall_confidence:.0%} 通过阈值检查")
+            print(f"[Verification Agent] 引用可信度 {overall_confidence:.0%} 通过阈值检查")
 
         return {
             "verification": "\n".join(report_lines),
@@ -127,7 +127,7 @@ async def verification_agent(state: AgentState) -> dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"[Verification Agent] ❌ 核查过程出错: {e}")
+        print(f"[Verification Agent] 核查过程出错: {e}")
         return {
             "verification": "",
             "route_history": state.get("route_history", []) + ["verification_agent"],
@@ -302,7 +302,7 @@ def _find_evidence(claim: str, docs: list) -> tuple[str, float, bool]:
             if heading:
                 best_evidence += f" | 章节: {heading}"
             if best_inferred:
-                best_evidence += "\n> ⚠️ 知识图谱推断关系，非人物逐字原话"
+                best_evidence += "\n> 知识图谱推断关系，非人物逐字原话"
             best_evidence += f"\n> {preview}"
 
     return best_evidence, best_score, best_inferred
@@ -316,17 +316,17 @@ def _evaluate_claim(claim: str, evidence: str, match_score: float = 0.0) -> tupl
 
     Returns:
         (verdict, confidence)
-        - "✅ 原著有据" / "⚠️ 部分依据" / "❌ 原著无据"
+        - "原著有据" / "部分依据" / "原著无据"
     """
     if not evidence:
-        return "❌ 原著无据", 0.0
+        return "原著无据", 0.0
 
     if match_score >= 0.5:
-        return "✅ 原著有据", float(match_score)
+        return "原著有据", float(match_score)
     elif match_score >= 0.25:
-        return "⚠️ 部分依据", float(match_score)
+        return "部分依据", float(match_score)
     else:
-        return "❌ 原著无据", float(match_score)
+        return "原著无据", float(match_score)
 
 
 def _format_verification_item(
@@ -342,7 +342,7 @@ def _format_verification_item(
     if evidence:
         item += f"**依据:**\n{evidence}\n"
     else:
-        item += "**依据:** ❌ 未在检索资料中找到直接出处\n"
+        item += "**依据:** 未在检索资料中找到直接出处\n"
     return item
 
 
