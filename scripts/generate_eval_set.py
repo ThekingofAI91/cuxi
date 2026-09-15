@@ -114,7 +114,7 @@ async def gen_for_collection(client, col_name: str, want: int, delay: float) -> 
                 n=QUESTIONS_PER_BATCH, chunks=chunks_text))])
             new_items = _parse(getattr(resp, "content", "") or "")
         except Exception as e:
-            print(f"  [{col_name}] ⚠️ 生成失败（跳过该批）: {str(e)[:80]}")
+            print(f"  [{col_name}] 生成失败（跳过该批）: {str(e)[:80]}")
             new_items = []
         added = 0
         for q in new_items:

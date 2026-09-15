@@ -71,7 +71,7 @@ async def main() -> None:
     for col in ("persona_jung", "persona_wangyangming", "persona_adler"):
         path = graph_path(col)
         if not path.exists():
-            print(f"[audit] ⏭️ {col}: 图谱不存在，跳过")
+            print(f"[audit] {col}: 图谱不存在，跳过")
             continue
         graph = json.loads(path.read_text(encoding="utf-8"))
         rels = graph.get("relations", [])
@@ -81,7 +81,8 @@ async def main() -> None:
         for i, rel in enumerate(sample, 1):
             v = await audit_one(judge, judge, rel)
             counts[v["verdict"]] = counts.get(v["verdict"], 0) + 1
-            mark = {"faithful": "✅", "unsupported": "❌", "unclear": "❓", "unknown": "⚠️"}[v["verdict"]]
+            mark = {"faithful": "[有据]", "unsupported": "[无据]",
+                    "unclear": "[存疑]", "unknown": "[未知]"}[v["verdict"]]
             print(f"  {mark} {rel.get('h','')[:14]} --[{rel.get('r','')[:12]}]--> {rel.get('t','')[:14]} | {v['reason']}")
             if args.delay > 0:
                 await _a.sleep(args.delay)
@@ -93,7 +94,8 @@ async def main() -> None:
     print("\n[audit] ===== 汇总 =====")
     for col, r in report.items():
         print(f"  {col}: 忠实率 {r['faithful_rate']:.0%} "
-              f"(✅{r['faithful']} ❌{r['unsupported']} ❓{r['unclear']} ⚠️{r['unknown']})")
+              f"(有据 {r['faithful']} / 无据 {r['unsupported']} / "
+              f"存疑 {r['unclear']} / 未知 {r['unknown']})")
     out = Path("output/graph_audit.json")
     out.parent.mkdir(exist_ok=True)
     out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

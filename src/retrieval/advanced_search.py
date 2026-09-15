@@ -66,7 +66,7 @@ def _load_bm25_from_disk(name: str, expected_count: Optional[int] = None):
         print(f"[Advanced Retrieval] BM25 磁盘缓存命中: {data.get('count')} 条文档")
         return data.get("index")
     except Exception as e:
-        print(f"[Advanced Retrieval] ⚠️ BM25 磁盘缓存加载失败: {e}")
+        print(f"[Advanced Retrieval] BM25 磁盘缓存加载失败: {e}")
         return None
 
 
@@ -79,7 +79,7 @@ def _save_bm25_to_disk(name: str, count: int, index) -> None:
             pickle.dump({"count": count, "index": index}, f)
         print(f"[Advanced Retrieval] BM25 索引已持久化: {path}")
     except Exception as e:
-        print(f"[Advanced Retrieval] ⚠️ BM25 持久化失败: {e}")
+        print(f"[Advanced Retrieval] BM25 持久化失败: {e}")
 
 
 def _ensure_bm25_ready(collection) -> tuple[list[Document], object]:
@@ -137,9 +137,9 @@ def invalidate_bm25_cache(name: str):
         path = _bm25_cache_path(name)
         if path.exists():
             path.unlink()
-            print(f"[Advanced Retrieval] 🗑️ BM25 缓存已失效: {path}")
+            print(f"[Advanced Retrieval] BM25 缓存已失效: {path}")
     except Exception as e:
-        print(f"[Advanced Retrieval] ⚠️ BM25 缓存失效失败: {e}")
+        print(f"[Advanced Retrieval] BM25 缓存失效失败: {e}")
 
 
 def _load_all_documents(collection) -> list[Document]:
@@ -167,7 +167,7 @@ def _load_all_documents(collection) -> list[Document]:
             offset=offset,
         )
         if raw is None:
-            print("[Advanced Retrieval] ⚠️ collection.get() 返回 None，终止全量拉取")
+            print("[Advanced Retrieval] collection.get() 返回 None，终止全量拉取")
             break
         ids = raw.get("ids") or []
         if not ids:
@@ -518,14 +518,14 @@ async def advanced_retrieval(
             bm25_index, first_groups = await bm25_task
             query_results_list.extend(first_groups)
         except Exception as e:
-            print(f"[Advanced Retrieval] ⚠️ BM25 检索失败，跳过: {e}")
+            print(f"[Advanced Retrieval] BM25 检索失败，跳过: {e}")
 
     # ---- 收改写结果（预算从任务启动时已开始计算，此处通常只需极短等待）----
     if rewrite_task is not None:
         try:
             query_variants, hyde_doc = await rewrite_task
         except Exception as e:
-            print(f"[Advanced Retrieval] ⚠️ 改写任务异常，退化为仅原始查询: {e}")
+            print(f"[Advanced Retrieval] 改写任务异常，退化为仅原始查询: {e}")
             query_variants, hyde_doc = [], ""
     else:
         query_variants, hyde_doc = [], ""
@@ -545,14 +545,14 @@ async def advanced_retrieval(
         try:
             query_results_list.extend(await _vector_pass(extra_queries))
         except Exception as e:
-            print(f"[Advanced Retrieval] ⚠️ 变体向量检索失败，跳过: {e}")
+            print(f"[Advanced Retrieval] 变体向量检索失败，跳过: {e}")
 
         # 第二轮：变体的 BM25 检索（HyDE 是长文档，不进 BM25；与旧实现一致）
         if bm25_index is not None and query_variants:
             try:
                 query_results_list.extend(await _bm25_pass(query_variants, bm25_index))
             except Exception as e:
-                print(f"[Advanced Retrieval] ⚠️ 变体 BM25 检索失败，跳过: {e}")
+                print(f"[Advanced Retrieval] 变体 BM25 检索失败，跳过: {e}")
 
     stage_mark("retrieval_ms", (time.perf_counter() - _retrieval_t0) * 1000)
 
@@ -620,7 +620,7 @@ async def advanced_retrieval(
             stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
             print(f"[Advanced Retrieval] Cross-Encoder 重排序完成（前 {len(head)} 条精排 + {len(tail)} 条 RRF 兜底）")
         except Exception as e:
-            print(f"[Advanced Retrieval] ⚠️ 重排序失败，保持 RRF 顺序: {e}")
+            print(f"[Advanced Retrieval] 重排序失败，保持 RRF 顺序: {e}")
     candidate_docs = head + tail
 
     retrieved_docs = candidate_docs[:top_k]

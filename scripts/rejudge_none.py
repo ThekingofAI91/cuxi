@@ -57,14 +57,14 @@ async def main() -> None:
                 r["evaluation"] = ev
                 ok += 1
                 print(
-                    f"[{i}/{len(targets)}] ✅ {r['question'][:24]}… "
+                    f"[{i}/{len(targets)}] {r['question'][:24]}… "
                     f"忠{ev['faithfulness']} 相{ev['relevancy']} 检{ev['context_precision']} 要{ev['key_points_coverage']}",
                     flush=True,
                 )
             else:
-                print(f"[{i}/{len(targets)}] ⚠️ 判官输出仍无法解析: {r['question'][:24]}", flush=True)
+                print(f"[{i}/{len(targets)}] 判官输出仍无法解析: {r['question'][:24]}", flush=True)
         except Exception as e:
-            print(f"[{i}/{len(targets)}] ❌ {type(e).__name__}: {str(e)[:70]}", flush=True)
+            print(f"[{i}/{len(targets)}] {type(e).__name__}: {str(e)[:70]}", flush=True)
         # 每题落盘一次：中途崩了不丢已回填的结果
         recompute_summary(data)
         RESULT_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

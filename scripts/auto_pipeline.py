@@ -66,19 +66,19 @@ def run_step(name: str, cmd: list[str], env_extra: dict | None = None,
     env = os.environ.copy()
     if env_extra:
         env.update(env_extra)
-    log(f"▶ {name}: {' '.join(cmd)}")
+    log(f">>> {name}: {' '.join(cmd)}")
     t0 = time.time()
     try:
         r = subprocess.run(cmd, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=timeout_s)
         tail = (r.stdout or "")[-800:]
-        log(f"◀ {name}: exit={r.returncode} 耗时 {(time.time()-t0)/60:.1f} 分钟\n--- 输出尾部 ---\n{tail}")
+        log(f"<<< {name}: exit={r.returncode} 耗时 {(time.time()-t0)/60:.1f} 分钟\n--- 输出尾部 ---\n{tail}")
         return r.returncode == 0
     except subprocess.TimeoutExpired:
-        log(f"◀ {name}: 超时（{timeout_s}s）")
+        log(f"<<< {name}: 超时（{timeout_s}s）")
         return False
     except Exception as e:
-        log(f"◀ {name}: 异常 {e}")
+        log(f"<<< {name}: 异常 {e}")
         return False
 
 
@@ -139,8 +139,8 @@ def main() -> None:
     entry = (
         f"\n\n---\n\n#### 优化七十五（自动任务）：中转恢复，评估管线自动执行\n"
         f"- **触发**：守望者探测到中转恢复（连续 2 次有内容），自动按序执行。\n"
-        f"- **评估集扩充**：{'✅' if ok_gen else '⚠️'} {n_questions} 题（tests/eval_dataset_expanded.json，覆盖 jung/adler/wangyangming）。\n"
-        f"- **全量基线（含扩充题 + 合并判官）**：{'✅' if ok_eval else '⚠️'} "
+        f"- **评估集扩充**：{'已完成' if ok_gen else '未完成'}，{n_questions} 题（tests/eval_dataset_expanded.json，覆盖 jung/adler/wangyangming）。\n"
+        f"- **全量基线（含扩充题 + 合并判官）**：{'已完成' if ok_eval else '未完成'}，"
         f"忠实度 {summary.get('avg_faithfulness')} | 相关性 {summary.get('avg_relevancy')} | "
         f"上下文 {summary.get('avg_context_precision')} | 要点 {summary.get('avg_key_points_coverage')} | "
         f"有效评判数 {summary.get('judged_counts')} | 题数 {summary.get('total_questions')}。\n"

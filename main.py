@@ -40,18 +40,18 @@ def _warmup_sync():
     而普通 threading.Thread 中同步执行稳定可复现。
     """
     try:
-        print("[Warmup] 🔥 开始后台预热（不影响服务启动与使用）...", flush=True)
+        print("[Warmup] 开始后台预热（不影响服务启动与使用）...", flush=True)
 
         # 1. 预热 embedding 模型（触发模型文件加载）
         from src.retrieval.embedder import get_embedder
         embedder = get_embedder()
         embedder.embed_query("预热")
-        print("[Warmup] ✅ Embedding 模型就绪", flush=True)
+        print("[Warmup] Embedding 模型就绪", flush=True)
 
         # 2. 预热 Cross-Encoder 重排序模型（560M 参数，首次加载 10-30s）
         from src.retrieval.reranker import get_reranker
         get_reranker().model
-        print("[Warmup] ✅ Rerank 模型就绪", flush=True)
+        print("[Warmup] Rerank 模型就绪", flush=True)
 
         # 3. 预热各角色 collection 的 BM25 索引（全量拉取 + 构建，耗时大头）
         from framework.supervisor import get_chroma_client
@@ -73,16 +73,16 @@ def _warmup_sync():
                 count = collection.count()
                 print(f"[Warmup] {name}: count={count}", flush=True)
                 if count == 0:
-                    print(f"[Warmup] ⏭️ {name}: 文档库为空，跳过")
+                    print(f"[Warmup] {name}: 文档库为空，跳过")
                     continue
                 _ensure_bm25_ready(collection)
-                print(f"[Warmup] ✅ {name}: {count} 条文档，BM25 索引就绪")
+                print(f"[Warmup] {name}: {count} 条文档，BM25 索引就绪")
             except Exception as e:
-                print(f"[Warmup] ⚠️ {name} 预热失败: {e}")
+                print(f"[Warmup] {name} 预热失败: {e}")
 
-        print("[Warmup] ✅ 预热全部完成", flush=True)
+        print("[Warmup] 预热全部完成", flush=True)
     except Exception as e:
-        print(f"[Warmup] ⚠️ 预热失败（不影响使用，首个请求可能稍慢）: {e}", flush=True)
+        print(f"[Warmup] 预热失败（不影响使用，首个请求可能稍慢）: {e}", flush=True)
 
 
 @asynccontextmanager
@@ -102,7 +102,7 @@ async def lifespan(app: FastAPI):
     print(f" ChromaDB 路径: {settings.chroma_persist_dir}")
     if not _configured:
         print("-" * 60)
-        print(" ⚠️  尚未配置 LLM API Key")
+        print(" 尚未配置 LLM API Key")
         print(f"     请打开 http://localhost:{settings.api_port} 在设置页填写自己的 Key，")
         print("     或在项目根目录 .env 中设置 LLM_API_KEY（二选一即可）")
     print("=" * 60)
@@ -164,7 +164,7 @@ async def lifespan(app: FastAPI):
     
     # 关闭时执行
     print("=" * 60)
-    print("👋 应用正在关闭...")
+    print("应用正在关闭...")
     print("=" * 60)
 
 
@@ -254,15 +254,15 @@ if __name__ == "__main__":
         try:
             from src.retrieval.embedder import get_embedder
             get_embedder().embed_query("预热")  # 触发 bge-small-zh-v1.5 加载
-            print("[Warmup] ✅ Embedding 模型预加载完成")
+            print("[Warmup] Embedding 模型预加载完成")
         except Exception as e:
-            print(f"[Warmup] ⚠️ Embedding 模型预加载失败: {e}")
+            print(f"[Warmup] Embedding 模型预加载失败: {e}")
         try:
             from src.retrieval.reranker import get_reranker
             get_reranker().model
-            print("[Warmup] ✅ Rerank 模型预加载完成")
+            print("[Warmup] Rerank 模型预加载完成")
         except Exception as e:
-            print(f"[Warmup] ⚠️ Rerank 模型预加载失败: {e}")
+            print(f"[Warmup] Rerank 模型预加载失败: {e}")
     
     uvicorn.run(
         "main:app",

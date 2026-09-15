@@ -40,7 +40,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
     character_role_prompt = state.get("character_role_prompt", "")
     stream_callback = state.get("stream_callback")
     zone = state.get("zone", "education")  # "education" | "entertainment"
-    print(f"\n[Analysis Agent] 🔍 正在分析: {query}")
+    print(f"\n[Analysis Agent] 正在分析: {query}")
     print(f"[Analysis Agent] 基于 {len(retrieved_docs)} 条检索结果")
     print(f"[Analysis Agent] 对话历史轮次: {len(history)}")
     print(f"[Analysis Agent] 角色人设: {'有' if character_role_prompt else '无'}")
@@ -64,7 +64,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                         from src.retrieval.context_compressor import compress_docs
                         retrieved_docs = await compress_docs(query, retrieved_docs)
                     except Exception as _ce:
-                        print(f"[Analysis Agent] ⚠️ 上下文压缩失败（用原文）: {_ce}")
+                        print(f"[Analysis Agent] 上下文压缩失败（用原文）: {_ce}")
                 context = (_build_light_context(retrieved_docs)
                            if zone == "entertainment" else _build_context(retrieved_docs))
             # 娱乐区：极短回答（~300 token / 约 200 字），像真人微信聊，不堆长篇
@@ -82,7 +82,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                 sampling=state.get("sampling"),
                 user_memory=state.get("user_memory"),
             )
-            print("[Analysis Agent] ✅ 角色口吻回答完成（流式）")
+            print("[Analysis Agent] 角色口吻回答完成（流式）")
             return {
                 "analysis": answer,
                 "route_history": state.get("route_history", []) + ["analysis_agent"],
@@ -182,11 +182,11 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 *分析置信度: {analysis['confidence']:.1%}*
 """
 
-            print(f"[Analysis Agent] ✅ 基于资料分析完成，置信度: {analysis['confidence']:.1%}")
+            print(f"[Analysis Agent] 基于资料分析完成，置信度: {analysis['confidence']:.1%}")
 
         # ---- 无检索结果：用 LLM 自身知识直接回答 ----
         else:
-            print("[Analysis Agent] ⚠️ 无检索结果，用 LLM 自身知识回答")
+            print("[Analysis Agent] 无检索结果，用 LLM 自身知识回答")
 
             # 构建消息列表，注入角色人设和对话历史
             if character_role_prompt:
@@ -241,11 +241,11 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                     if token:
                         full_analysis += token
                         await stream_callback(token)
-                print(f"[Analysis Agent] ✅ LLM 流式回答完成")
+                print(f"[Analysis Agent] LLM 流式回答完成")
             else:
                 response = await ainvoke_nonempty(llm, messages)
                 full_analysis = (response.content if hasattr(response, "content") else "").strip()
-                print(f"[Analysis Agent] ✅ LLM 直接回答完成")
+                print(f"[Analysis Agent] LLM 直接回答完成")
 
         return {
             "analysis": full_analysis,
@@ -253,7 +253,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"[Analysis Agent] ❌ 分析过程出错: {e}")
+        print(f"[Analysis Agent] 分析过程出错: {e}")
         fallback = f"分析过程出现错误: {e}"
         return {
             "analysis": fallback,
@@ -323,7 +323,7 @@ def _parse_analysis_response(text: str) -> dict:
         pass
 
     # 解析失败，用原始文本作为 detailed_analysis
-    print("[Analysis Agent] ⚠️ JSON 解析失败，使用原始文本")
+    print("[Analysis Agent] JSON 解析失败，使用原始文本")
     return {
         "summary": text[:200],
         "key_points": ["（解析失败）"],

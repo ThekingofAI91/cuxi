@@ -94,7 +94,7 @@ def delete_custom_character_file(char_id: str) -> bool:
                 p.unlink()
                 return True
             except OSError as e:
-                print(f"[custom_store] ⚠️ 删除文件失败（角色已从内存注销）: {p.name}: {e}")
+                print(f"[custom_store] 删除文件失败（角色已从内存注销）: {p.name}: {e}")
     return False
 
 

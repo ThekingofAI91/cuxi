@@ -129,5 +129,5 @@ async def compress_docs(question: str, docs: list[Document], llm=None) -> list[D
         return [Document(page_content=s or d.page_content, metadata=d.metadata)
                 for s, d in zip(summaries, docs)]
     except Exception as e:
-        print(f"[Compressor] ⚠️ 压缩失败（回退原文）: {e}")
+        print(f"[Compressor] 压缩失败（回退原文）: {e}")
         return docs

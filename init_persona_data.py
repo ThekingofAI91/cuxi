@@ -24,19 +24,19 @@ def load_character_data(character_id: str):
 
     character = persona_chat_config.characters.get(character_id)
     if not character:
-        print(f"❌ 角色 '{character_id}' 不存在")
+        print(f"角色 '{character_id}' 不存在")
         return
 
     data_dir = Path(character.data_source)
     if not data_dir.exists():
-        print(f"❌ 数据目录不存在: {data_dir}")
+        print(f"数据目录不存在: {data_dir}")
         return
 
     collection_name = character.chroma_collection
     print(f"\n{'='*60}")
-    print(f"🎭 正在加载角色: {character.name}")
-    print(f"📂 数据目录: {data_dir}")
-    print(f"📦 ChromaDB collection: {collection_name}")
+    print(f"正在加载角色: {character.name}")
+    print(f"数据目录: {data_dir}")
+    print(f"ChromaDB collection: {collection_name}")
     print(f"{'='*60}")
 
     # 收集所有文件：data_source 目录中的文件 + 父目录中的 md 文件
@@ -46,10 +46,10 @@ def load_character_data(character_id: str):
         md_files = [f for f in parent_dir.iterdir() if f.is_file() and f.suffix.lower() == '.md' and not f.name.startswith('.')]
         files.extend(md_files)
     if not files:
-        print(f"⚠️ 数据目录为空: {data_dir}")
+        print(f"数据目录为空: {data_dir}")
         return
 
-    print(f"📄 找到 {len(files)} 个文件")
+    print(f"找到 {len(files)} 个文件")
 
     parser = DocumentParser()
     chunker = AdaptiveChunker(
@@ -74,24 +74,24 @@ def load_character_data(character_id: str):
             print(f"    分块: {len(chunks)} 个块")
             all_chunks.extend(chunks)
         except Exception as e:
-            print(f"    ❌ 处理失败: {e}")
+            print(f"    处理失败: {e}")
 
     if not all_chunks:
-        print("\n⚠️ 没有生成任何文档块")
+        print("\n没有生成任何文档块")
         return
 
-    print(f"\n📊 总计: {len(all_chunks)} 个文档块")
+    print(f"\n总计: {len(all_chunks)} 个文档块")
 
     # 向量化
-    print("🔢 正在向量化...")
+    print("正在向量化...")
     embedder = get_embedder()
     vectors, metadatas = embedder.embed_documents_with_metadata(all_chunks)
 
     # 存入 ChromaDB
-    print(f"💾 正在存入 ChromaDB ({collection_name})...")
+    print(f"正在存入 ChromaDB ({collection_name})...")
 
     # 清除旧数据
-    print(f"🗑️ 正在清除旧数据...")
+    print(f"正在清除旧数据...")
     import chromadb
     from chromadb.config import Settings as ChromaSettings
 
@@ -126,7 +126,7 @@ def load_character_data(character_id: str):
             metadatas=batch_metadatas,
         )
 
-    print(f"\n✅ 角色 '{character.name}' 的数据加载完成!")
+    print(f"\n角色 '{character.name}' 的数据加载完成!")
     print(f"   Collection: {collection_name}")
     print(f"   文档块数: {len(all_chunks)}")
     print(f"   向量维度: {len(vectors[0]) if vectors else 'N/A'}")
@@ -134,14 +134,14 @@ def load_character_data(character_id: str):
 
 def main():
     """初始化所有角色的数据"""
-    print("🎭 名人对话场景 — 数据初始化")
+    print("名人对话场景 — 数据初始化")
     print(f"   可用角色: {list(persona_chat_config.characters.keys())}")
 
     for character_id in persona_chat_config.characters:
         load_character_data(character_id)
 
     print(f"\n{'='*60}")
-    print("🎉 所有角色数据初始化完成!")
+    print("所有角色数据初始化完成!")
     print(f"{'='*60}")
 
 

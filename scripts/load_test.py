@@ -50,7 +50,7 @@ async def one(client: httpx.AsyncClient, sem: asyncio.Semaphore, q: str, timeout
             err = str(e)[:60]
         dt = (time.perf_counter() - t0) * 1000
         results.append({"ms": dt, "err": err})
-        flag = "❌ " + err if err else "✅"
+        flag = f"[失败] {err}" if err else "[正常]"
         print(f"  [{len(results):>3}] {dt / 1000:6.1f}s {flag} {q[:20]}")
 
 

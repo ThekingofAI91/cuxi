@@ -84,7 +84,7 @@ async def _retrieve_for_speaker(collection_name: str, query: str, top_k: int = 4
                 parts.append(d.strip())
         return "\n\n".join(parts)
     except Exception as e:
-        print(f"[Roundtable] ⚠️ 检索失败 col={collection_name}: {e}")
+        print(f"[Roundtable] 检索失败 col={collection_name}: {e}")
         return ""
 
 
@@ -197,7 +197,7 @@ async def _stream_llm_with_retry(messages, label: str = "", max_retries: int = 2
             if is_quota and attempts <= max_retries and not got:
                 await asyncio.sleep(2 * attempts)  # 2s / 4s 指数退避
                 continue
-            print(f"[Roundtable] ❌ 发言流式失败 {label}（attempts={attempts}）: {e}")
+            print(f"[Roundtable] 发言流式失败 {label}（attempts={attempts}）: {e}")
             return
 
 

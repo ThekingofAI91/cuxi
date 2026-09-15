@@ -51,7 +51,7 @@ def load_full_dataset() -> list[dict]:
                         items.append(it)
                         seen.add(it["question"])
         except Exception as e:
-            print(f"⚠️ 扩充数据集加载失败（仅用内置 12 题）: {e}")
+            print(f"扩充数据集加载失败（仅用内置 12 题）: {e}")
     return items
 
 
@@ -137,7 +137,7 @@ async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> Optional[di
         except Exception as e:
             # 429/网络异常同样按"该次失败"处理，等一个间隔再试——
             # 若让异常炸出去，整道题的评估就废了
-            print(f"     ⚠️ 判官调用失败（第 {i + 1}/{attempts} 次）: {str(e)[:60]}")
+            print(f"     判官调用失败（第 {i + 1}/{attempts} 次）: {str(e)[:60]}")
             if i + 1 < attempts and judge_gap > 0:
                 await asyncio.sleep(judge_gap)
             continue
@@ -148,7 +148,7 @@ async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> Optional[di
                 return obj
         except Exception:
             pass
-        print(f"     ⚠️ 判官输出无法解析（第 {i + 1}/{attempts} 次），重试…")
+        print(f"     判官输出无法解析（第 {i + 1}/{attempts} 次），重试…")
         if i + 1 < attempts and judge_gap > 0:
             await asyncio.sleep(judge_gap)
     return None
@@ -251,7 +251,7 @@ async def get_system_answer(question: str, scene: str = "persona", character: st
 async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: float = 0.0):
     """运行完整评估"""
     print("=" * 60)
-    print("🎯 RAG 评估开始")
+    print("RAG 评估开始")
     print("=" * 60)
 
     # 获取测试集
@@ -259,13 +259,13 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     if limit:
         dataset = dataset[:limit]
 
-    print(f"\n📋 测试集大小: {len(dataset)} 个问题")
+    print(f"\n测试集大小: {len(dataset)} 个问题")
     if difficulty:
-        print(f"📊 难度筛选: {difficulty}")
+        print(f"难度筛选: {difficulty}")
 
     # 初始化评判 LLM
     llm = get_judge_llm()
-    print(f"🤖 评判模型: {settings.llm_model}")
+    print(f"评判模型: {settings.llm_model}")
 
     # 存储结果（断点续跑：加载已完成的有效记录，本次只补缺口）
     results = []
@@ -279,9 +279,9 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
                     results.append(r)
                     done_questions.add(r["question"])
             if done_questions:
-                print(f"🔁 断点续跑：已有 {len(done_questions)} 题有效结果，本次只补缺口")
+                print(f"断点续跑：已有 {len(done_questions)} 题有效结果，本次只补缺口")
         except Exception as e:
-            print(f"⚠️ 断点文件加载失败，从头评估: {e}")
+            print(f"断点文件加载失败，从头评估: {e}")
     total_start = time.time()
 
     for i, item in enumerate(dataset, 1):
@@ -289,11 +289,11 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         key_points = item["key_points"]
         difficulty = item["difficulty"]
 
-        print(f"\n[{i}/{len(dataset)}] 📝 {question[:40]}...")
+        print(f"\n[{i}/{len(dataset)}] {question[:40]}...")
         print(f"     难度: {difficulty}")
 
         if question in done_questions:
-            print("     ✅ 已有结果，跳过（断点续跑）")
+            print("     已有结果，跳过（断点续跑）")
             continue
 
         # 获取系统回答（扩充数据集带 character 字段；内置数据集默认 jung）
@@ -302,17 +302,17 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             system_response = await get_system_answer(question, character=item.get("character", "jung"))
         except Exception as e:
             # 管线超时/服务异常只跳过该题，不炸整场（2026-09-10：ReadTimeout 曾炸掉全场评估）
-            print(f"     ❌ 管线调用异常，跳过该题: {type(e).__name__}: {str(e)[:80]}")
+            print(f"     管线调用异常，跳过该题: {type(e).__name__}: {str(e)[:80]}")
             continue
         answer = system_response["answer"]
         contexts = system_response["contexts"]
         elapsed = time.time() - start
 
-        print(f"     ⏱️  回答耗时: {elapsed:.1f}s")
-        print(f"     📄 回答长度: {len(answer)} 字符")
+        print(f"     回答耗时: {elapsed:.1f}s")
+        print(f"     回答长度: {len(answer)} 字符")
 
         if not answer or answer.startswith("ERROR"):
-            print(f"     ❌ 获取回答失败: {answer}")
+            print(f"     获取回答失败: {answer}")
             continue
 
         # 评估回答（单题容错：Judge LLM 走外部中转，偶发异常不应炸掉整个评估）
@@ -320,12 +320,12 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         try:
             eval_result = await evaluate_single(llm, question, answer, contexts, key_points)
         except Exception as e:
-            print(f"     ❌ 单题评估异常，跳过该题: {e}")
+            print(f"     单题评估异常，跳过该题: {e}")
             continue
         eval_elapsed = time.time() - eval_start
 
-        print(f"     ⏱️  评估耗时: {eval_elapsed:.1f}s")
-        print(f"     📊 评分: 忠实度={eval_result['faithfulness']}, "
+        print(f"     评估耗时: {eval_elapsed:.1f}s")
+        print(f"     评分: 忠实度={eval_result['faithfulness']}, "
               f"相关性={eval_result['relevancy']}, "
               f"上下文={eval_result['context_precision']}, "
               f"要点={eval_result['key_points_coverage']}")
@@ -353,11 +353,11 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
 
     # 计算汇总统计（None 安全：判官彻底失败的指标不计入平均，单独计数）
     print("\n" + "=" * 60)
-    print("📊 评估结果汇总")
+    print("评估结果汇总")
     print("=" * 60)
 
     if not results:
-        print("❌ 没有有效的评估结果")
+        print("没有有效的评估结果")
         return
 
     METRICS = ["faithfulness", "relevancy", "context_precision", "key_points_coverage"]
@@ -375,7 +375,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     avgs: dict[str, Optional[float]] = {}
     judged: dict[str, int] = {}
     n = len(results)
-    print(f"\n📈 总体指标（共 {n} 个问题，括号内为该指标的有效评判数）:")
+    print(f"\n总体指标（共 {n} 个问题，括号内为该指标的有效评判数）:")
     for m in METRICS:
         avg, cnt = avg_of(m)
         avgs[m], judged[m] = avg, cnt
@@ -383,16 +383,16 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         if avg is None:
             print(f"   • {label:<28} 无有效评判")
         else:
-            note = "" if cnt == n else f"（⚠️ {n - cnt} 题判官输出无法解析，未计入）"
+            note = "" if cnt == n else f"（{n - cnt} 题判官输出无法解析，未计入）"
             print(f"   • {label:<28} {avg:.1f}/10  [{cnt}/{n}]{note}")
 
     failed_metrics = sum(n - judged[m] for m in METRICS)
     if failed_metrics:
-        print(f"\n   ⚠️ 共 {failed_metrics} 个指标因判官输出无法解析被剔除"
+        print(f"\n   共 {failed_metrics} 个指标因判官输出无法解析被剔除"
               f"（旧版会静默记 5 分污染平均分——那不是评分，是故障）")
 
     # 按难度分组统计（None 安全：分母只数有效值）
-    print(f"\n📊 按难度分组:")
+    print(f"\n按难度分组:")
     for diff in ["easy", "medium", "hard"]:
         diff_results = [r for r in results if r["difficulty"] == diff]
         if diff_results:
@@ -407,7 +407,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     # 耗时统计
     avg_answer_time = sum(r["timing"]["answer_seconds"] for r in results) / len(results)
     total_answer_time = sum(r["timing"]["answer_seconds"] for r in results)
-    print(f"\n⏱️  耗时统计:")
+    print(f"\n耗时统计:")
     print(f"   • 总耗时: {total_elapsed:.1f}s")
     print(f"   • 平均回答耗时: {avg_answer_time:.1f}s")
     print(f"   • 总回答耗时: {total_answer_time:.1f}s")
@@ -428,17 +428,17 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             "results": results,
         }, f, ensure_ascii=False, indent=2)
 
-    print(f"\n💾 详细结果已保存到: {output_path}")
+    print(f"\n详细结果已保存到: {output_path}")
 
     # 输出改进建议（仅在有效评判充足时给出，避免被解析失败误导）
     print("\n" + "=" * 60)
-    print("💡 改进建议")
+    print("改进建议")
     print("=" * 60)
 
     def warn_if_low(metric: str, msg: str) -> None:
         avg, cnt = avg_of(metric)
         if avg is not None and cnt >= max(3, n // 2) and avg < 7:
-            print(f"   ⚠️  {msg}")
+            print(f"   {msg}")
 
     warn_if_low("faithfulness", "忠实度偏低：回答可能包含幻觉，建议优化 prompt 或增加检索量")
     warn_if_low("relevancy", "相关性偏低：回答可能跑题，建议优化 prompt 聚焦问题")
@@ -446,7 +446,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     warn_if_low("key_points_coverage", "要点覆盖率偏低：回答不够完整，建议增加 retrieval_top_k")
 
     if (avgs["faithfulness"] or 0) >= 8 and (avgs["relevancy"] or 0) >= 8:
-        print("   ✅ 整体表现良好！可以考虑增加更多测试问题来验证稳定性")
+        print("   整体表现良好！可以考虑增加更多测试问题来验证稳定性")
 
 
 if __name__ == "__main__":

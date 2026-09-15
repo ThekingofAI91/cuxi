@@ -106,11 +106,11 @@ def delete_conversation_history(session_id: str) -> bool:
             del _conversation_summaries[session_id]
             existed = True
     if existed:
-        print(f"[Supervisor] 🗑️ 已删除会话历史: session={session_id}")
+        print(f"[Supervisor] 已删除会话历史: session={session_id}")
         try:
             _get_session_store().delete(session_id)
         except Exception as e:
-            print(f"[Supervisor] ⚠️ 会话持久化删除失败: {e}")
+            print(f"[Supervisor] 会话持久化删除失败: {e}")
     return existed
 
 
@@ -139,7 +139,7 @@ def append_conversation(session_id: str, query: str, answer: str):
             current = list(_conversation_history_store.get(session_id, []))
         _get_session_store().set_history(session_id, current)
     except Exception as e:
-        print(f"[Supervisor] ⚠️ 对话历史持久化失败: {e}")
+        print(f"[Supervisor] 对话历史持久化失败: {e}")
 
 
 def truncate_conversation_history(session_id: str, keep_turns: int) -> int:
@@ -166,7 +166,7 @@ def truncate_conversation_history(session_id: str, keep_turns: int) -> int:
     try:
         _get_session_store().set_history(session_id, current)
     except Exception as e:
-        print(f"[Supervisor] ⚠️ 截断后历史持久化失败: {e}")
+        print(f"[Supervisor] 截断后历史持久化失败: {e}")
     return len(current)
 
 
@@ -183,14 +183,14 @@ def pop_last_turn(session_id: str, expect_query: str | None = None) -> bool:
         if not turns:
             return False
         if expect_query is not None and turns[-1][0] != expect_query:
-            print(f"[Supervisor] ⚠️ pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
+            print(f"[Supervisor] pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
             return False
         turns.pop()
         current = list(turns)
     try:
         _get_session_store().set_history(session_id, current)
     except Exception as e:
-        print(f"[Supervisor] ⚠️ 弹轮后历史持久化失败: {e}")
+        print(f"[Supervisor] 弹轮后历史持久化失败: {e}")
     return True
 
 
@@ -232,13 +232,13 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
                 ("user", context),
             ])
             _conversation_summaries[session_id] = response.content.strip()
-            print(f"[Supervisor] ✅ 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
+            print(f"[Supervisor] 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
             try:
                 _get_session_store().set_summary(session_id, _conversation_summaries[session_id])
             except Exception as e:
-                print(f"[Supervisor] ⚠️ 摘要持久化失败: {e}")
+                print(f"[Supervisor] 摘要持久化失败: {e}")
         except Exception as e:
-            print(f"[Supervisor] ⚠️ 摘要生成失败: {e}")
+            print(f"[Supervisor] 摘要生成失败: {e}")
 
 
 def format_history_for_prompt(history: list[tuple[str, str]], max_turns: int = None, session_id: str = None) -> str:
@@ -437,7 +437,7 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     # 限制最大循环次数
     supervisor_count = route_history.count("supervisor")
     if supervisor_count > 6 or len(route_history) > 15:
-        print(f"[Supervisor] ⚠️ 达到最大路由次数 (supervisor={supervisor_count}, total={len(route_history)})，强制结束")
+        print(f"[Supervisor] 达到最大路由次数 (supervisor={supervisor_count}, total={len(route_history)})，强制结束")
         # 以角色口吻兜底，保证回答风格一致
         final_answer = await _generate_direct_response(
             query, history, character_role_prompt, stream_callback,
@@ -608,7 +608,7 @@ def _citation_block(verification: str) -> str:
     summary_match = re.search(r"### 核查摘要\n(.*?)(?=\n###|\Z)", verification, re.DOTALL)
     citation_match = re.search(r"### 引用出处\n(.*?)(?=\n###|\Z)", verification, re.DOTALL)
     if summary_match:
-        parts.append(f"\n\n---\n📊 {summary_match.group(1).strip()}")
+        parts.append(f"\n\n---\n{summary_match.group(1).strip()}")
     if citation_match:
         parts.append(f"\n**引用出处:**\n{citation_match.group(1).strip()}")
     return "".join(parts).strip()

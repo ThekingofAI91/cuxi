@@ -83,5 +83,5 @@ print(f"向量前5个值: {vec[:5]}")
 
 print()
 print("=" * 60)
-print("✅ Day 2 所有功能测试通过！")
+print("Day 2 所有功能测试通过！")
 print("=" * 60)

@@ -140,7 +140,7 @@ def compare(res_a: dict, res_b: dict, name_a: str, name_b: str) -> None:
         q = key.split("::")[1]
         rows.append((key.split("::")[0].replace("persona_", ""), q, overlap, tau, full_j))
     for col, q, ov, tau, fj in rows:
-        flag = "  ⚠️" if ov < 0.6 else ""
+        flag = "  [低]" if ov < 0.6 else ""
         print(f"  {col:<12} {q[:30]:<30} head5={ov:.0%}  tau={tau:.2f}  full15={fj:.0%}{flag}")
     n = len(rows)
     print("-" * 88)

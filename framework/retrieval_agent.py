@@ -63,7 +63,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
     """
     query = state["query"]
     history = state.get("history", [])
-    print(f"\n[Retrieval Agent] 🔍 正在检索: {query}")
+    print(f"\n[Retrieval Agent] 正在检索: {query}")
     print(f"[Retrieval Agent] 对话历史轮次: {len(history)}")
 
     # ---- 0. 零检索开关（默认关闭，由 settings.entertainment_light_retrieval 控制）----
@@ -92,7 +92,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
 
         count = collection.count()
         if count == 0:
-            print("[Retrieval Agent] ⚠️ 文档库为空，请先上传文档")
+            print("[Retrieval Agent] 文档库为空，请先上传文档")
             return {
                 "retrieved_docs": [],
                 "route_history": state.get("route_history", []) + ["retrieval_agent"],
@@ -125,7 +125,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
         question = query
         if config and getattr(config, 'history_aware_retrieval', False) and history:
             question = build_history_aware_query(query, history[-2:])
-            print(f"[Retrieval Agent] 🔁 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
+            print(f"[Retrieval Agent] 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
 
         # 短问题跳过 Multi-Query + HyDE 改写（省 1 次串行 LLM 往返，降低首字延迟）。
         # 原始查询 + BM25 已能覆盖短问题的召回；长/复杂问题仍走完整改写以提升召回。
@@ -189,13 +189,13 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
                                 existing.add(did)
                                 added += 1
                         if added:
-                            print(f"[Retrieval Agent] 🕸️ 触发知识图谱增强（{reason}），并入 {added} 条证据")
+                            print(f"[Retrieval Agent] 触发知识图谱增强（{reason}），并入 {added} 条证据")
                     else:
-                        print(f"[Retrieval Agent] 🕸️ 图谱已触发（{reason}）但无命中")
+                        print(f"[Retrieval Agent] 图谱已触发（{reason}）但无命中")
                 else:
                     print(f"[Retrieval Agent] 文本检索质量达标，跳过知识图谱（{reason}）")
             except Exception as ge:
-                print(f"[Retrieval Agent] ⚠️ 知识图谱检索失败，跳过: {ge}")
+                print(f"[Retrieval Agent] 知识图谱检索失败，跳过: {ge}")
 
         return {
             "retrieved_docs": retrieved_docs,
@@ -204,7 +204,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
         }
 
     except Exception as e:
-        print(f"[Retrieval Agent] ❌ 检索过程中出错: {e}")
+        print(f"[Retrieval Agent] 检索过程中出错: {e}")
         return {
             "retrieved_docs": [],
             "route_history": state.get("route_history", []) + ["retrieval_agent"],

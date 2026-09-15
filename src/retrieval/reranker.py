@@ -103,7 +103,7 @@ class Reranker:
                             self._apply_int8_quantization(self._model)
                         print("[Reranker] 模型加载完成")
                     except Exception as e:
-                        print(f"[Reranker] ⚠️ 模型加载失败: {e}")
+                        print(f"[Reranker] 模型加载失败: {e}")
                         print("[Reranker] 使用降级方案（直接返回原始顺序）")
                         self._model = "fallback"
         return self._model
@@ -136,7 +136,7 @@ class Reranker:
             )
             print(f"[Reranker] int8 动态量化完成（转换 {time.time() - t0:.1f}s，一次性，CPU 推理 ~1.57x）")
         except Exception as e:
-            print(f"[Reranker] ⚠️ int8 量化失败（回退 fp32）: {e}")
+            print(f"[Reranker] int8 量化失败（回退 fp32）: {e}")
 
     def rerank(
         self,

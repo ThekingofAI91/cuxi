@@ -31,7 +31,7 @@ def probe() -> bool:
             max_tokens=1,
         )
         ok = bool(r.choices)
-        print(f"[{time.strftime('%H:%M:%S')}] {'✅ 恢复' if ok else '异常响应'}", flush=True)
+        print(f"[{time.strftime('%H:%M:%S')}] {'恢复' if ok else '异常响应'}", flush=True)
         return ok
     except Exception as e:
         print(
