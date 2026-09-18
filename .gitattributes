@@ -1,0 +1,14 @@
+# 换行符策略
+#
+# 本仓库的 core.autocrlf 为 true，文本文件检出时会被写成 CRLF。
+# 但有三个文件必须保持 LF，否则会静默失效或报错：
+#
+# 1. .dockerignore：Docker 按 \n 逐行切分但保留行尾的 \r，
+#    检出成 CRLF 后每条规则都变成 "模式\r"，永远匹配不上。
+#    后果是构建上下文重新膨胀回 4 GB，且不会报任何错。
+# 2. Dockerfile / docker-compose.yml：行尾的 \r 会混进 RUN 命令与 YAML 值。
+# 3. shell 脚本：在 Linux 容器内执行，CRLF 会导致解释器报 bad interpreter。
+.dockerignore        text eol=lf
+Dockerfile           text eol=lf
+docker-compose.yml   text eol=lf
+*.sh                 text eol=lf
