@@ -14,7 +14,7 @@
 <meta property="og:title" content="促膝 · 隔空促膝，如面而谈">
 <meta property="og:description" content="与荣格、阿德勒、王阳明等历史智者对话。AI 仿真角色，内容仅供学习与参考。">
 <title>促膝 · 隔空促膝，如面而谈</title>
-<link rel="stylesheet" href="/assets/css/main.css?v=1789976161" />
+<link rel="stylesheet" href="/assets/css/main.css?v=1790000932" />
 <link rel="stylesheet" href="/assets/css/premium.css?v=1789462086" />
 </head>
 <body data-theme="original">
@@ -43,6 +43,10 @@
       <button class="zone-card zone-ent" data-zone="entertainment" type="button">
         <span class="zone-card-name">会心</span>
         <span class="zone-card-desc">与有趣的人闲坐漫谈，像老友重逢，不设防</span>
+      </button>
+      <button class="zone-card zone-rt" data-mode="roundtable" type="button">
+        <span class="zone-card-name">争鸣</span>
+        <span class="zone-card-desc">让几位智者同桌而立，各执一词，彼此交锋</span>
       </button>
     </div>
   </section>
@@ -152,10 +156,10 @@
 
 <div class="sidebar-mask" id="sidebarMask"></div>
 
-<!-- ===== 圆桌会议视图 ===== -->
+<!-- ===== 争鸣（圆桌会议）视图 ===== -->
 <div class="roundtable-view" id="roundTableView" hidden>
   <div class="rt-header">
-    <div class="rt-title">圆桌会议</div>
+    <div class="rt-title">争鸣<span class="rt-subtitle">圆桌会议</span></div>
     <button class="rt-back" id="rtBackBtn" type="button">返回</button>
   </div>
 
@@ -163,30 +167,54 @@
     <div class="rt-intro">
       <p class="rt-brand">促膝</p>
       <p class="rt-tagline">与智者，促膝长谈；让思想，同台交锋。</p>
+      <p class="rt-rule">谁开口，由他们自己决定——有人要反驳、要澄清，才会举手。</p>
     </div>
     <div class="rt-setup-row">
-      <span class="rt-label">选择与会者（至少 2 位，最多 <span id="rtMax">4</span> 位）</span>
+      <span class="rt-label">与会者（至少 2 位，最多 <span id="rtMax">3</span> 位）</span>
       <div class="rt-chips" id="rtChips"></div>
     </div>
     <div class="rt-setup-row">
-      <span class="rt-label">辩论议题</span>
+      <span class="rt-label">议题</span>
       <textarea class="rt-topic" id="rtTopic" placeholder="例如：人终其一生，应当追求幸福，还是追求意义？"></textarea>
     </div>
     <div class="rt-controls">
       <div class="rt-rounds" id="rtRounds">
-        <span class="rt-label" style="align-self:center;margin-right:4px;">交锋轮数</span>
+        <span class="rt-label rt-label-inline">交锋轮数</span>
         <button class="rt-round-btn active" data-rounds="1" type="button">1 轮</button>
         <button class="rt-round-btn" data-rounds="2" type="button">2 轮</button>
         <button class="rt-round-btn" data-rounds="3" type="button">3 轮</button>
       </div>
-      <button class="rt-start" id="rtStartBtn" type="button" disabled>开始辩论</button>
+      <div class="rt-rounds" id="rtPicker">
+        <span class="rt-label rt-label-inline">主持</span>
+        <button class="rt-round-btn active" data-picker="user" type="button">我来主持</button>
+        <button class="rt-round-btn" data-picker="agent" type="button">代班主持</button>
+      </div>
+      <button class="rt-start" id="rtStartBtn" type="button" disabled>开始争鸣</button>
     </div>
   </div>
 
   <div class="rt-transcript" id="rtTranscript">
     <div class="rt-empty" id="rtEmpty">
-      选择两位或以上人物，抛出一个议题，<br>让他们同台辩论、相互交锋。<br><br>
-      每位人物都会调用自己的知识库，以第一人称立场发言。
+      请两三位智者同桌，抛出一个议题，<br>让他们各自判断要不要开口。<br><br>
+      多人同时要发言时，由你点将；你不想管，就让主持人代班。<br>
+      散场后只有纪要，没有胜负——怎么想，留给你自己。
+    </div>
+  </div>
+
+  <div class="rt-summary" id="rtSummary" hidden></div>
+
+  <!-- 点将弹层：多人同时举手时出现 -->
+  <div class="rt-ask" id="rtAsk" hidden>
+    <div class="rt-ask-card" role="dialog" aria-modal="true" aria-label="选择下一位发言者">
+      <div class="rt-ask-head">
+        <span>多位同时要发言，你想先听谁？</span>
+        <span class="rt-ask-timer" id="rtAskTimer"></span>
+      </div>
+      <div class="rt-ask-list" id="rtAskList"></div>
+      <div class="rt-ask-foot">
+        <span class="rt-ask-hint">不选的话，主持人会替你安排。</span>
+        <button class="rt-ask-cancel" id="rtAskCancel" type="button">让主持人定</button>
+      </div>
     </div>
   </div>
 </div>
@@ -390,13 +418,13 @@
     <p class="setup-note">配置写在服务端 <code>data/user_config.json</code>（已加入 .gitignore）。也可以改用项目根目录的 .env，两者填一个即可。</p>
   </div>
 </div>
-<script src="/assets/js/core.js?v=1789462086"></script>
+<script src="/assets/js/core.js?v=1790000932"></script>
 <script src="/assets/js/storage.js?v=1789462086"></script>
-<script src="/assets/js/home.js?v=1789462086"></script>
+<script src="/assets/js/home.js?v=1790000932"></script>
 <script src="/assets/js/conversations.js?v=1789462086"></script>
 <script src="/assets/js/chat.js?v=1789978994"></script>
 <script src="/assets/js/create.js?v=1789462086"></script>
-<script src="/assets/js/roundtable.js?v=1789462086"></script>
+<script src="/assets/js/roundtable.js?v=1790000932"></script>
 <script src="/assets/js/feedback.js?v=1789462086"></script>
 <script src="/assets/js/auth.js?v=1789462086"></script>
 <script src="/assets/js/setup.js?v=1789462086"></script>

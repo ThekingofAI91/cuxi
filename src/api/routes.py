@@ -24,7 +24,12 @@ from framework.supervisor import (
     _summarize_old_turns, delete_conversation_history,
     truncate_conversation_history, pop_last_turn,
 )
-from framework.roundtable import stream_roundtable, MAX_ROUNDTABLE_CHARS
+from framework.roundtable import (
+    MAX_ROUNDTABLE_CHARS,
+    get_roundtable_session,
+    stream_roundtable,
+    submit_roundtable_choice,
+)
 from src.core.config import settings
 from src.core.state import AgentState
 from src.core.session_store import get_store as _get_session_store
@@ -1776,10 +1781,12 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
 @router.post("/persona/roundtable")
 async def persona_roundtable_endpoint(http_request: Request, request: "RoundtableRequest"):
     """
-    圆桌会议端点（流式输出）：将多名名人拉入同一议题，按回合轮流发言、相互交锋。
+    圆桌会议端点（流式输出）：将多名名人拉入同一议题，自主发言、相互交锋。
 
-    请求体：{ topic, character_ids:[...], rounds, session_id? }
-    返回 SSE 事件流：start / round / speaker_start / token / speaker_end / end / error。
+    请求体：{ topic, character_ids:[...], rounds, session_id?, picker? }
+    返回 SSE 事件流：start / round / intent_start / intent / contention / choice /
+    converged / budget_exhausted / speaker_start / token / speaker_end / end /
+    summary_start / summary / summary_end / error。
     """
     rid = uuid.uuid4().hex[:12]
     set_request_id(rid)
@@ -1788,8 +1795,12 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
     topic = (request.topic or "").strip()
     character_ids = [str(c).strip() for c in (request.character_ids or []) if str(c).strip()]
     rounds = int(request.rounds or 1)
+    picker = "agent" if str(request.picker or "").lower() == "agent" else "user"
     session_id = request.session_id or str(uuid.uuid4())
-    logger.info("start ip=%s topic=%r speakers=%s rounds=%d", client_ip, topic[:60], character_ids, rounds)
+    logger.info(
+        "start ip=%s topic=%r speakers=%s rounds=%d picker=%s",
+        client_ip, topic[:60], character_ids, rounds, picker,
+    )
 
     if not topic:
         raise HTTPException(status_code=400, detail="请提供圆桌会议的议题 topic")
@@ -1839,9 +1850,10 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
     async def event_stream():
         speakers_meta: list = []
         transcript: list = []
+        summary: dict = {}
         cur = None
         try:
-            async for evt in stream_roundtable(topic, valid_ids, rounds, session_id):
+            async for evt in stream_roundtable(topic, valid_ids, rounds, session_id, picker=picker):
                 yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
                 et = evt.get("type")
                 if et == "start":
@@ -1856,6 +1868,8 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
                     cur["content"] = evt.get("content", "")
                     transcript.append(cur)
                     cur = None
+                elif et == "summary":
+                    summary = evt.get("data", {}) or {}
             # 圆桌会话落库：完整流式结束后写入 SQLite，可历史回看
             try:
                 _get_session_store().save_roundtable(
@@ -1864,6 +1878,7 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
                     speakers=speakers_meta,
                     rounds=rounds,
                     transcript=transcript,
+                    summary=summary,
                 )
             except Exception:
                 logger.exception("roundtable_save_failed session=%s", session_id)
@@ -1885,6 +1900,26 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/persona/roundtable/{session_id}/choice")
+async def roundtable_choice_endpoint(session_id: str, request: "RoundtableChoiceRequest"):
+    """用户点将：多人同时举手时，由用户指定下一位发言者。
+
+    圆桌的自主发言是**双向交互**——SSE 流跑到争用点会挂起等待，这里把用户的选择
+    写进内存里的会议会话并唤醒它。之所以不用 WebSocket：只要"流挂起 + 另一个
+    普通 POST 唤醒"就够了，不必为此引入新协议。
+    character_id 传空字符串表示**主动弃权**，交给主持人代班（按"无人选择"处理）。
+    会议已结束（或超时已被主持人代班接管）返回 409，前端忽略即可。
+    """
+    session = get_roundtable_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=409, detail="这场会议已经结束了")
+    cid = (request.character_id or "").strip()
+    if cid and cid not in session.ledger:
+        raise HTTPException(status_code=400, detail="该人物不在本场会议中")
+    submit_roundtable_choice(session_id, cid)
+    return {"ok": True, "session_id": session_id, "character_id": cid}
 
 
 # ============================================================
@@ -1914,11 +1949,18 @@ async def roundtable_delete_endpoint(session_id: str):
 
 
 class RoundtableRequest(BaseModel):
-    """圆桌会议请求"""
+    """圆桌会议（争鸣）请求"""
     topic: str
     character_ids: list[str]
     rounds: int = 1
     session_id: Optional[str] = None
+    # 谁主持：user = 用户主持（多人争抢时弹窗点将）；agent = 主持人代班（直接裁决）
+    picker: str = "user"
+
+
+class RoundtableChoiceRequest(BaseModel):
+    """用户在争用点上的点将选择（空字符串 = 弃权，交主持人代班）"""
+    character_id: str = ""
 
 
 @router.post("/persona/upload")

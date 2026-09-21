@@ -2,7 +2,10 @@
 // ============================================================
 // 状态
 // ============================================================
-const RT_MAX = 4; // 圆桌人数上限：人太多会削弱交锋感
+// 争鸣人数上限：3 是有交锋感又不累人的上限。
+// 依据 P(≥2 人同时举手) = 1-(1-p)^N - N·p·(1-p)^(N-1)：p=0.7 时 2 人 49%、3 人 78%、
+// 4 人 92% —— 4 人以上几乎每轮都要用户点将，玩法从"观赏"变成"操作"。
+const RT_MAX = 3;
 const state = {
   sessionId: crypto.randomUUID(),
   conversations: [],
@@ -86,7 +89,7 @@ const detailLoc = document.getElementById('detailLoc');
 const detailEnterBtn = document.getElementById('detailEnterBtn');
 const selectBackHomeBtn = document.getElementById('selectBackHomeBtn');
 
-// 圆桌会议（Roundtable）相关 DOM
+// 圆桌会议（争鸣）相关 DOM
 const roundtableView = document.getElementById('roundTableView');
 const rtBackBtn = document.getElementById('rtBackBtn');
 const rtChips = document.getElementById('rtChips');
@@ -94,9 +97,15 @@ const rtMaxEl = document.getElementById('rtMax');
 if (rtMaxEl) rtMaxEl.textContent = String(RT_MAX);
 const rtTopic = document.getElementById('rtTopic');
 const rtRounds = document.getElementById('rtRounds');
+const rtPicker = document.getElementById('rtPicker');
 const rtStartBtn = document.getElementById('rtStartBtn');
 const rtTranscript = document.getElementById('rtTranscript');
 const rtEmpty = document.getElementById('rtEmpty');
+const rtAsk = document.getElementById('rtAsk');
+const rtAskList = document.getElementById('rtAskList');
+const rtAskTimer = document.getElementById('rtAskTimer');
+const rtAskCancel = document.getElementById('rtAskCancel');
+const rtSummary = document.getElementById('rtSummary');
 const roundtableBtn = document.getElementById('roundtableBtn');
 const introRoundtableBtn = document.getElementById('introRoundtableBtn');
 

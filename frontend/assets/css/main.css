@@ -217,10 +217,6 @@
     border-top: 1px solid #EFEDE5;
     font-size: 12px; line-height: 1.7; color: #8A8578;
   }
-  /* 首页「圆桌会议」入口卡 */
-  .rt-entry-card { border-top: 3px solid #6b8cff; }
-  .rt-entry-card .hc-ability { color: #6b8cff; }
-
   /* ---------- stage 3: detail (image background + info) ---------- */
   .detail-stage {
     z-index: 1;
@@ -2371,3 +2367,151 @@ html.setup-open, html.setup-open body { overflow: hidden; }
   .setup-btn { min-height: 46px; }
 }
 
+
+/* ============================================================
+   争鸣（圆桌会议）—— 自主发言制新增的界面
+   ============================================================ */
+
+/* 首页分区层：三张卡并列（问道 / 会心 / 争鸣）。
+   3 x 280 + 2 x 26 = 892，原来的 720 会把第三张挤到第二行。 */
+.zone-deck { max-width: 960px; }
+.zone-rt { border-top: 3px solid #6b8cff; }
+
+.rt-subtitle {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 12px; font-weight: 400; letter-spacing: 2px;
+  color: #6B6B66; padding-left: 9px; border-left: 1px solid rgba(22,22,22,.16);
+}
+.rt-rule { font-size: 12.5px; line-height: 1.85; color: #8A857C; margin: 8px 0 0; }
+.rt-label-inline { align-self: center; margin-right: 4px; }
+
+/* ---- 本轮公告条：把「谁想说话 / 最后谁发言」这个过程显性化 ---- */
+.rt-bar {
+  border: 1px dashed rgba(22,22,22,.16); border-radius: 10px;
+  padding: 10px 14px; background: rgba(255,255,255,.6);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rt-bar-text { font-size: 12.5px; color: #6B6B66; letter-spacing: .3px; }
+.rt-bar-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.rt-bar-chip {
+  font-size: 12.5px; line-height: 1.6; color: #2B2B28;
+  background: #F1EFE8; border-radius: 999px; padding: 4px 12px;
+}
+.rt-bar-chip b { font-weight: 600; color: #161616; }
+
+.rt-notice {
+  text-align: center; font-size: 12.5px; letter-spacing: .5px; color: #6B6B66;
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+}
+.rt-notice-calm { color: #8A857C; }
+.rt-speaker-count { font-size: 11px; font-weight: 400; color: #8A857C; }
+
+/* ---- 点将弹层：多人同时举手时出现 ---- */
+.rt-ask {
+  position: absolute; inset: 0; z-index: 6;
+  display: flex; align-items: center; justify-content: center; padding: 20px;
+  background: rgba(250,250,247,.86);
+}
+.rt-ask[hidden] { display: none; }
+.rt-ask-card {
+  width: 100%; max-width: 460px;
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 14px;
+  padding: 20px 20px 16px; display: flex; flex-direction: column; gap: 12px;
+}
+.rt-ask-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-size: 14px; color: #161616;
+}
+.rt-ask-timer { font-size: 12px; color: #8A857C; font-variant-numeric: tabular-nums; }
+.rt-ask-list { display: flex; flex-direction: column; gap: 8px; }
+.rt-ask-item {
+  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  background: #FAFAF7; border: 1px solid #E6E3DA; border-radius: 10px;
+  padding: 11px 14px; cursor: pointer; font-family: inherit;
+  transition: border-color .15s ease, background .15s ease;
+}
+.rt-ask-item:hover { border-color: #161616; background: #FFFFFF; }
+.rt-ask-item.suggested { border-color: rgba(107,140,255,.55); }
+.rt-ask-name { font-size: 14px; font-weight: 600; color: #161616; }
+.rt-ask-reason { font-size: 12.5px; line-height: 1.7; color: #6B6B66; }
+.rt-ask-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-top: 1px solid #EFEDE5; padding-top: 12px;
+}
+.rt-ask-hint { font-size: 12px; color: #8A857C; }
+.rt-ask-cancel {
+  background: transparent; border: 1px solid rgba(22,22,22,.22); color: #6B6B66;
+  border-radius: 999px; padding: 7px 15px; cursor: pointer; font-size: 12.5px;
+  font-family: inherit; transition: all .15s ease;
+}
+.rt-ask-cancel:hover { border-color: #161616; color: #161616; }
+
+/* ---- 纪要（分歧地图）：散场后从底部升起的一块面板 ---- */
+.rt-summary {
+  flex: none; max-height: 46vh; overflow-y: auto;
+  border-top: 1px solid rgba(22,22,22,.1);
+  background: rgba(255,255,255,.66); padding: 18px 22px 22px;
+}
+.rt-summary[hidden] { display: none; }
+.rt-summary-loading { font-size: 13px; color: #8A857C; text-align: center; padding: 14px 0; }
+.rt-summary-card { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 10px; }
+.rt-summary-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.rt-summary-title {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 17px; font-weight: 600; color: #161616;
+}
+.rt-summary-note { font-size: 12px; letter-spacing: 1px; color: #8A857C; }
+.rt-summary-topic {
+  margin: 0 0 4px; font-size: 12.5px; color: #6B6B66;
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+}
+.rt-summary-label {
+  margin: 8px 0 2px; font-size: 12px; letter-spacing: 1px; color: #8A857C;
+}
+
+.rt-summary-clashes, .rt-summary-positions, .rt-summary-open {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rt-clash {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  font-size: 13px; line-height: 1.7;
+}
+.rt-clash-a, .rt-clash-b {
+  border-radius: 999px; padding: 2px 10px; font-size: 12.5px;
+  background: #F1EFE8; color: #161616;
+}
+.rt-clash-a { background: #E6F1FB; color: #185FA5; }
+.rt-clash-vs { font-size: 12px; color: #B4AFA6; }
+.rt-clash-point { color: #6B6B66; }
+.rt-position { display: flex; gap: 10px; font-size: 13px; line-height: 1.75; }
+.rt-position-name { flex: 0 0 60px; color: #8A857C; }
+.rt-position-stance { flex: 1; min-width: 0; color: #2B2B28; }
+.rt-open-item { display: flex; gap: 10px; font-size: 13px; line-height: 1.75; color: #2B2B28; }
+.rt-open-idx { flex: 0 0 14px; color: #B4AFA6; }
+.rt-summary-degraded { margin: 4px 0 0; font-size: 12px; color: #8A857C; }
+
+/* 自表态：系统不下判断，但给用户一个出口（纯前端，不上报、不展示全局占比） */
+.rt-stand { border-top: 1px solid #EFEDE5; margin-top: 8px; padding-top: 4px; }
+.rt-stand-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.rt-stand-btn {
+  background: transparent; border: 1px solid rgba(22,22,22,.2); color: #2B2B28;
+  border-radius: 999px; padding: 6px 16px; cursor: pointer; font-size: 12.5px;
+  font-family: inherit; transition: all .15s ease;
+}
+.rt-stand-btn:hover { border-color: #161616; }
+.rt-stand-btn.active { background: #161616; border-color: #161616; color: #FAFAF7; }
+.rt-stand-nobody { color: #6B6B66; }
+.rt-stand-note { margin: 10px 0 0; font-size: 12px; color: #8A857C; }
+
+@media (max-width: 900px) {
+  .rt-subtitle { display: none; }
+  .rt-bar { padding: 9px 12px; }
+  .rt-ask-card { padding: 16px 16px 14px; }
+  .rt-ask-item { padding: 10px 12px; }
+  .rt-summary { max-height: 52vh; padding: 14px 14px 18px; }
+  .rt-position-name { flex: 0 0 52px; }
+}
+
+.rt-summary-counts {
+  margin: 6px 0 0; font-size: 12px; color: #8A857C; letter-spacing: .3px;
+}

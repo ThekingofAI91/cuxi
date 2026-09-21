@@ -47,11 +47,20 @@ class SessionStore:
                     speakers TEXT DEFAULT '[]',
                     rounds INTEGER DEFAULT 1,
                     transcript TEXT DEFAULT '[]',
+                    summary TEXT DEFAULT '{}',
                     created_at REAL,
                     updated_at REAL
                 )
                 """
             )
+            # 老库补列（CREATE TABLE IF NOT EXISTS 不会给已存在的表加字段）。
+            # 单独一条 ALTER + 忽略异常，重复执行无副作用。
+            try:
+                self._conn.execute(
+                    "ALTER TABLE roundtables ADD COLUMN summary TEXT DEFAULT '{}'"
+                )
+            except sqlite3.OperationalError:
+                pass
             self._conn.commit()
 
     def _ensure(self, session_id: str, now: float) -> None:
@@ -153,15 +162,16 @@ class SessionStore:
         speakers: list,
         rounds: int,
         transcript: list,
+        summary: Optional[dict] = None,
     ) -> None:
-        """保存一场圆桌会议（topic / 与会者 / 完整发言记录），按 session_id 覆盖。"""
+        """保存一场圆桌会议（topic / 与会者 / 完整发言记录 / 纪要），按 session_id 覆盖。"""
         now = time.time()
         with self._lock:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO roundtables
-                    (session_id, topic, speakers, rounds, transcript, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?)
+                    (session_id, topic, speakers, rounds, transcript, summary, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?)
                 """,
                 (
                     session_id,
@@ -169,6 +179,7 @@ class SessionStore:
                     json.dumps(speakers or [], ensure_ascii=False),
                     int(rounds or 1),
                     json.dumps(transcript or [], ensure_ascii=False),
+                    json.dumps(summary or {}, ensure_ascii=False),
                     now,
                     now,
                 ),
@@ -188,6 +199,10 @@ class SessionStore:
                 d[k] = json.loads(d[k] or "[]")
             except Exception:
                 d[k] = []
+        try:
+            d["summary"] = json.loads(d.get("summary") or "{}")
+        except Exception:
+            d["summary"] = {}
         return d
 
     def list_roundtables(self, ttl_days: int = 30) -> list[dict[str, Any]]:

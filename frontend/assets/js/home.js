@@ -271,31 +271,20 @@ function renderDeck() {
     homeDeck.querySelectorAll('.home-card').forEach((el) => el.classList.add('is-in'));
   });
 
-  // 选完区域后：追加「圆桌会议」入口；娱乐区额外追加「创建人物」入口
-  if (zone) {
-    const rtEl = document.createElement('div');
-    rtEl.className = 'home-card rt-entry-card';
-    rtEl.dataset.rt = '1';
-    rtEl.innerHTML = '<div class="hc-ability">多人同台</div><div class="hc-name">圆桌会议</div><div class="hc-tagline">让多位角色就同一话题交锋论道</div><div class="hc-review">跨时空的思想碰撞</div>';
-    rtEl.addEventListener('click', () => openRoundtable());
-    rtEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openRoundtable(); }
+  // 选完区域后：娱乐区额外追加「创建人物」入口。
+  // 注：「争鸣」已升级为与问道/会心同级的入口（首页分区层第三张卡），
+  // 不再作为角色列表尾部的附加卡片——它是**玩法**，不是某个分区的一部分。
+  if (zone === 'entertainment') {
+    const createEl = document.createElement('div');
+    createEl.className = 'home-card create-card-entry';
+    createEl.dataset.charId = '__create__';
+    createEl.innerHTML = '<div class="hc-name">＋ 创建人物</div>';
+    createEl.addEventListener('click', openCreateModal);
+    createEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCreateModal(); }
     });
-    homeDeck.appendChild(rtEl);
-    requestAnimationFrame(() => rtEl.classList.add('is-in'));
-
-    if (zone === 'entertainment') {
-      const createEl = document.createElement('div');
-      createEl.className = 'home-card create-card-entry';
-      createEl.dataset.charId = '__create__';
-      createEl.innerHTML = '<div class="hc-name">＋ 创建人物</div>';
-      createEl.addEventListener('click', openCreateModal);
-      createEl.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openCreateModal(); }
-      });
-      homeDeck.appendChild(createEl);
-      requestAnimationFrame(() => createEl.classList.add('is-in'));
-    }
+    homeDeck.appendChild(createEl);
+    requestAnimationFrame(() => createEl.classList.add('is-in'));
   }
 }
 
@@ -383,7 +372,16 @@ if (homeIntro) {
   });
 }
 document.querySelectorAll('#zoneDeck .zone-card').forEach((el) => {
-  el.addEventListener('click', () => homeSelectZone(el.dataset.zone));
+  el.addEventListener('click', () => {
+    // 「争鸣」是玩法入口而非分区：直接进圆桌，跳过角色选择，
+    // 也**不写 state.homeZone**——zone 是硬逻辑（检索策略 / prompt 分支 / 标不标来源），
+    // 把玩法混进分区语义迟早出错。
+    if (el.dataset.mode === 'roundtable') {
+      openRoundtable();
+      return;
+    }
+    homeSelectZone(el.dataset.zone);
+  });
 });
 if (detailEnterBtn) {
   detailEnterBtn.addEventListener('click', (e) => {
