@@ -13,6 +13,12 @@ Workflow = 路径由代码预定义；Agent = LLM 运行时决定流程与工具
 2. 若请求工具：执行检索 → 把原文作为 ToolMessage 回填 → 再流式生成最终回答
 3. 检索到的文档与图谱标记写回 state，供引用出处（citations 事件）与 verifier 复用
 
+成本边界（面试要能报数）：
+一次请求进本节点的次数恒为 1（supervisor 侧有"工具化跑过就不再回送"的闸门），
+LLM 往返次数上限 = tool_max_rounds + 1。模型直答时只烧 1 次；请求检索时烧 2 次
+（1 次决策 + 1 次作答）。这就是"让模型自己决定要不要查"相对规则路由多付的那一次往返，
+换的是"不该查的时候一次都不查"。
+
 开关：settings.tool_retrieval_enabled（默认 False）。
 关闭时本模块完全不参与，链路仍走 supervisor 规则路由 → retriever → analyzer。
 """
@@ -184,6 +190,49 @@ async def _invoke_tool(tool: StructuredTool, call: dict) -> str:
         return "检索失败，暂时查不到资料。请凭你自己的记忆与判断回答，不要编造具体出处。"
 
 
+# 空轮重试次数：与 src/core/llm.py 的空响应容错同一套思路。上游存在
+# "HTTP 200 但什么都不吐"的空壳（本项目实测发生率随时段波动），
+# 不重试这一轮就会交回空 analysis，把用户拖进下一段降级链路。
+_EMPTY_ROUND_ATTEMPTS = 2
+
+
+async def _stream_round(target, messages: list, stream_callback) -> tuple[str, list[dict]]:
+    """跑一轮流式生成，返回 (正文, 模型请求的工具调用)。
+
+    这里不能直接复用 src/core/llm.py 的 astream_nonempty：它把"一个 token 都没产出"
+    一律当失败重试，而工具轮天然可能整轮没有正文（模型直接吐一个 tool_call），
+    会被误判成空壳，同一轮反复重试到把工具调用丢掉。
+    判据因此改成"正文和工具调用都没有"才算空轮；且只在没往用户推过任何 token 时
+    才重试——推过就说明上游是活的，重试会让同一段话出现两遍。
+    """
+    for attempt in range(_EMPTY_ROUND_ATTEMPTS + 1):
+        texts: list[str] = []
+        pending: dict = {}
+        try:
+            async for chunk in target.astream(messages):
+                _collect_tool_calls(chunk, pending)
+                text = getattr(chunk, "content", None)
+                if text:
+                    texts.append(text)
+                    if stream_callback:
+                        await stream_callback(text)
+        except Exception:
+            if texts:
+                raise  # 已经推给用户了，重来会重复
+            if attempt >= _EMPTY_ROUND_ATTEMPTS:
+                raise
+            print(f"[Tool Agent] 本轮流式异常且无输出（第 {attempt + 1} 次），重试…")
+            continue
+
+        calls = _finalize_tool_calls(pending)
+        if texts or calls:
+            return "".join(texts), calls
+        if attempt >= _EMPTY_ROUND_ATTEMPTS:
+            return "", []
+        print(f"[Tool Agent] 上游返回空轮（第 {attempt + 1} 次），重试…")
+    return "", []
+
+
 async def tool_agent(state: AgentState) -> dict[str, Any]:
     """
     工具化检索节点：模型自主决定是否检索，代码只执行并回填。
@@ -241,28 +290,18 @@ async def tool_agent(state: AgentState) -> dict[str, Any]:
         for round_idx in range(rounds + 1):
             use_tools = round_idx < rounds
             target = llm_with_tools if use_tools else llm
-            pending: dict = {}
-            texts: list[str] = []
-
-            async for chunk in target.astream(messages):
-                _collect_tool_calls(chunk, pending)
-                text = getattr(chunk, "content", None)
-                if text:
-                    texts.append(text)
-                    if stream_callback:
-                        await stream_callback(text)
-
-            calls = _finalize_tool_calls(pending)
-            answer_parts.append("".join(texts))
+            text, calls = await _stream_round(target, messages, stream_callback)
+            answer_parts.append(text)
 
             if not calls:
-                if not any(p.strip() for p in answer_parts):
-                    # 整轮既没正文也没工具请求：上游空壳，交给 supervisor 走直答兜底
-                    print("[Tool Agent] 本轮无任何输出，交给 supervisor 兜底")
+                if not text.strip():
+                    # 整轮既没正文也没工具请求（重试后仍空）：上游空壳。
+                    # 这里不再自行重来，交空 analysis 让 supervisor 退回规则路径。
+                    print("[Tool Agent] 本轮重试后仍无任何输出，交给 supervisor 兜底")
                 break
 
             print(f"[Tool Agent] 第 {round_idx + 1} 轮：模型请求检索 {len(calls)} 次")
-            messages.append(AIMessage(content="".join(texts), tool_calls=calls))
+            messages.append(AIMessage(content=text, tool_calls=calls))
             for call in calls:
                 result = await _invoke_tool(tool, call)
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
@@ -279,8 +318,9 @@ async def tool_agent(state: AgentState) -> dict[str, Any]:
         }
 
     except Exception as e:
-        # 工具化失败不能拖垮回答：抛空 analysis，supervisor 会降级为直答
-        print(f"[Tool Agent] 工具化检索失败（降级直答）: {e}")
+        # 工具化失败不能拖垮回答：归还空 analysis，supervisor 会把它退回规则路径
+        # （有资料 → analyzer 复用；无资料 → retriever），本节点不会被重复进入
+        print(f"[Tool Agent] 工具化检索失败（退回规则路径）: {e}")
         return {
             "analysis": "",
             "retrieved_docs": [],

@@ -450,12 +450,11 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
 
     路由策略（跳过 LLM 路由，省一次调用）：
     1. 引用核查已完成 → 编译最终答案
-    2. 已有分析结果：
-       - 检索到原著资料 → verifier（引用核查）
-       - 无资料可对照 → 直接作为最终回答
+    2. 已有分析结果 → 直接作为最终回答（引用核查已移出图内，异步补推）
     3. 已检索但未分析 → analyzer（防死循环）
-    4. 问候/闲聊 → 直接回复
-    5. 其余 → retriever（先检索，analyzer 会基于检索结果回答）
+    4. 工具化检索已跑过但仍无分析 → analyzer（有资料）/ retriever（无资料）
+    5. 问候/闲聊 → 直接回复
+    6. 其余 → retriever / tool_agent（工具化开启时）
 
     注：历史轮次过多时的压缩由 _update_conversation_history 的异步任务
     在图外完成，不占用图内路由。
@@ -542,6 +541,22 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             "route_history": route_history + ["supervisor"],
         }
 
+    # 防死循环：工具化检索已经跑过一轮仍未产出分析（上游空响应 / 工具路径整体降级），
+    # 说明这条路本轮走不通，绝不能再把它送回 tool_agent。
+    # 没有这道闸，tool_agent 交回空 analysis 时 supervisor 的条件会一路穿透到
+    # 工具分支，于是反复回送：实测一次问答因此 supervisor↔tool_agent 来回 7 轮、
+    # 单次耗时 61 秒（logs/app.log 的 elapsed_ms 实测），
+    # 直到 supervisor_count>6 的强制结束才收手。
+    # 退回目标分两种：拿到过资料就走 analyzer——analyzer 自己读
+    # state["retrieved_docs"] 建上下文，资料不白查；一条都没查到才回 retriever 走老路。
+    if "tool_agent" in route_history and not has_analysis:
+        target = "analyzer" if has_docs else "retriever"
+        print(f"[Supervisor] 工具化检索未产出结果，退回 {target}（防重复进入 tool_agent）")
+        return {
+            "next_agent": target,
+            "route_history": route_history + ["supervisor"],
+        }
+
     # ---- 轻聊快速通道：社交寒暄/语气回应直接生成，不进检索管线 ----
     # 这类消息不需要任何知识库资料，走全管线要白付检索改写 + 精排的 5-8s；
     # 快速通道一次 LLM 直出，首字延迟从 ~20s 降到 ~2s。
@@ -573,11 +588,17 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
         }
 
     # ---- 工具化检索（实验，settings.tool_retrieval_enabled，默认关闭）----
-    # 把"这一轮要不要查资料"交给模型自己判断：analyzer 绑定 search_library，
+    # 把"这一轮要不要查资料"交给模型自己判断：tool_agent 绑定 search_library，
     # 模型决定直答还是先查原书。这是本项目唯一的真 agent 环节（LLM 输出决定控制流）。
     # 只放教育区：娱乐区检索是 23ms 的软背景、靠角色卡撑人设，
     # 工具化要给每条消息加一次 LLM 往返，得不偿失。
-    if getattr(settings, "tool_retrieval_enabled", False) and state.get("zone") != "entertainment":
+    # "tool_agent" not in route_history 是硬约束：一次请求最多进 tool_agent 一次。
+    # 上面的防重入闸门已经挡住了空结果回送，这里再挡一道，两道都失效才算真漏。
+    if (
+        getattr(settings, "tool_retrieval_enabled", False)
+        and state.get("zone") != "entertainment"
+        and "tool_agent" not in route_history
+    ):
         print("[Supervisor] 工具化检索：交由模型自行判断是否检索")
         return {
             "next_agent": "tool_agent",

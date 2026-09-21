@@ -1,10 +1,11 @@
 """
 工具化检索（framework/tool_agent）测试。
 
-覆盖三件事：
+覆盖四件事：
 1. 模型请求调用 search_library → 检索被执行、结果回填、文档写回 state
 2. 模型选择直接回答 → 一次检索都不发生
 3. 开关 tool_retrieval_enabled 决定 supervisor 走 tool_agent 还是老的 retriever
+4. 防死循环：交回空 analysis（上游空响应 / 工具路径降级）时不再被送回 tool_agent
 
 LLM 全部打桩（按脚本产出 chunk），不触真实 API，也不碰 ChromaDB。
 """
@@ -236,7 +237,7 @@ def test_tool_failure_degrades_without_breaking_answer(monkeypatch):
     monkeypatch.setattr(ta, "get_chat_llm", boom)
     out = asyncio.run(tool_agent(_base_state()))
 
-    # 不抛异常，交空 analysis 让 supervisor 走直答兜底
+    # 不抛异常，交空 analysis 让 supervisor 退回规则路径（不会被再送回 tool_agent）
     assert out["analysis"] == ""
     assert out["error"]
 
@@ -280,3 +281,137 @@ def test_graph_contains_tool_agent_node():
     nodes = set(getattr(graph, "nodes", {}) or {})
     assert "tool_agent" in nodes
     assert "retriever" in nodes  # 旧路径同时保留
+
+
+# ============================================================
+# 防死循环：tool_agent 交回空 analysis（上游空响应 / 工具路径降级）
+# ============================================================
+# 用户实测 bug：supervisor 与 tool_agent 来回 7 轮、单次耗时 61 秒，
+# 直到 supervisor_count>6 的强制结束才收手。下面三个测试把这个环钉死。
+
+
+def test_supervisor_never_re_enters_tool_agent_without_analysis(monkeypatch):
+    """工具化跑过但没吐出正文时，supervisor 必须换目标，不能回送 tool_agent"""
+    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
+    monkeypatch.setattr(settings, "light_chat_enabled", False)
+
+    after_tool = ["supervisor", "tool_agent", "supervisor"]
+
+    # 查到过资料 → 走 analyzer 复用（analyzer 自己读 retrieved_docs，不再重复检索）
+    out = asyncio.run(sup.supervisor_node(_base_state(
+        analysis="", retrieved_docs=FAKE_DOCS, route_history=after_tool,
+    )))
+    assert out["next_agent"] == "analyzer"
+
+    # 一条资料都没查到 → 退回规则检索路径
+    out = asyncio.run(sup.supervisor_node(_base_state(
+        analysis="", retrieved_docs=[], route_history=after_tool,
+    )))
+    assert out["next_agent"] == "retriever"
+
+    # 两种情况都必须继续推进 route_history（图靠它判定轮次）
+    assert out["route_history"] == after_tool + ["supervisor"]
+
+
+def test_graph_terminates_when_tool_agent_returns_empty(monkeypatch):
+    """端到端（LLM 全打桩）：tool_agent 交回空 analysis 后必须几步内收敛
+
+    修复前这条链会一直 supervisor→tool_agent 互送，直到 6 次上限。
+    """
+    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
+    monkeypatch.setattr(settings, "light_chat_enabled", False)
+
+    calls = {"tool": 0, "retriever": 0, "analyzer": 0}
+
+    async def fake_tool(state):
+        calls["tool"] += 1
+        return {
+            "analysis": "",
+            "retrieved_docs": [],
+            "route_history": state["route_history"] + ["tool_agent"],
+        }
+
+    async def fake_retriever(state):
+        calls["retriever"] += 1
+        return {
+            "retrieved_docs": FAKE_DOCS,
+            "route_history": state["route_history"] + ["retrieval_agent"],
+        }
+
+    async def fake_analyzer(state):
+        calls["analyzer"] += 1
+        return {
+            "analysis": "格物不是去格外面的物，是在心上学做工夫。",
+            "route_history": state["route_history"] + ["analysis_agent"],
+        }
+
+    monkeypatch.setattr(ta, "tool_agent", fake_tool)
+    monkeypatch.setattr(sup, "retrieval_agent", fake_retriever)
+    monkeypatch.setattr(sup, "analysis_agent", fake_analyzer)
+
+    graph = sup.build_graph()
+
+    async def run():
+        final: dict = {}
+        async for update in graph.astream(
+            _base_state(route_history=[]),
+            config={"recursion_limit": 25},
+            stream_mode="updates",
+        ):
+            for _node, out in update.items():
+                final.update(out)
+        return final
+
+    final = asyncio.run(run())
+
+    assert calls["tool"] == 1  # 只进一次，不再被回送
+    assert final["final_answer"] == "格物不是去格外面的物，是在心上学做工夫。"
+
+
+def test_supervisor_routes_to_tool_agent_only_once_across_rounds(monkeypatch):
+    """分析一直为空也不能再选 tool_agent（退化路径或安全网强制结束都算通过）"""
+    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
+    monkeypatch.setattr(settings, "light_chat_enabled", False)
+
+    rh = ["supervisor", "tool_agent", "supervisor"]
+    for _ in range(6):
+        out = asyncio.run(sup.supervisor_node(
+            _base_state(analysis="", retrieved_docs=[], route_history=rh)
+        ))
+        assert out["next_agent"] != "tool_agent"
+        # analyzer / retriever 是退化路径；__end__ 是 supervisor 次数上限的安全网
+        assert out["next_agent"] in {"analyzer", "retriever", "__end__"}
+        rh = out["route_history"]
+
+
+# ============================================================
+# 空轮重试：上游吐空壳时不能把空 analysis 交出去
+# ============================================================
+
+def test_empty_round_is_retried_but_tool_only_round_is_not(monkeypatch):
+    """判据是"正文和工具调用都没有"才算空轮——只有工具调用的轮次不能重试"""
+    async def fake_retrieve(query, history=None, light_retrieval=False, skip_retrieval=False):
+        return FAKE_DOCS, False, ""
+
+    monkeypatch.setattr(ta, "retrieve_documents", fake_retrieve)
+
+    # 第 1 轮吐空壳（重试），第 2 轮出正文
+    llm = ScriptedLLM([[], [_text("心即理。"), _text("心外无理。")]])
+    monkeypatch.setattr(ta, "get_chat_llm", lambda **kw: llm)
+
+    out = asyncio.run(tool_agent(_base_state()))
+    assert out["analysis"] == "心即理。心外无理。"
+    assert len(llm.seen_messages) > 1  # 空轮被重试过
+
+    # 对照：整轮没有正文、只有一个工具调用 —— 这是工具轮的常态，不能被当空壳重试
+    llm2 = ScriptedLLM([
+        _tool_call_fragments(SEARCH_TOOL_NAME, '{"query": "格物"}', "call_1"),
+        [_text("格物在心。")],
+    ])
+    monkeypatch.setattr(ta, "get_chat_llm", lambda **kw: llm2)
+    out2 = asyncio.run(tool_agent(_base_state()))
+
+    # 第 1 轮（无正文 + 1 个工具调用）+ 第 2 轮（出正文）= 恰好 2 次流式调用，没多试
+    assert len(llm2.seen_messages) == 2
+    assert out2["analysis"] == "格物在心。"
+    assert out2["retrieved_docs"] == FAKE_DOCS
