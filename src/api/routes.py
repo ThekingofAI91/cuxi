@@ -615,6 +615,11 @@ async def delete_conversation(session_id: str):
     _deleted_sessions.add(session_id)
     _persist_session_meta()
     _persist_deleted_sessions()
+    # 同步失效答案缓存：_ANSWER_CACHE 按（用户, 角色, 问题）索引、不含 session_id，
+    # 删除会话后若不清，用户重新提出同一问题会命中旧缓存并原样回放（连 route_history
+    # 都是旧的），表现为「删掉的对话凭空复现」。删除接口拿不到该会话用过的全部 key，
+    # 故整表清空；缓存只是省一次图执行的优化，清空的代价仅是多跑一次完整流程。
+    _ANSWER_CACHE.clear()
     print(f"[History] 删除会话: session={session_id}, history={deleted_history}, session_store={deleted_session}")
     return {
         "session_id": session_id,
@@ -1453,7 +1458,11 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
         # 避免并发时互相覆盖导致串扰/丢回答
         result_box: dict = {"final_answer": "", "route_history": [], "info_gap_questions": None}
         history_before = get_conversation_history(session_id)
-        cache_key = f"{character_id}::{request.query.strip()}"
+        # 缓存键必须带用户维度：答案里会注入该用户的长期记忆块（见下方 _memory_block），
+        # 若只按（角色, 问题）索引，用户 A 的答案会被用户 B 原样命中。
+        # 匿名用户不建记忆（下方注释），统一归入 anon 段，可安全共享。
+        _user_seg = f"u:{_user['id']}" if _user else "anon"
+        cache_key = f"{_user_seg}::{character_id}::{request.query.strip()}"
         was_cache_hit = False
 
         _first_token_at: list[float] = []
