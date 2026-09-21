@@ -15,6 +15,7 @@ from src.core.llm import get_chat_llm
 
 from src.core.config import settings
 from src.core.state import AgentState
+from src.core.utils import strip_doc_ext
 
 
 async def verification_agent(state: AgentState) -> dict[str, Any]:
@@ -352,6 +353,8 @@ def _format_citation_item(index: int, claim: str, evidence: str, inferred: bool 
     source_match = re.search(r"来源: (.+?)(?:\s*\||\n|$)", evidence)
     heading_match = re.search(r"章节: (.+?)(?:\n|$)", evidence)
     source = source_match.group(1).strip() if source_match else "原著"
+    # 界面上只显示著作名，不暴露 .pdf/.epub 这类文件后缀
+    source = strip_doc_ext(source)
     heading = heading_match.group(1).strip() if heading_match else ""
 
     claim_short = claim[:40] + ("…" if len(claim) > 40 else "")

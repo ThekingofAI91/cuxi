@@ -33,6 +33,7 @@ from src.core.content_filter import contains_sensitive, sanitize_output, refusal
 from src.core.monitor import get_monitor
 from src.core.feedback import get_feedback_store
 from src.core import accounts
+from src.core.utils import strip_doc_ext
 from src.document_processing.parser import DocumentParser
 from src.retrieval.chunker import AdaptiveChunker
 from src.retrieval.embedder import get_embedder
@@ -1652,11 +1653,12 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             graph_used = bool(result_box.get("graph_used", False))
 
             # 引用标注映射：正文 [n] 角标 → 资料（来源/章节），前端渲染悬浮出处。
-            # 编号与 _build_context 的 [1]..[n] 清单顺序一致
+            # 编号与 _build_context 的 [1]..[n] 清单顺序一致；
+            # 来源去掉 .pdf/.epub 后缀，界面上只显示著作名。
             _doc_map = [
                 {
                     "n": i + 1,
-                    "source": (d.metadata or {}).get("source", ""),
+                    "source": strip_doc_ext((d.metadata or {}).get("source", "")),
                     "heading": (d.metadata or {}).get("heading", ""),
                 }
                 for i, d in enumerate(result_box.get("retrieved_docs", []) or [])

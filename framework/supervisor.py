@@ -597,25 +597,23 @@ def _rule_based_routing(query: str) -> str:
 
 
 def _citation_block(verification: str) -> str:
-    """从引用核查报告中提取「核查摘要 + 引用出处」区块，供回答返回后异步推送。
+    """从引用核查报告中提取「引用出处」列表，供回答返回后异步推送。
 
-    与历史 _compile_final_answer 拼接待引用出处逻辑保持一致；verifier 移出图内后，
-    routes.event_stream 用本函数把引用出处渲染成 type:'citations' 事件补推给用户。
+    只取引用出处逐条列表，不输出核查摘要与引用可信度：前端把本函数的返回值
+    整体放进折叠区块正文且不解析 markdown，任何统计数字或 `**加粗**`、`---`
+    都会原样显示，纯列表最干净。verifier 移出图内后，routes.event_stream 用
+    本函数把引用出处渲染成 type:'citations' 事件补推给用户。
     """
     if not verification:
         return ""
-    parts = []
-    summary_match = re.search(r"### 核查摘要\n(.*?)(?=\n###|\Z)", verification, re.DOTALL)
     citation_match = re.search(r"### 引用出处\n(.*?)(?=\n###|\Z)", verification, re.DOTALL)
-    if summary_match:
-        parts.append(f"\n\n---\n{summary_match.group(1).strip()}")
-    if citation_match:
-        parts.append(f"\n**引用出处:**\n{citation_match.group(1).strip()}")
-    return "".join(parts).strip()
+    if not citation_match:
+        return ""
+    return citation_match.group(1).strip()
 
 
 def _compile_final_answer(state: AgentState) -> str:
-    """编译最终答案：角色回答 + 引用核查摘要 + 引用出处"""
+    """编译最终答案：角色回答 + 引用出处"""
     analysis = state.get("analysis", "")
     verification = state.get("verification", "")
 

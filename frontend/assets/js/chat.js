@@ -65,7 +65,7 @@ function renderMessages() {
       // 引用核查报告：元信息，默认折叠。仅当正文真的引用了资料（含 [n] 角标）
       // 时才出现——寒暄类回答正文不含角标，因此不会再看到那张引用可信度评分表。
       const citeReport = (msg.extra?.citations && /\[\d{1,2}\]/.test(msg.content || ''))
-        ? `<details class="cite-report"><summary>引用核查</summary><div class="cite-report-body">${escapeHtml(msg.extra.citations)}</div></details>`
+        ? `<details class="cite-report"><summary>引用出处</summary><div class="cite-report-body">${escapeHtml(msg.extra.citations)}</div></details>`
         : '';
       // 多版本回答（重新生成产生的候选）：可在版本间来回切换
       const variants = (msg.extra?.variants && msg.extra.variants.length > 1) ? msg.extra.variants : null;
