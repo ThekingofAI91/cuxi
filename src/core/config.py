@@ -113,6 +113,18 @@ class Settings(BaseSettings):
     # 真实提问永远走检索；置 False 恢复全管线。
     light_chat_enabled: bool = True
 
+    # 工具化检索（实验，默认关闭）：把"这一轮到底要不要查资料"的决定权交给模型。
+    # analyzer 绑定 search_library 工具，模型自己选——要依据就调工具查原书，
+    # 只是寒暄就直接回答。这是本项目唯一的真 agent 环节：LLM 输出决定控制流。
+    # 关闭时零行为变化，仍走 supervisor 规则路由 → retriever → analyzer 老路径。
+    # 打开后图变为 supervisor → tool_agent → supervisor（retriever 节点被绕过）。
+    # 只作用于教育区：娱乐区靠角色卡撑人设、检索是 23ms 的软背景，
+    # 工具化会给每条消息加一次 LLM 往返（约 3-8s），得不偿失。
+    tool_retrieval_enabled: bool = False
+    # 工具轮次上限：模型连续要资料的次数上限，防止来回空转烧钱。
+    # 实测正常提问 1 次足够；追问指代偶尔需要第 2 次（换关键词重查）。
+    tool_max_rounds: int = 2
+
     # 自建角色总量上限（全站）：无账号体系阶段防"脚本批量造角"撑爆磁盘与向量库。
     # 上线账号体系后可按用户单独限额，届时调大或取消全局上限。
     max_custom_characters: int = 200

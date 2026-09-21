@@ -3,9 +3,12 @@ Supervisor Agent — 整个系统的大脑
 通用框架层，通过 scene_config 注入场景特定的prompt和配置
 
 当前项目只保留名人对话场景（persona_chat）：
-图结构 = supervisor → retriever/analyzer/verifier
-- 问候/闲聊直接回复；其余一律先检索再分析
-- 分析完成后对引用原著的回答做引用核查（verifier），再编译最终答案
+图结构 = supervisor → retriever / analyzer / tool_agent
+- 问候/闲聊直接回复；其余默认先检索再分析
+- 开启 settings.tool_retrieval_enabled 后改由 tool_agent 承担检索：
+  模型自己判断要不要查资料（真 agent 环节），retriever 节点被绕过
+- 引用核查（verifier）已移出图内关键路径，改为回答返回后异步执行，
+  经 type:'citations' 事件补推引用出处（见 src/api/routes.py 的 event_stream）
 """
 
 import contextvars
@@ -265,6 +268,98 @@ def format_history_for_prompt(history: list[tuple[str, str]], max_turns: int = N
 # Supervisor Node 实现
 # ============================================================
 
+def build_direct_messages(
+    query: str,
+    history: list[tuple[str, str]] = None,
+    character_role_prompt: str = "",
+    session_id: str = None,
+    context: str = None,
+    zone: str = "education",
+    post_history_directive: str = None,
+    user_memory: str = None,
+) -> list:
+    """装配回答用的消息序列：人设 → 用户记忆 → 资料 → 历史 → 后历史指令 → 提问。
+
+    顺序是刻意的，工具化检索路径（framework/tool_agent）复用本函数，
+    让"直接回答"与"查完资料再回答"两条路的消息结构完全一致。
+    - 资料放在对话历史之前：历史越长，越会稀释"必须基于资料"的硬约束
+    - 后历史指令放在历史之后：长对话靠它最后再钉一次人设（对应酒馆 Author's Note）
+    这两条顺序别动，动了人设就会漂。
+    """
+    config = get_scene_config()
+    system_prompt = config.direct_response_system_prompt if config else (
+        "你是一个友好的AI助手。"
+    )
+
+    # 注入角色人设
+    if character_role_prompt:
+        voice = getattr(config, "persona_voice_directive", "") if config else ""
+        system_prompt = f"""{character_role_prompt}
+
+{system_prompt}
+
+{voice}"""
+
+    # 构建消息列表，注入对话历史
+    messages = [("system", system_prompt)]
+
+    # 注入检索上下文（基于知识库的资料），减少幻觉
+    if user_memory:
+        # 用户长期记忆：放在人设之后、资料之前——它是"对这位朋友的了解"，
+        # 优先级低于硬约束（资料核查话术），但要在对话历史之前被看到
+        from src.core.memory import format_memory_directive
+        messages.append(("system", format_memory_directive(user_memory)))
+
+    if context:
+        if zone == "entertainment":
+            # 娱乐区：资料 = 角色自己的记忆，不是"参考资料"。
+            # 严禁暴露检索痕迹——一旦说出"根据资料""出自某篇"，人设当场崩。
+            messages.append(("system", f"""【你记得的事】下面是你自己的记忆——你经历过的事、你说过的话、你熟悉的场景。
+用它们帮你想起细节和语气，但：
+- 绝对不要说出"根据资料""据我记载""出自某篇文章""资料显示"这类话
+- 不要列来源、不要报章节名、不要标注出处
+- 就当是你自己想起来了，用你平时说话的方式正常说出来
+- 记忆里没有的，凭你自己的判断说；涉及具体数字、日期、名次这类硬事实，想不起来就说想不起来，别编
+
+{context}"""))
+        else:
+            messages.append(("system", f"""以下是基于知识库整理的参考资料。
+
+【重要】你必须严格基于以下参考资料来回答，不要添加资料中没有的信息。
+如果参考资料不足以完整回答问题，请明确说明哪些部分基于资料、哪些部分无法从资料中得出。
+不要编造资料中不存在的事实、数字或概念。
+基于资料的延伸推理（如投射、自性化等概念的应用建议）可以用"我会这样看""依我的经验"等角色化口吻带出，
+但不要与著作中的原话混为一谈，也不要宣称延伸内容出自某本著作。
+
+【引用标注】回答中的关键论断、概念解释、事实与数字，请在句末标注所依据资料的编号（如 [2]）；
+一个论断依据多条资料时可并列（如 [1][3]）；延伸推理部分不标注。编号与下方资料清单一一对应。
+
+## 参考资料
+{context}"""))
+
+    if history:
+        history_text = format_history_for_prompt(history, max_turns=settings.max_history_turns, session_id=session_id)
+        # 历史使用指令按场景配置（名人对话鼓励延续，保持话题连贯）
+        history_instruction = ""
+        if config:
+            history_instruction = getattr(config, 'history_instruction', "") or ""
+        if not history_instruction:
+            history_instruction = "以下是之前的对话历史（仅用于理解指代和背景，不要主动延伸历史话题）："
+        messages.append(("system", f"""{history_instruction}
+
+{history_text}
+
+【重要】引用对话历史中的信息时，必须原样保留用户提供的具体数字、分数、日期、名称等，不得修改或近似。"""))
+
+    # 后历史指令：历史之后再钉一次角色。人设指令全在最前面时，
+    # 对话历史越长稀释越严重，这条是长对话不跑偏的关键（对应酒馆 Author's Note）。
+    if post_history_directive:
+        messages.append(("system", post_history_directive))
+
+    messages.append(("user", query))
+    return messages
+
+
 async def _generate_direct_response(
     query: str,
     history: list[tuple[str, str]] = None,
@@ -298,19 +393,7 @@ async def _generate_direct_response(
     """
     try:
         config = get_scene_config()
-        system_prompt = config.direct_response_system_prompt if config else (
-            "你是一个友好的AI助手。"
-        )
         fallback = config.display_name if config else "AI助手"
-
-        # 注入角色人设
-        if character_role_prompt:
-            voice = getattr(config, "persona_voice_directive", "") if config else ""
-            system_prompt = f"""{character_role_prompt}
-
-{system_prompt}
-
-{voice}"""
 
         # 名人对话回答通常需要更长篇幅，放宽 token 上限（避免尾部"建议"被截断）
         # 娱乐区由调用方传入更小的 max_tokens（如 300），实现极短回答
@@ -332,63 +415,18 @@ async def _generate_direct_response(
         # DeepSeek / OpenAI 兼容 API 会以 400 拒收未知字段（角色卡该字段已弃用）
         llm = get_chat_llm(**_llm_kwargs)
 
-        # 构建消息列表，注入对话历史
-        messages = [("system", system_prompt)]
-
-        # 注入检索上下文（基于知识库的资料），减少幻觉
-        if user_memory:
-            # 用户长期记忆：放在人设之后、资料之前——它是"对这位朋友的了解"，
-            # 优先级低于硬约束（资料核查话术），但要在对话历史之前被看到
-            from src.core.memory import format_memory_directive
-            messages.append(("system", format_memory_directive(user_memory)))
-
-        if context:
-            if zone == "entertainment":
-                # 娱乐区：资料 = 角色自己的记忆，不是"参考资料"。
-                # 严禁暴露检索痕迹——一旦说出"根据资料""出自某篇"，人设当场崩。
-                messages.append(("system", f"""【你记得的事】下面是你自己的记忆——你经历过的事、你说过的话、你熟悉的场景。
-用它们帮你想起细节和语气，但：
-- 绝对不要说出"根据资料""据我记载""出自某篇文章""资料显示"这类话
-- 不要列来源、不要报章节名、不要标注出处
-- 就当是你自己想起来了，用你平时说话的方式正常说出来
-- 记忆里没有的，凭你自己的判断说；涉及具体数字、日期、名次这类硬事实，想不起来就说想不起来，别编
-
-{context}"""))
-            else:
-                messages.append(("system", f"""以下是基于知识库整理的参考资料。
-
-【重要】你必须严格基于以下参考资料来回答，不要添加资料中没有的信息。
-如果参考资料不足以完整回答问题，请明确说明哪些部分基于资料、哪些部分无法从资料中得出。
-不要编造资料中不存在的事实、数字或概念。
-基于资料的延伸推理（如投射、自性化等概念的应用建议）可以用"我会这样看""依我的经验"等角色化口吻带出，
-但不要与著作中的原话混为一谈，也不要宣称延伸内容出自某本著作。
-
-【引用标注】回答中的关键论断、概念解释、事实与数字，请在句末标注所依据资料的编号（如 [2]）；
-一个论断依据多条资料时可并列（如 [1][3]）；延伸推理部分不标注。编号与下方资料清单一一对应。
-
-## 参考资料
-{context}"""))
-
-        if history:
-            history_text = format_history_for_prompt(history, max_turns=settings.max_history_turns, session_id=session_id)
-            # 历史使用指令按场景配置（名人对话鼓励延续，保持话题连贯）
-            history_instruction = ""
-            if config:
-                history_instruction = getattr(config, 'history_instruction', "") or ""
-            if not history_instruction:
-                history_instruction = "以下是之前的对话历史（仅用于理解指代和背景，不要主动延伸历史话题）："
-            messages.append(("system", f"""{history_instruction}
-
-{history_text}
-
-【重要】引用对话历史中的信息时，必须原样保留用户提供的具体数字、分数、日期、名称等，不得修改或近似。"""))
-
-        # 后历史指令：历史之后再钉一次角色。人设指令全在最前面时，
-        # 对话历史越长稀释越严重，这条是长对话不跑偏的关键（对应酒馆 Author's Note）。
-        if post_history_directive:
-            messages.append(("system", post_history_directive))
-
-        messages.append(("user", query))
+        # 消息装配统一走 build_direct_messages：工具化检索路径复用同一份，
+        # 两条路的消息顺序必须一致，否则人设表现会分叉
+        messages = build_direct_messages(
+            query,
+            history=history,
+            character_role_prompt=character_role_prompt,
+            session_id=session_id,
+            context=context,
+            zone=zone,
+            post_history_directive=post_history_directive,
+            user_memory=user_memory,
+        )
 
         # 流式输出（空响应容错：上游偶发 200 空壳，未推送任何 token 时安全重试）
         if stream_callback:
@@ -534,6 +572,18 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             "route_history": route_history + ["supervisor"],
         }
 
+    # ---- 工具化检索（实验，settings.tool_retrieval_enabled，默认关闭）----
+    # 把"这一轮要不要查资料"交给模型自己判断：analyzer 绑定 search_library，
+    # 模型决定直答还是先查原书。这是本项目唯一的真 agent 环节（LLM 输出决定控制流）。
+    # 只放教育区：娱乐区检索是 23ms 的软背景、靠角色卡撑人设，
+    # 工具化要给每条消息加一次 LLM 往返，得不偿失。
+    if getattr(settings, "tool_retrieval_enabled", False) and state.get("zone") != "entertainment":
+        print("[Supervisor] 工具化检索：交由模型自行判断是否检索")
+        return {
+            "next_agent": "tool_agent",
+            "route_history": route_history + ["supervisor"],
+        }
+
     print("[Supervisor] 名人对话：规则路由到 retriever（跳过 LLM 路由）")
     return {
         "next_agent": "retriever",
@@ -644,15 +694,26 @@ def route_after_supervisor(state: AgentState) -> str:
 # ============================================================
 
 def build_graph() -> StateGraph:
-    """构建多智能体工作流图（名人对话场景：无 InfoGap 追问，无 Coder）"""
+    """构建名人对话工作流图（无 InfoGap 追问，无 Coder）
+
+    两条检索路径并存，由 settings.tool_retrieval_enabled 分流：
+    - 关闭（默认）：supervisor → retriever → supervisor → analyzer
+    - 打开：supervisor → tool_agent → supervisor（检索由模型按需触发，retriever 被绕过）
+    两条路的收尾一致：analyzer / tool_agent 产出 analysis 后回 supervisor 定稿。
+    """
 
     workflow = StateGraph(AgentState)
 
     workflow.add_edge(START, "supervisor")
 
+    # 图内导入 tool_agent：它要复用 supervisor 的 build_direct_messages，
+    # 模块顶层互相 import 会成环，所以延迟到这里
+    from framework.tool_agent import tool_agent as tool_agent_node
+
     workflow.add_node("supervisor", supervisor_node)
     workflow.add_node("retriever", retrieval_agent)
     workflow.add_node("analyzer", analysis_agent)
+    workflow.add_node("tool_agent", tool_agent_node)
     workflow.add_node("verifier", verification_agent)
 
     workflow.add_conditional_edges(
@@ -661,6 +722,7 @@ def build_graph() -> StateGraph:
         {
             "retriever": "retriever",
             "analyzer": "analyzer",
+            "tool_agent": "tool_agent",
             "verifier": "verifier",
             "__end__": END,
         },
@@ -668,6 +730,7 @@ def build_graph() -> StateGraph:
 
     workflow.add_edge("retriever", "supervisor")
     workflow.add_edge("analyzer", "supervisor")
+    workflow.add_edge("tool_agent", "supervisor")
     workflow.add_edge("verifier", "supervisor")
 
     return workflow.compile()

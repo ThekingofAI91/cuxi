@@ -5,6 +5,9 @@ Retrieval Agent — 图书管理员
 与 HTTP 层（/persona/eval_query）共用 src.retrieval.advanced_search.advanced_retrieval，
 避免两套检索逻辑不一致。
 
+检索主体已抽成 retrieve_documents()，图内 retriever 节点与工具化检索
+（framework/tool_agent 的 search_library 工具）共用同一份实现。
+
 修复记录（优化十八）：
 - 旧实现 collection.get() 全量拉取文档，触发 ChromaDB 内部 SQLite
   "too many SQL variables" 错误（SQLITE_MAX_VARIABLE_NUMBER），
@@ -47,36 +50,34 @@ def build_history_aware_query(query: str, recent: list[tuple[str, str]]) -> str:
             question = _assemble(ans_cap, q_cap)
             if len(question) <= _QUERY_CHAR_BUDGET:
                 break
-        print(f"[Retrieval Agent] 历史过长，已压缩至 {len(question)} 字符（保当前问题）")
+        print(f"[Retrieval] 历史过长，已压缩至 {len(question)} 字符（保当前问题）")
     return question
 
 
-async def retrieval_agent(state: AgentState) -> dict[str, Any]:
-    """
-    检索 Agent：根据 query 执行高级混合检索
+async def retrieve_documents(
+    query: str,
+    history: list[tuple[str, str]] | None = None,
+    light_retrieval: bool = False,
+    skip_retrieval: bool = False,
+) -> tuple[list, bool, str]:
+    """执行高级混合检索，返回 (检索到的文档, 是否并入了知识图谱证据, 错误信息)。
 
-    流程：
-    1. 从 state 读取 query
-    2. 获取场景对应的 ChromaDB collection
-    3. 执行高级检索（Multi-Query + HyDE + BM25 + 向量 + Cross-Encoder 重排序）
-    4. 将 Top-K 结果写入 state["retrieved_docs"]
+    图内 retriever 节点与工具化检索共用这一份实现：
+    - 图内：retrieval_agent(state) 读 state 调用本函数
+    - 工具：tool_agent 的 search_library 由模型按需触发，直接调本函数
+
+    异常一律在内部消化（返回空结果 + 错误串），不向上抛：
+    检索失败不该炸掉整条回答链路，调用方按"没查到"继续走即可。
     """
-    query = state["query"]
-    history = state.get("history", [])
-    print(f"\n[Retrieval Agent] 正在检索: {query}")
-    print(f"[Retrieval Agent] 对话历史轮次: {len(history)}")
+    history = history or []
 
     # ---- 0. 零检索开关（默认关闭，由 settings.entertainment_light_retrieval 控制）----
     # 实测：娱乐区轻量检索（top_k=3，无改写/无重排/无图谱）中位仅 23ms，
     # 对 8-15s 的回答完全可忽略，故默认保留检索以贴合角色背景资料。
     # 只有把开关置 False（追求极致首字、且角色卡足够完备）时才走这条零检索路径。
-    if state.get("skip_retrieval"):
-        print("[Retrieval Agent] 零检索（已关闭轻量检索开关），跳过向量库与重排")
-        return {
-            "retrieved_docs": [],
-            "route_history": state.get("route_history", []) + ["retrieval_agent"],
-            "graph_used": False,
-        }
+    if skip_retrieval:
+        print("[Retrieval] 零检索（已关闭轻量检索开关），跳过向量库与重排")
+        return [], False, ""
 
     try:
         # ---- 1. 获取场景对应的 collection（与 HTTP 层一致）----
@@ -92,12 +93,8 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
 
         count = collection.count()
         if count == 0:
-            print("[Retrieval Agent] 文档库为空，请先上传文档")
-            return {
-                "retrieved_docs": [],
-                "route_history": state.get("route_history", []) + ["retrieval_agent"],
-            }
-        print(f"[Retrieval Agent] 文档库中共 {count} 条文档片段")
+            print("[Retrieval] 文档库为空，请先上传文档")
+            return [], False, ""
 
         # ---- 2. 高级检索（Multi-Query + HyDE + BM25 + 向量 + 重排序）----
         from src.core.llm import get_chat_llm
@@ -114,10 +111,9 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
         # 娱乐区（zone=entertainment）：轻量召回 —— 跳过 Multi-Query+HyDE 改写、
         # 跳过 Cross-Encoder 重排、跳过知识图谱，仅用原始问题做向量+BM25 召回 top-3
         # 作为软背景（不引用），换取更快首字与更"像人"的回答。
-        light_retrieval = state.get("light_retrieval", False)
         if light_retrieval:
             top_k = 3
-            print(f"[Retrieval Agent] 娱乐区轻量召回：跳过改写/重排/图谱，top_k={top_k}")
+            print(f"[Retrieval] 娱乐区轻量召回：跳过改写/重排/图谱，top_k={top_k}")
 
         # ---- 历史感知检索 ----
         # 场景开启 history_aware_retrieval 时（如名人对话），将最近几轮对话拼入检索 query，
@@ -125,7 +121,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
         question = query
         if config and getattr(config, 'history_aware_retrieval', False) and history:
             question = build_history_aware_query(query, history[-2:])
-            print(f"[Retrieval Agent] 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
+            print(f"[Retrieval] 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
 
         # 短问题跳过 Multi-Query + HyDE 改写（省 1 次串行 LLM 往返，降低首字延迟）。
         # 原始查询 + BM25 已能覆盖短问题的召回；长/复杂问题仍走完整改写以提升召回。
@@ -137,7 +133,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
             and not light_retrieval
         )
         if not use_rewrite:
-            print(f"[Retrieval Agent] 跳过检索改写（{'总开关关闭' if not settings.rewrite_enabled else '短问题' if not light_retrieval else '娱乐区轻量召回'}），直接向量+BM25")
+            print(f"[Retrieval] 跳过检索改写（{'总开关关闭' if not settings.rewrite_enabled else '短问题' if not light_retrieval else '娱乐区轻量召回'}），直接向量+BM25")
 
         retrieved_docs, _contexts = await advanced_retrieval(
             question=question,
@@ -149,20 +145,13 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
             use_rerank=not light_retrieval,
             num_variants=2,
         )
-        print(f"[Retrieval Agent] 高级检索召回 {len(retrieved_docs)} 条")
-
-        # 打印结果摘要
-        for i, doc in enumerate(retrieved_docs):
-            score = doc.metadata.get("rrf_score", 0.0)
-            heading = doc.metadata.get("heading", "未知章节")
-            source = doc.metadata.get("source", "未知来源")
-            stype = doc.metadata.get("source_type", "unknown")
-            print(f"  [{i+1}] rrf={score} | [{stype}] {source} | {heading}")
+        print(f"[Retrieval] 高级检索召回 {len(retrieved_docs)} 条")
 
         # ---- 3. 知识图谱 RAG 增强（GraphRAG，按需调用）----
         # 默认只用文本检索；只有当文本检索质量不达标（召回不足 / top 相关性弱 /
         # 关键实体未被文本覆盖）时才启动图谱增强，避免每轮都多跑一次子图扩展。
         # 图谱未构建或总开关关闭 → 静默降级，不影响原混合检索。
+        graph_used = False
         if settings.graph_rag_enabled and graph_exists(collection.name) and not light_retrieval:
             try:
                 from src.retrieval.knowledge_graph import (
@@ -175,7 +164,7 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
                     question, retrieved_docs, collection.name,
                 )
                 if trigger:
-                    state["graph_used"] = True
+                    graph_used = True
                     g_ctx, g_docs = await retrieve_graph_context(
                         question, collection, llm=retrieval_llm,
                     )
@@ -189,25 +178,56 @@ async def retrieval_agent(state: AgentState) -> dict[str, Any]:
                                 existing.add(did)
                                 added += 1
                         if added:
-                            print(f"[Retrieval Agent] 触发知识图谱增强（{reason}），并入 {added} 条证据")
+                            print(f"[Retrieval] 触发知识图谱增强（{reason}），并入 {added} 条证据")
                     else:
-                        print(f"[Retrieval Agent] 图谱已触发（{reason}）但无命中")
+                        print(f"[Retrieval] 图谱已触发（{reason}）但无命中")
                 else:
-                    print(f"[Retrieval Agent] 文本检索质量达标，跳过知识图谱（{reason}）")
+                    print(f"[Retrieval] 文本检索质量达标，跳过知识图谱（{reason}）")
             except Exception as ge:
-                print(f"[Retrieval Agent] 知识图谱检索失败，跳过: {ge}")
+                print(f"[Retrieval] 知识图谱检索失败，跳过: {ge}")
 
-        return {
-            "retrieved_docs": retrieved_docs,
-            "route_history": state.get("route_history", []) + ["retrieval_agent"],
-            "graph_used": state.get("graph_used", False),
-        }
+        return retrieved_docs, graph_used, ""
 
     except Exception as e:
-        print(f"[Retrieval Agent] 检索过程中出错: {e}")
-        return {
-            "retrieved_docs": [],
-            "route_history": state.get("route_history", []) + ["retrieval_agent"],
-            "error": str(e),
-            "graph_used": False,
-        }
+        print(f"[Retrieval] 检索过程中出错: {e}")
+        return [], False, str(e)
+
+
+async def retrieval_agent(state: AgentState) -> dict[str, Any]:
+    """
+    检索 Agent 节点：读取 state 执行高级混合检索，把结果写回 state["retrieved_docs"]
+
+    流程：
+    1. 从 state 读取 query / history / 分区检索策略
+    2. 调用 retrieve_documents（与工具化检索共用实现）
+    3. 将 Top-K 结果写入 state["retrieved_docs"]
+    """
+    query = state["query"]
+    history = state.get("history", [])
+    print(f"\n[Retrieval Agent] 正在检索: {query}")
+    print(f"[Retrieval Agent] 对话历史轮次: {len(history)}")
+
+    retrieved_docs, graph_used, error = await retrieve_documents(
+        query,
+        history=history,
+        light_retrieval=state.get("light_retrieval", False),
+        skip_retrieval=state.get("skip_retrieval", False),
+    )
+
+    out: dict[str, Any] = {
+        "retrieved_docs": retrieved_docs,
+        "route_history": state.get("route_history", []) + ["retrieval_agent"],
+        "graph_used": graph_used,
+    }
+    if error:
+        out["error"] = error
+
+    # 打印结果摘要
+    for i, doc in enumerate(retrieved_docs):
+        score = doc.metadata.get("rrf_score", 0.0)
+        heading = doc.metadata.get("heading", "未知章节")
+        source = doc.metadata.get("source", "未知来源")
+        stype = doc.metadata.get("source_type", "unknown")
+        print(f"  [{i+1}] rrf={score} | [{stype}] {source} | {heading}")
+
+    return out

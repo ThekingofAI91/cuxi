@@ -81,7 +81,7 @@ def _shared_async_http_client():
         return None
 
 
-def get_chat_llm(**kwargs: Any) -> Runnable:
+def get_chat_llm(*, with_fallback: bool = True, **kwargs: Any) -> Runnable:
     """创建 ChatOpenAI 实例，默认注入超时/重试/模型/密钥配置。
 
     密钥与地址每次调用时从「用户填写 > .env > 默认值」解析，所以用户在设置页
@@ -89,6 +89,11 @@ def get_chat_llm(**kwargs: Any) -> Runnable:
 
     配置了 fallback_model 且调用方未显式指定 model 时，
     返回 主模型.with_fallbacks([备用模型])，主模型调用失败自动降级。
+
+    with_fallback=False：返回裸 ChatOpenAI，不套 fallback 链。
+    需要 bind_tools 的场景（工具调用）必须用这个——with_fallbacks 返回的是
+    RunnableWithFallbacks，它没有 bind_tools 方法，直接调用会 AttributeError。
+    代价是失去主模型故障时的自动降级，由调用方自己兜底（工具路径失败即回退直答）。
     """
     cfg = resolve_llm_config(settings)
 
@@ -114,8 +119,9 @@ def get_chat_llm(**kwargs: Any) -> Runnable:
     kwargs.setdefault("model", cfg["model"])
     llm = ChatOpenAI(**kwargs)
 
-    # 显式指定 model 的场景（如特殊用途模型）不套 fallback，避免行为被意外替换
-    if explicit_model or not cfg["fallback_model"]:
+    # 显式指定 model 的场景（如特殊用途模型）不套 fallback，避免行为被意外替换；
+    # with_fallback=False 同样直接返回裸实例（bind_tools 需要）
+    if explicit_model or not cfg["fallback_model"] or not with_fallback:
         return llm
 
     fallback = ChatOpenAI(**{**kwargs, "model": cfg["fallback_model"]})

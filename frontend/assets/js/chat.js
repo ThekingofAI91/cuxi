@@ -1,6 +1,16 @@
 // ============================================================
 // 消息渲染
 // ============================================================
+// 处理进度文案：节点名是实现细节（retrieval_agent 这种），不该直接甩给用户看。
+// 统一映射成"正在做什么"，新增节点记得在这里补一条。
+const AGENT_STEP_LABELS = {
+  supervisor: '判断该怎么回应',
+  tool_agent: '斟酌要不要查资料',
+  retrieval_agent: '翻查原著',
+  analysis_agent: '组织回答',
+  verifier: '核对引用',
+};
+
 // 酒馆式开场白气泡：角色先开口，进对话即见。
 // 这是角色卡里写死的一句话，不走 LLM、不入库、不进入对话历史，纯粹消除"空白页"的出戏感。
 function openingBubbleHTML(text) {
@@ -264,7 +274,7 @@ async function sendQuery(query, opts = {}) {
             state._streamingText += data.content || '';
             updateStreamingBubble();
             break;
-          case 'agent_done': updateThinkingText(`正在处理 ${data.agent}…`); break;
+          case 'agent_done': updateThinkingText(`正在${AGENT_STEP_LABELS[data.agent] || '处理'}…`); break;
           case 'trace': routeHistory = data.route_history || []; break;
           case 'result': fullContent = data.content || ''; graphUsedThisTurn = !!data.graph_used; docMapThisTurn = data.doc_map || null; break;
           case 'citations':
