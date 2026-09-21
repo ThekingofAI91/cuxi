@@ -620,6 +620,10 @@ body[data-theme='original'] {
   .kg-badge { color: var(--text-mid); border-color: var(--border-strong); letter-spacing: 0; }
   .kg-badge::before { content: ""; margin: 0; }
   .recovered-tag { font-size: 11px; color: var(--text-low); margin-left: 8px; }
+  /* 引用核查报告：元信息，默认折叠（details 不带 open），仅在回答真的引用了资料时才渲染 */
+  .cite-report { margin-top: 12px; font-size: 11px; }
+  .cite-report > summary { color: var(--text-low); cursor: pointer; user-select: none; }
+  .cite-report-body { margin-top: 8px; padding: 10px 12px; border-left: 2px solid var(--border); color: var(--text-low); white-space: pre-wrap; line-height: 1.7; }
 
   .message-ts { font-size: 11px; color: rgba(109,103,94,0.9); margin-top: 6px; }
   .message-ts.user-ts { text-align: right; }
@@ -928,6 +932,10 @@ body[data-theme='original'] {
   }
   body[data-theme="paper"] .agent-badge::before { counter-increment: agent; content: counter(agent, decimal-leading-zero); font-style: italic; font-variant-numeric: tabular-nums; }
   body[data-theme="paper"] .recovered-tag { font-size: 10.5px; color: var(--ink3); margin-left: 10px; }
+  /* paper 主题下核查报告：走 --ink / --line 纸感变量，避免继承深色主题的 --text-low 串色 */
+  body[data-theme="paper"] .cite-report { margin-top: 16px; font-size: 11px; }
+  body[data-theme="paper"] .cite-report > summary { color: var(--ink3); }
+  body[data-theme="paper"] .cite-report-body { margin-top: 10px; padding: 12px 14px; border-left: 2px solid var(--line); color: var(--ink2); white-space: pre-wrap; line-height: 1.8; }
   body[data-theme="paper"] .message-ts { font-size: 9.5px; color: var(--ink3); margin-top: 9px; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
   body[data-theme="paper"] .message-ts.user-ts { text-align: right; }
   body[data-theme="paper"] .sys-chip { display: inline-block; font-size: 11px; color: var(--ink2); padding: 6px 16px; background: var(--paper2); border: 1px solid var(--line); letter-spacing: 2px; }

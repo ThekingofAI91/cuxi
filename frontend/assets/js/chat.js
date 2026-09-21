@@ -62,6 +62,11 @@ function renderMessages() {
         ? '<span class="agent-badge kg-badge" title="本轮回答由 AI 自主调用知识图谱增强生成">已调用知识图谱</span>' : '';
       const recoveredTag = msg.extra?.recovered
         ? '<span class="recovered-tag">刷新后恢复</span>' : '';
+      // 引用核查报告：元信息，默认折叠。仅当正文真的引用了资料（含 [n] 角标）
+      // 时才出现——寒暄类回答正文不含角标，因此不会再看到那张引用可信度评分表。
+      const citeReport = (msg.extra?.citations && /\[\d{1,2}\]/.test(msg.content || ''))
+        ? `<details class="cite-report"><summary>引用核查</summary><div class="cite-report-body">${escapeHtml(msg.extra.citations)}</div></details>`
+        : '';
       // 多版本回答（重新生成产生的候选）：可在版本间来回切换
       const variants = (msg.extra?.variants && msg.extra.variants.length > 1) ? msg.extra.variants : null;
       const vIdx = variants ? Math.min(msg.extra.variantIndex ?? variants.length - 1, variants.length - 1) : 0;
@@ -82,6 +87,7 @@ function renderMessages() {
             <div class="avatar assistant">${icon}</div>
             <div class="message-content">
               <div class="md-body">${renderMarkdownLite(isImmersiveTheme() ? stripMetaSections(msg.content) : msg.content, msg.extra?.doc_map)}</div>
+              ${citeReport}
               ${(badges || graphTag) ? `<div class="agent-badges">${badges}${graphTag}</div>` : ''}${recoveredTag}
               ${actions}${variantBar}
               <div class="message-ts"><span class="ai-tag" title="本条内容由人工智能生成（AI-generated content）">AI 生成</span>${formatTime()}</div>
@@ -237,6 +243,8 @@ async function sendQuery(query, opts = {}) {
     let routeHistory = [];
     let graphUsedThisTurn = false;
     let docMapThisTurn = null;
+    // 核查报告单独承载：它是元信息，不能并入正文（并入后会被当成角色说的话）
+    let citationsThisTurn = '';
     let buffer = '';
 
     while (true) {
@@ -260,8 +268,12 @@ async function sendQuery(query, opts = {}) {
           case 'trace': routeHistory = data.route_history || []; break;
           case 'result': fullContent = data.content || ''; graphUsedThisTurn = !!data.graph_used; docMapThisTurn = data.doc_map || null; break;
           case 'citations':
+            // 核查报告不并入正文：并入后它会成为"角色说的话"的一部分，
+            // 连寒暄（"你来了。秋夜山深…"）后面都会跟着一张引用可信度评分表。
+            // 改由 extra.citations 单独承载，渲染时默认折叠，且仅当正文真的
+            // 引用了资料（含 [n] 角标）时才展示。
             if (data.content) {
-              fullContent = (fullContent || '') + '\n\n' + data.content;
+              citationsThisTurn = data.content;
               graphUsedThisTurn = !!data.graph_used || graphUsedThisTurn;
             }
             break;
@@ -293,7 +305,7 @@ async function sendQuery(query, opts = {}) {
       const msgData = {
         type: 'assistant',
         content: fullContent,
-        extra: { agents: routeHistory, sceneIcon: getAssistantIcon(), graph_used: graphUsedThisTurn, doc_map: docMapThisTurn },
+        extra: { agents: routeHistory, sceneIcon: getAssistantIcon(), graph_used: graphUsedThisTurn, doc_map: docMapThisTurn, citations: citationsThisTurn || null },
       };
       // 重新生成：把历史版本带上，前端可在各版本之间切换回看
       if (state._regenVariants && state._regenVariants.length) {
@@ -304,6 +316,7 @@ async function sendQuery(query, opts = {}) {
       state._msgQueue = [msgData];
       graphUsedThisTurn = false;
       docMapThisTurn = null;
+      citationsThisTurn = '';
       await processMessageQueue();
     } else {
       addMessage('system', '查询完成，但未返回内容。');
