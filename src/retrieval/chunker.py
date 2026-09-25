@@ -91,26 +91,38 @@ class AdaptiveChunker:
         # ---- Step 2: 每组内部分块 ----
         chunks: list[Document] = []
         current_heading_chain: list[str] = []  # 当前标题链
+        # 纯标题组（标题后无正文）不立刻产出块，只让标题链向前滚动，
+        # 由紧随其后的正文组消费。原因：章首页常把「第一章」和章名拆成
+        # 两页，前者正文为 0，若立刻发块就会得到一堆 4 字垃圾块
+        # （实测一本 94 页的书有 13 个，占全库 13%）。
+        pending_heading_only = False
 
         for group in groups:
-            heading_chain = self._extract_heading_chain(group, current_heading_chain)
+            # 必须回写：_extract_heading_chain 内部会重新绑定新列表，
+            # 只接收返回值才能让「当前标题链」真正跨组滚动（此前漏了回写，
+            # 链在首次截断后就冻结，父标题丢失）。
+            current_heading_chain = self._extract_heading_chain(group, current_heading_chain)
             paragraphs = [e for e in group if e.element_type != "heading"]
 
             if not paragraphs:
-                # 纯标题组（标题后无内容）
-                heading_text = " > ".join(heading_chain) if heading_chain else ""
-                if heading_text:
-                    chunks.append(self._make_chunk(
-                        content=heading_text,
-                        heading_chain=heading_chain,
-                        source=source or (group[0].metadata.get("source", "") if group else ""),
-                        element_types=["heading"],
-                    ))
+                pending_heading_only = True
                 continue
 
+            pending_heading_only = False
+
             # 对段落分组分块
-            group_chunks = self._chunk_paragraphs(paragraphs, heading_chain, source)
+            group_chunks = self._chunk_paragraphs(paragraphs, current_heading_chain, source)
             chunks.extend(group_chunks)
+
+        # 收尾：整篇以纯标题结束（或通篇只有标题，如纯目录文件）→
+        # 补一个标题块，避免标题信息完全丢失。有正文消费过则不再补。
+        if pending_heading_only and current_heading_chain:
+            chunks.append(self._make_chunk(
+                content=" > ".join(current_heading_chain),
+                heading_chain=current_heading_chain,
+                source=source or (groups[-1][0].metadata.get("source", "") if groups else ""),
+                element_types=["heading"],
+            ))
 
         # ---- Step 3: 添加重叠 ----
         chunks = self._add_overlap(chunks)
@@ -238,11 +250,12 @@ class AdaptiveChunker:
             buffer.append(para)
             buffer_size += para_len
 
-        # 最后一段
+        # 最后一段：不足 min_size 时也「向上合并」进本组最后一个块
+        # （chunks 在 _chunk_paragraphs 内仅含本组产物，不会跨标题边界）
         if buffer:
             flush_buffer()
 
-        return chunks
+        return self._merge_short_tail(chunks)
 
     def _split_long_paragraph(
         self,
@@ -304,14 +317,32 @@ class AdaptiveChunker:
 
         if current_chunk:
             content = "".join(current_chunk)
-            src = source or paragraph.metadata.get("source", "")
             chunks.append(self._make_chunk(
                 content=content,
                 heading_chain=heading_chain,
-                source=src,
+                source=source or paragraph.metadata.get("source", ""),
                 element_types=[paragraph.element_type],
             ))
 
+        # 收尾统一走 min_size 归一：长段落按句子切、或超长句被暴力截断，
+        # 都可能甩出一个碎片尾巴，一并并回上一块。
+        return self._merge_short_tail(chunks)
+
+    def _merge_short_tail(self, chunks: list[Document]) -> list[Document]:
+        """把末尾不足 min_size 的块并进前一个块，直到达标或只剩一块。
+
+        这是 min_size 的唯一落点（2026-09-22 补：此前 min_size 只声明未生效）。
+        刻意不卡 max_size —— 冲突时 min_size 优先：合并后上限由 min_size 兜住
+        （最坏 max_size + min_size - 1），用一点长度余量换掉一个低信息量碎片块。
+        """
+        while len(chunks) >= 2 and len(chunks[-1].page_content) < self.min_size:
+            tail = chunks.pop()
+            last = chunks[-1]
+            last.page_content = f"{last.page_content}\n\n{tail.page_content}"
+            last.metadata["char_length"] = len(last.page_content)
+            types = set(filter(None, (last.metadata.get("element_types") or "").split(",")))
+            types.update(filter(None, (tail.metadata.get("element_types") or "").split(",")))
+            last.metadata["element_types"] = ",".join(sorted(types))
         return chunks
 
     def _add_overlap(self, chunks: list[Document]) -> list[Document]:
