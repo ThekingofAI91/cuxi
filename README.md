@@ -18,6 +18,7 @@
 - **合规与信任**：首页与侧栏提供「使用须知 · AI 仿真声明」，明确角色为 AI 仿真、内容仅供参考、逝者语料仅收生前公开言论
 - **法务三件套**：独立的「用户协议」（/terms）与「隐私政策」（/privacy）页面（含第三方 LLM 披露、账号注销、未成年人条款）；每条 AI 回答与圆桌发言带显著的「AI 生成」内容标识；支持一键注销账号（删除账号与全部登录会话）
 - **多智能体流水线**：Supervisor 规则路由（不烧 LLM）→ Retriever / Analyzer / Verifier / Summarizer
+- **争鸣（圆桌会议）**：2-3 位人物同桌，就同一议题交锋——**谁说话不由代码排班，由角色自己判断**（每轮并行问「有没有非说不可的话、要反驳谁的哪一句」，有人举手才发言；多人同时举手交给用户点将）；参会者平级、无中心调度，是项目里**第二个真 agent**；收敛靠发言配额的数学而非提示词调参，结尾只出**纪要（分歧地图）**、不评胜负，判断交回用户
 - **混合检索 + 来源加权**：向量 + BM25 双通道，Cross-Encoder 重排；语料按 original/oral/anchor/secondary 分级加权，二手解读强降权，防止"第三者评价"冒充名人原话
 - **防幻觉验证**：专业型角色回答前对引用做核查与置信度标注
 - **工程化打磨**：限流、上传限制、会话 SQLite 持久化（重启不丢）、答案内存缓存、成本监控看板
@@ -207,6 +208,17 @@ Supervisor（规则路由，不调 LLM）
 - **验证按人设开关**：`enable_verification` 默认开启；峰哥/张雪峰（沉浸角色）关闭，避免"要点/来源"破坏代入感
 - **历史感知检索**：结合最近对话轮次解决"那个梦""这跟它有什么关系"这类指代问题
 
+### 两处真 agent（其余是确定性编排）
+
+上面这张图的路径**在代码里写死**，LLM 只产文本、不改控制流。按 Anthropic 的判据（workflow＝路径由代码预定义；agent＝LLM 在运行时决定流程与工具），主体的定性是 **multi-node workflow**；真正算 agent 的只有两处，这也是本项目敢叫「多智能体」的全部依据：
+
+| 位置 | 那个自由度 | 说明 |
+|---|---|---|
+| `framework/tool_agent.py` | 教育区：模型自己决定**要不要查原书** | 娱乐区不走工具——检索是 23ms 软背景，加一次 LLM 往返（3-8s）不划算 |
+| `framework/roundtable.py` | 争鸣：参会者自己决定**说不说、反驳谁** | 参会者平级、无中心调度；意愿判据是「要反驳谁的哪一句」 |
+
+圆桌**不套 LangGraph**：它的控制流不是一个图，而是「一轮内并行问意愿 → 争用仲裁 → 发言 → 收敛判断」的循环，中间还要挂起等用户输入。用 async generator 直接产出 SSE 事件更直白（`POST /persona/roundtable`，事件见 `framework/roundtable.py` 模块头注释）。
+
 ### 角色差异化与回答完整性（2026-08-23 优化）
 - **人设主导，不做"分析助手"**：`direct_response_system_prompt` 改为第一人称肯定式框架，不再把角色框成"基于著作的分析助手"，避免不同人物回答雷同。
 - **差异化铁律 `persona_voice_directive`**：注入到每个角色的生成提示最前方，强制"绝对是你不是 AI 助手"、禁止通用套话与"观点→解释→建议"模板、要求同一问题不同人物判若两人（立场/措辞/举例/价值排序都鲜明体现人物特质）。角色生成温度提到 `0.8`。
@@ -309,6 +321,11 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 | DELETE | `/persona/characters/{char_id}` | 删除自建角色（内置角色不可删） |
 | GET | `/persona/characters/{char_id}/export` | 导出角色卡（原生 JSON：人设/世界书/示例对话，自建角色含背景知识库） |
 | POST | `/persona/characters/import` | 导入角色卡，创建为自建角色并立即可对话 |
+| POST | `/persona/roundtable` | 圆桌会议（争鸣）开场：SSE 流式返回自主发言（`intent` / `contention` / `choice` / `token` …）；流跑到争用点会挂起 |
+| POST | `/persona/roundtable/{session_id}/choice` | 争用仲裁：提交用户点将结果，唤醒挂起的流（用户不主持时由主持人代班） |
+| GET | `/persona/roundtable/history` | 圆桌会议历史（最近 30 天，按时间倒序；不含完整发言） |
+| GET | `/persona/roundtable/{session_id}` | 查看某场圆桌（议题 / 与会者 / 完整发言记录与纪要） |
+| DELETE | `/persona/roundtable/{session_id}` | 删除某场圆桌记录 |
 | DELETE | `/conversation/{session_id}` | 删除会话 |
 | GET | `/conversation/pending/{session_id}` | 恢复未完成的流式回答 |
 | GET | `/conversation/{session_id}/meta` | 会话元信息 |

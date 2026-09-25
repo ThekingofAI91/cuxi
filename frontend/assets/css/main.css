@@ -1899,6 +1899,9 @@ body[data-theme='original'] {
     padding: 18px 22px; border-bottom: 1px solid rgba(22,22,22,.1);
     display: flex; flex-direction: column; gap: 14px; flex: none;
   }
+  /* hidden 属性优先：.rt-setup 是 display:flex，会盖掉 hidden，
+     开会期间设置面板必须在舞台上位（同 .auth-modal 那个坑） */
+  .rt-setup[hidden] { display: none; }
   .rt-intro { text-align: center; padding: 2px 0 6px; }
   .rt-brand { font-size: 12px; letter-spacing: 2px; color: #6B6B66; margin: 0; }
   .rt-tagline {
@@ -1987,6 +1990,129 @@ body[data-theme='original'] {
   }
   @keyframes rtBlink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
   .rt-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #161616; margin-right: 4px; }
+
+  /* --- 围坐舞台：谁发言谁起身 ---
+     座位状态：raised（举手想发言）/ speaking（起身说话 + 声浪）/
+     candidate（多人争抢，呼吸描边）/ spent（额度用完，坐暗） */
+  .rt-stage {
+    flex: none; position: relative; overflow: hidden;
+    padding: 30px 22px 10px;
+    display: flex; flex-direction: column; align-items: center;
+    border-bottom: 1px solid rgba(22,22,22,.1);
+    background: linear-gradient(#F5F2EB, #FAFAF7);
+  }
+  .rt-stage[hidden] { display: none; }
+  .rt-stage-seats {
+    display: flex; justify-content: center; align-items: flex-end;
+    gap: clamp(34px, 10vw, 110px); position: relative; z-index: 2;
+  }
+  .rt-seat {
+    --seat: #6b8cff;
+    position: relative; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    transition: transform .4s cubic-bezier(.34,1.4,.64,1), opacity .3s ease, filter .3s ease;
+  }
+  .rt-seat.theme-paper { --seat: #b08d57; }
+  .rt-seat.theme-noir { --seat: #9aa0b5; }
+  .rt-seat.theme-street { --seat: #c0562e; }
+  .rt-seat.theme-live { --seat: #2a7fb8; }
+  .rt-seat.theme-original { --seat: #6b8cff; }
+  .rt-seat-avatar {
+    width: 62px; height: 62px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; font-size: 30px;
+    background: #F1EEE7; border: 2px solid rgba(22,22,22,.1);
+    transition: border-color .25s ease, box-shadow .3s ease;
+  }
+  .rt-seat-name { font-size: 13px; color: #8A857A; transition: color .25s ease; }
+  .rt-seat-quota { display: flex; gap: 4px; height: 6px; }
+  .rt-seat-quota i {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: rgba(22,22,22,.14); transition: background .25s ease, transform .25s ease;
+  }
+  .rt-seat-quota i.on { background: var(--seat); transform: scale(1.12); }
+
+  /* 举手：签子冒出来 + 头像轻晃 */
+  .rt-seat-hand {
+    position: absolute; top: -18px; left: 50%;
+    transform: translate(-50%, 8px) scale(.8);
+    background: #161616; color: #FAFAF7;
+    font-size: 10.5px; letter-spacing: 1px; line-height: 1;
+    padding: 4px 9px; border-radius: 999px; white-space: nowrap;
+    opacity: 0; pointer-events: none;
+    transition: opacity .22s ease, transform .28s cubic-bezier(.34,1.56,.64,1);
+  }
+  .rt-seat.raised .rt-seat-hand { opacity: 1; transform: translate(-50%, 0) scale(1); }
+  .rt-seat.raised .rt-seat-avatar { border-color: var(--seat); animation: rtBob 1.3s ease-in-out infinite; }
+  @keyframes rtBob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-5px); }
+  }
+
+  /* 发言：起身 + 声浪 */
+  .rt-seat.speaking { transform: translateY(-16px) scale(1.1); }
+  .rt-seat.speaking .rt-seat-avatar {
+    border-color: var(--seat);
+    box-shadow: 0 0 0 4px #FAFAF7, 0 0 0 6px var(--seat);
+    animation: none;
+  }
+  .rt-seat.speaking .rt-seat-name { color: #161616; font-weight: 600; }
+  .rt-seat-waves {
+    position: absolute; top: 16px; left: calc(50% + 22px);
+    display: flex; align-items: flex-end; gap: 2.5px; height: 18px;
+    opacity: 0; transition: opacity .2s ease;
+  }
+  .rt-seat.speaking .rt-seat-waves { opacity: 1; }
+  .rt-seat-waves i {
+    width: 3px; border-radius: 2px; background: var(--seat);
+    transform-origin: bottom; animation: rtWave .9s ease-in-out infinite;
+  }
+  .rt-seat-waves i:nth-child(1) { height: 8px; }
+  .rt-seat-waves i:nth-child(2) { height: 15px; animation-delay: .15s; }
+  .rt-seat-waves i:nth-child(3) { height: 10px; animation-delay: .3s; }
+  @keyframes rtWave {
+    0%, 100% { transform: scaleY(.35); }
+    50% { transform: scaleY(1); }
+  }
+
+  /* 额度用完：坐暗，不抢视线 */
+  .rt-seat.spent { opacity: .4; filter: grayscale(.6); }
+
+  /* 争抢：候选位呼吸描边 */
+  .rt-seat.candidate .rt-seat-avatar { animation: rtPulse 1.1s ease-in-out infinite; }
+  @keyframes rtPulse {
+    0%, 100% { box-shadow: 0 0 0 3px #FAFAF7, 0 0 0 5px var(--seat); }
+    50% { box-shadow: 0 0 0 5px #FAFAF7, 0 0 0 9px var(--seat); }
+  }
+
+  /* 桌子：椭圆，压住座位下缘，像围坐在桌前。
+     议题贴桌沿下端排 —— 桌子压住座位下缘时，额度点正好落在桌面上半部，
+     议题若居中就会被点数撞上（实测桌面端撞过），所以靠下对齐。 */
+  .rt-stage-table {
+    width: min(600px, 82%); height: 58px; margin-top: -26px;
+    position: relative; z-index: 1; border-radius: 50%;
+    background: radial-gradient(ellipse at 50% 35%, #EFEADF 0%, #E2DCCD 65%, #D6CFBE 100%);
+    box-shadow: inset 0 2px 6px rgba(255,255,255,.75), 0 10px 20px rgba(22,22,22,.08);
+    display: flex; align-items: flex-end; justify-content: center; padding-bottom: 7px;
+  }
+  .rt-stage-topic {
+    max-width: 74%; font-size: 12px; letter-spacing: 1px; color: #8A857A;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .rt-stage-host {
+    margin-top: 10px; font-size: 11.5px; letter-spacing: 1px; color: #B4AFA6;
+    display: inline-flex; align-items: center; gap: 6px; transition: color .25s ease;
+  }
+  .rt-stage-host.active { color: #161616; font-weight: 600; }
+  .rt-stage-host.active::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: #c0562e;
+    animation: rtBlink 1s steps(2) infinite;
+  }
+
+  /* 散场：摆台留着当合影，动静全停 */
+  .rt-stage.done .rt-stage-seats { opacity: .55; }
+  .rt-stage.done .rt-seat,
+  .rt-stage.done .rt-seat-avatar { animation: none; }
+  .rt-stage.done .rt-seat-hand,
+  .rt-stage.done .rt-seat-waves { opacity: 0; }
 
 
 /* ===== 登录 / 注册 ===== */
@@ -2188,6 +2314,16 @@ html.kb-open body[data-theme] .input-area { padding-bottom: 10px; }
   .rt-speaker-avatar { width: 36px; height: 36px; font-size: 18px; }
   .rt-speaker-name { font-size: 14px; margin-bottom: 5px; }
   .rt-speaker-text { font-size: 14px; line-height: 1.78; }
+
+  /* --- 围坐舞台：窄屏缩小，别挤掉发言区 --- */
+  .rt-stage { padding: 20px 12px 8px; }
+  .rt-stage-seats { gap: 30px; }
+  .rt-seat-avatar { width: 48px; height: 48px; font-size: 23px; }
+  .rt-seat.speaking { transform: translateY(-10px) scale(1.06); }
+  .rt-seat-name { font-size: 11.5px; }
+  .rt-seat-waves { top: 12px; left: calc(50% + 18px); height: 15px; }
+  .rt-stage-table { height: 46px; margin-top: -21px; padding-bottom: 5px; }
+  .rt-stage-topic { font-size: 10.5px; max-width: 68%; }
 
   /* --- 登录 / 注册 --- */
   .auth-card { max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }

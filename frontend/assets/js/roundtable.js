@@ -16,6 +16,8 @@ const rtState = {
   _askTimer: null,
   _askResolve: null,
   _summaryEl: null,
+  _stage: null,          // 围坐舞台：角色 id -> 座位元素
+  _stageHost: null,      // 主持位元素
 };
 
 function renderRoundtableChips() {
@@ -69,6 +71,7 @@ function openRoundtable() {
   rtState._bar = null;
   rtState._summaryEl = null;
   _rtAskResolve(null);
+  _rtStageReset();
   if (rtTranscript) rtTranscript.innerHTML = '';
   if (rtSummary) { rtSummary.hidden = true; rtSummary.innerHTML = ''; }
 
@@ -94,6 +97,7 @@ function openRoundtable() {
 
 function closeRoundtable() {
   _rtAskResolve(null);
+  _rtStageReset();
   roundtableView.hidden = true;
 }
 
@@ -160,6 +164,89 @@ function _rtFinalizeCurrent() {
     rtState._current.card.classList.remove('thinking');
     rtState._current = null;
   }
+}
+
+// ============================================================
+// 围坐舞台：开会期间摆在上面的"圆桌"。谁发言谁起身（带声浪），
+// 谁想说话谁举手（冒「想发言」签），额度用完的坐暗。
+// 数据全靠 start 事件的 speakers 摆台，之后按事件流换状态。
+// ============================================================
+function _rtStageBuild(speakers, picker, topic) {
+  if (!rtStage) return;
+  rtStage.innerHTML = '';
+  rtStage.classList.remove('done', 'contention');
+  rtState._stage = new Map();
+
+  const seats = document.createElement('div');
+  seats.className = 'rt-stage-seats';
+  (speakers || []).forEach((sp) => {
+    const seat = document.createElement('div');
+    seat.className = 'rt-seat theme-' + (sp.theme || 'original');
+    seat.dataset.id = sp.id;
+    const quota = Math.max(1, (sp.quota | 0) || 1);
+    let dots = '';
+    for (let i = 0; i < quota; i++) dots += '<i></i>';
+    seat.innerHTML = `
+      <span class="rt-seat-hand">想发言</span>
+      <span class="rt-seat-avatar">${escapeHtml(sp.avatar || nameMark(sp.name))}</span>
+      <span class="rt-seat-waves"><i></i><i></i><i></i></span>
+      <span class="rt-seat-name">${escapeHtml(sp.name)}</span>
+      <span class="rt-seat-quota" title="发言额度">${dots}</span>`;
+    seats.appendChild(seat);
+    rtState._stage.set(sp.id, seat);
+  });
+  rtStage.appendChild(seats);
+
+  const table = document.createElement('div');
+  table.className = 'rt-stage-table';
+  const topicEl = document.createElement('div');
+  topicEl.className = 'rt-stage-topic';
+  topicEl.textContent = topic || '';
+  topicEl.title = topic || '';
+  table.appendChild(topicEl);
+  rtStage.appendChild(table);
+
+  const host = document.createElement('div');
+  host.className = 'rt-stage-host';
+  host.textContent = picker === 'agent' ? '主持人代班' : '你主持';
+  rtStage.appendChild(host);
+  rtState._stageHost = host;
+
+  // 开会期间设置面板让位给舞台；散场时再还回来
+  if (rtSetup) rtSetup.hidden = true;
+  rtStage.hidden = false;
+}
+
+function _rtSeat(id) {
+  return rtState._stage && id ? rtState._stage.get(id) : null;
+}
+
+function _rtStageEach(fn) {
+  if (rtState._stage) rtState._stage.forEach(fn);
+}
+
+function _rtStageSetHost(active) {
+  if (rtState._stageHost) rtState._stageHost.classList.toggle('active', !!active);
+}
+
+// 散场：全体落座、撤掉进行中的高亮；摆台留着当合影，设置面板还回来
+function _rtStageTeardown() {
+  _rtStageEach(s => s.classList.remove('speaking', 'raised', 'candidate'));
+  _rtStageSetHost(false);
+  if (rtStage && !rtStage.hidden) rtStage.classList.add('done');
+  if (rtSetup) rtSetup.hidden = false;
+}
+
+// 开新一场 / 离开视图：连摆台一起撤
+function _rtStageReset() {
+  rtState._stage = null;
+  rtState._stageHost = null;
+  if (rtStage) {
+    rtStage.hidden = true;
+    rtStage.innerHTML = '';
+    rtStage.classList.remove('done', 'contention');
+  }
+  if (rtSetup) rtSetup.hidden = false;
 }
 
 // ============================================================
@@ -234,6 +321,7 @@ async function startRoundtable() {
   rtState._summaryEl = null;
   if (rtSummary) { rtSummary.hidden = true; rtSummary.innerHTML = ''; }
   _rtAskResolve(null);
+  _rtStageReset();
 
   const body = {
     topic,
@@ -276,6 +364,7 @@ async function startRoundtable() {
     }
   } catch (err) {
     _rtFinalizeCurrent();
+    _rtStageTeardown();
     const div = document.createElement('div');
     div.className = 'rt-speaker';
     div.innerHTML = `<div class="rt-speaker-body"><div class="rt-speaker-name">出错了</div>
@@ -295,23 +384,40 @@ async function handleRtEvent(data) {
   switch (data.type) {
     case 'start':
       rtState.sessionId = data.session_id || null;
+      _rtStageBuild(data.speakers, data.picker, data.topic);
       break;
 
     case 'round':
       _rtAppendDivider(data.phase, data.round, data.total);
       break;
 
-    case 'intent_start':
+    case 'intent_start': {
       _rtBarText('各位正在斟酌，此刻有没有非说不可的话…');
+      _rtStageEach(s => s.classList.remove('raised', 'candidate'));
+      if (rtStage) rtStage.classList.remove('contention');
+      _rtStageSetHost(false);
+      // 不在 eligible 名单里的 = 额度已用完，坐暗
+      const eligible = new Set((data.speakers || []).map(s => s.id));
+      _rtStageEach((s, id) => s.classList.toggle('spent', !eligible.has(id)));
       break;
+    }
 
-    case 'intent':
+    case 'intent': {
       // 只展示"想说话"的人：愿不愿意开口本身就是看点，沉默的人不占版面
       if (data.speak) _rtBarChip(data.name, data.reason);
+      const seat = _rtSeat(data.character_id);
+      if (seat) seat.classList.toggle('raised', !!data.speak);
       break;
+    }
 
     case 'contention': {
       _rtBarText('多人同时要发言——你来点将。');
+      if (rtStage) rtStage.classList.add('contention');
+      (data.candidates || []).forEach((c) => {
+        const seat = _rtSeat(c.id);
+        if (seat) seat.classList.add('candidate');
+      });
+      _rtStageSetHost(true);
       const chosen = await _rtAskShow(
         data.candidates || [], data.timeout || 25, data.moderator_default);
       await _rtSendChoice(chosen);
@@ -322,6 +428,9 @@ async function handleRtEvent(data) {
       const name = _rtNameOf(data.character_id);
       const by = data.by === 'user' ? '你指定' : (data.by === 'auto' ? '自行举手' : '主持人代定');
       _rtBarText(`本轮由 ${name} 发言（${by}${data.note ? ' · ' + data.note : ''}）`);
+      _rtStageEach(s => s.classList.remove('raised', 'candidate'));
+      if (rtStage) rtStage.classList.remove('contention');
+      _rtStageSetHost(false);
       break;
     }
 
@@ -329,14 +438,25 @@ async function handleRtEvent(data) {
       _rtNotice(data.reason === 'quota'
         ? '发言额度已用完，会议到此为止。'
         : '再无人举手，讨论自然收敛于此。', 'calm');
+      _rtStageEach(s => s.classList.remove('raised', 'candidate', 'speaking'));
       break;
 
     case 'budget_exhausted':
       _rtNotice('本场调用已达上限，会议就此收束。', 'calm');
+      _rtStageEach(s => s.classList.remove('raised', 'candidate', 'speaking'));
       break;
 
     case 'speaker_start': {
       _rtFinalizeCurrent();
+      // 舞台：上一位落座，这一位起身、额度点亮一颗
+      _rtStageEach(s => s.classList.remove('speaking'));
+      const seat = _rtSeat(data.character_id);
+      if (seat) {
+        seat.classList.add('speaking');
+        seat.classList.remove('raised', 'candidate', 'spent');
+        const dots = seat.querySelectorAll('.rt-seat-quota i');
+        dots.forEach((d, i) => d.classList.toggle('on', i < (data.speeches || 0)));
+      }
       const card = document.createElement('div');
       card.className = 'rt-speaker theme-' + (data.theme || 'original') + ' thinking';
       const count = data.quota ? `${data.speeches || 1}/${data.quota}` : '';
@@ -367,6 +487,8 @@ async function handleRtEvent(data) {
     }
 
     case 'speaker_end': {
+      const seat = _rtSeat(data.character_id);
+      if (seat) seat.classList.remove('speaking');
       const cur = rtState._current;
       if (cur) {
         cur.text = data.content || cur.text;
@@ -381,6 +503,7 @@ async function handleRtEvent(data) {
 
     case 'end':
       _rtBarText('会议结束。');
+      _rtStageTeardown();
       // 纪要在 end 之后异步补推（非阻塞旁路），这里先立占位
       if (rtSummary) {
         rtSummary.hidden = false;
@@ -405,6 +528,7 @@ async function handleRtEvent(data) {
 
     case 'error': {
       _rtFinalizeCurrent();
+      _rtStageTeardown();
       const div = document.createElement('div');
       div.className = 'rt-speaker';
       div.innerHTML = `<div class="rt-speaker-body"><div class="rt-speaker-name">出错了</div>
@@ -530,8 +654,8 @@ function _rtRenderSummary(d) {
 // ============================================================
 // 事件绑定
 // ============================================================
-if (roundtableBtn) roundtableBtn.addEventListener('click', openRoundtable);
-if (introRoundtableBtn) introRoundtableBtn.addEventListener('click', openRoundtable);
+// 「争鸣」没有独立入口按钮：入口是首页分区层的第三张卡
+// （.zone-card[data-mode=roundtable]），由 home.js 直接调 openRoundtable()。
 if (rtBackBtn) rtBackBtn.addEventListener('click', () => {
   closeRoundtable();
   // 争鸣是从首页分区层直接进入的，返回就回到分区选择

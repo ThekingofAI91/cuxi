@@ -100,14 +100,16 @@ const rtRounds = document.getElementById('rtRounds');
 const rtPicker = document.getElementById('rtPicker');
 const rtStartBtn = document.getElementById('rtStartBtn');
 const rtTranscript = document.getElementById('rtTranscript');
+const rtStage = document.getElementById('rtStage');
+const rtSetup = document.querySelector('.rt-setup');
 const rtEmpty = document.getElementById('rtEmpty');
 const rtAsk = document.getElementById('rtAsk');
 const rtAskList = document.getElementById('rtAskList');
 const rtAskTimer = document.getElementById('rtAskTimer');
 const rtAskCancel = document.getElementById('rtAskCancel');
 const rtSummary = document.getElementById('rtSummary');
-const roundtableBtn = document.getElementById('roundtableBtn');
-const introRoundtableBtn = document.getElementById('introRoundtableBtn');
+// 注：「争鸣」没有独立按钮（旧 roundtableBtn / introRoundtableBtn 已随首页分区层改造移除）——
+// 入口是首页第三张卡 .zone-card[data-mode=roundtable]，由 home.js 直接调 openRoundtable()。
 
 // ============================================================
 // 主题：按角色切换三种视觉风格（original / paper / noir）
