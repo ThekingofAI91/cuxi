@@ -113,14 +113,14 @@ class Settings(BaseSettings):
     # 真实提问永远走检索；置 False 恢复全管线。
     light_chat_enabled: bool = True
 
-    # 工具化检索（实验，默认关闭）：把"这一轮到底要不要查资料"的决定权交给模型。
-    # analyzer 绑定 search_library 工具，模型自己选——要依据就调工具查原书，
-    # 只是寒暄就直接回答。这是本项目唯一的真 agent 环节：LLM 输出决定控制流。
-    # 关闭时零行为变化，仍走 supervisor 规则路由 → retriever → analyzer 老路径。
-    # 打开后图变为 supervisor → tool_agent → supervisor（retriever 节点被绕过）。
-    # 只作用于教育区：娱乐区靠角色卡撑人设、检索是 23ms 的软背景，
-    # 工具化会给每条消息加一次 LLM 往返（约 3-8s），得不偿失。
-    tool_retrieval_enabled: bool = False
+    # 检索策略按角色分区（CharacterDef.zone）决定，不再有运行期开关
+    # （此前的 tool_retrieval_enabled 已删除，避免"配置默认值 ≠ 声明行为"）：
+    #   教育区 → 工具化检索（framework/tool_agent）：模型自己判断该不该查原书，
+    #            这是本项目唯一的真 agent 环节（LLM 输出决定控制流）。
+    #   娱乐区 → 轻量召回（retriever 节点，top-3 向量+BM25），见 entertainment_light_retrieval。
+    # 判据函数：framework/supervisor.py 的 resolve_retrieval_strategy()。
+    # 为什么这么分：教育区要凭据、可溯源，值一次额外 LLM 往返（3-8s）换"不该查时
+    # 一次都不查"；娱乐区检索是 23ms 的软背景、靠角色卡撑人设，加一次往返得不偿失。
     # 工具轮次上限：模型最多请求几轮检索（下限被夹在 1，见 tool_agent 里的 max(1, ...)）。
     # 1 = 一轮带工具做决策 + 一轮不带工具作答，最多 2 次 LLM 往返（模型直答时只 1 次）。
     # 2 会多插一个带工具的中间轮，模型常常忍不住再查一遍（多一次 3-5s 检索 + 一次往返），

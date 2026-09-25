@@ -19,9 +19,11 @@ LLM 往返次数上限 = tool_max_rounds + 1。模型直答时只烧 1 次；请
 （1 次决策 + 1 次作答）。这就是"让模型自己决定要不要查"相对规则路由多付的那一次往返，
 换的是"不该查的时候一次都不查"。
 
-开关：settings.tool_retrieval_enabled（默认 False）。
-关闭时本模块完全不参与，链路仍走 supervisor 规则路由 → retriever → analyzer。
+开关：无运行期开关。本模块是教育区的检索路径，由角色分区决定——
+`resolve_retrieval_strategy(zone) == "tool"` 时 supervisor 分流到这里。
+娱乐区不走本节点（走 retriever 轻量召回），理由见 supervisor.resolve_retrieval_strategy。
 """
+
 
 from __future__ import annotations
 
@@ -237,7 +239,7 @@ async def tool_agent(state: AgentState) -> dict[str, Any]:
     """
     工具化检索节点：模型自主决定是否检索，代码只执行并回填。
 
-    图里由 supervisor 按 settings.tool_retrieval_enabled 分流到这里，
+    图里由 supervisor 按角色分区（resolve_retrieval_strategy）分流到这里，
     结束后回到 supervisor 收尾（supervisor 见 analysis 已就绪即定稿）。
     """
     from framework.supervisor import build_direct_messages

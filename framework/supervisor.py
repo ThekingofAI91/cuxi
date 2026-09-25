@@ -5,8 +5,9 @@ Supervisor Agent — 整个系统的大脑
 当前项目只保留名人对话场景（persona_chat）：
 图结构 = supervisor → retriever / analyzer / tool_agent
 - 问候/闲聊直接回复；其余默认先检索再分析
-- 开启 settings.tool_retrieval_enabled 后改由 tool_agent 承担检索：
-  模型自己判断要不要查资料（真 agent 环节），retriever 节点被绕过
+- 检索策略按角色分区决定（resolve_retrieval_strategy）：
+  教育区走 tool_agent（模型自己判断要不要查资料，真 agent 环节），
+  娱乐区走 retriever 轻量召回（top-3 向量+BM25，不加 LLM 往返）
 - 引用核查（verifier）已移出图内关键路径，改为回答返回后异步执行，
   经 type:'citations' 事件补推引用出处（见 src/api/routes.py 的 event_stream）
 """
@@ -73,18 +74,41 @@ def get_scene_config():
 # 复用单例即可。
 
 _chroma_client = None
+# 首次构造必须互斥：ChromaDB 1.5.9 的多线程并发首次构造不是线程安全的。
+_chroma_lock = threading.Lock()
 
 
 def get_chroma_client():
-    """获取全局 ChromaDB PersistentClient（单例）"""
+    """获取全局 ChromaDB PersistentClient（单例，双重检查加锁）
+
+    为什么要加锁（2026-09-23 实测复现）：ChromaDB 1.5.9 的
+    `PersistentClient(path=...)` 在**多线程并发首次构造**时会分别抛出
+
+        AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'
+        KeyError: <持久化路径>
+        ValueError: Could not connect to tenant default_tenant
+
+    （6 线程并发构造的探针里 6/6 全失败；同一进程内第二次之后 0/6 失败，
+    说明炸的是"首次构造"这个窗口，不是后续使用。）
+
+    本项目的启动预热跑在独立 daemon 线程（main.py 的 _warmup），用户请求跑在
+    uvicorn 线程，两边会同时触发首次构造 → 表现为**预热整段失败**
+    （`[Warmup] 预热失败: 'RustBindingsAPI' object has no attribute 'bindings'`）
+    加上**首个请求的检索静默失败**（调用方 try/except 吞掉异常、返回空上下文，
+    用户只看到回答少了资料，不知道为什么）。
+
+    加锁把首次构造串行化即可，构造完成后就是纯粹的读复用，没有性能代价。
+    """
     global _chroma_client
     if _chroma_client is None:
-        import chromadb
-        from chromadb.config import Settings as ChromaSettings
-        _chroma_client = chromadb.PersistentClient(
-            path=settings.chroma_persist_dir,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
+        with _chroma_lock:
+            if _chroma_client is None:
+                import chromadb
+                from chromadb.config import Settings as ChromaSettings
+                _chroma_client = chromadb.PersistentClient(
+                    path=settings.chroma_persist_dir,
+                    settings=ChromaSettings(anonymized_telemetry=False),
+                )
     return _chroma_client
 
 
@@ -444,6 +468,31 @@ async def _generate_direct_response(
         return f"你好！我是{fallback}，请问有什么可以帮你的？"
 
 
+# ============================================================
+# 检索策略：按分区决定（架构决策，不是运行期配置）
+# ============================================================
+
+def resolve_retrieval_strategy(zone: Optional[str]) -> str:
+    """按角色分区返回检索策略："tool"（工具化）或 "light"（轻量召回）。
+
+    这是架构决策而非调参开关——两个区的产品目标不同，检索方式就必须不同：
+
+    - education（含 zone 缺失）："tool"。教育区要凭据、要可溯源，价值在于"该查的
+      查得到原文，不该查的一次都不查"；为此值得多付一次 LLM 往返（3-8s）。
+      zone 缺失时按教育区处理，与 analysis_agent 的默认口径
+      （state.get("zone", "education")）保持一致。
+    - entertainment："light"。娱乐区靠角色卡撑人设，检索只是 23ms 的软背景，
+      给每条消息加一次 LLM 往返得不偿失。轻量召回落点在 retriever 节点：
+      retrieve_documents(light_retrieval=...) 跳过改写/重排/图谱，只留 top-3 向量+BM25。
+      前提：state["light_retrieval"] 由 API 层置位（src/api/routes.py，受
+      settings.entertainment_light_retrieval 控制）；非 API 路径（脚本直连图）
+      若未置位，娱乐区会退化成完整检索。
+
+    单测见 tests/test_tool_agent.py。
+    """
+    return "light" if zone == "entertainment" else "tool"
+
+
 async def supervisor_node(state: AgentState) -> dict[str, Any]:
     """
     Supervisor 节点：意图识别 + 路由决策（名人对话场景）
@@ -587,25 +636,23 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
             "route_history": route_history + ["supervisor"],
         }
 
-    # ---- 工具化检索（实验，settings.tool_retrieval_enabled，默认关闭）----
-    # 把"这一轮要不要查资料"交给模型自己判断：tool_agent 绑定 search_library，
-    # 模型决定直答还是先查原书。这是本项目唯一的真 agent 环节（LLM 输出决定控制流）。
-    # 只放教育区：娱乐区检索是 23ms 的软背景、靠角色卡撑人设，
-    # 工具化要给每条消息加一次 LLM 往返，得不偿失。
+    # ---- 检索策略：按分区决定（判据见 resolve_retrieval_strategy）----
+    # 教育区 → tool_agent：把"这一轮要不要查原书"交给模型自己判断（tool_agent
+    # 绑定 search_library），这是本项目唯一的真 agent 环节：LLM 输出决定控制流。
+    # 娱乐区 → retriever：轻量召回 top-3 作为角色背景，不给每条消息加 LLM 往返。
     # "tool_agent" not in route_history 是硬约束：一次请求最多进 tool_agent 一次。
     # 上面的防重入闸门已经挡住了空结果回送，这里再挡一道，两道都失效才算真漏。
     if (
-        getattr(settings, "tool_retrieval_enabled", False)
-        and state.get("zone") != "entertainment"
+        resolve_retrieval_strategy(state.get("zone")) == "tool"
         and "tool_agent" not in route_history
     ):
-        print("[Supervisor] 工具化检索：交由模型自行判断是否检索")
+        print("[Supervisor] 教育区检索策略：工具化（交由模型自行判断是否检索）")
         return {
             "next_agent": "tool_agent",
             "route_history": route_history + ["supervisor"],
         }
 
-    print("[Supervisor] 名人对话：规则路由到 retriever（跳过 LLM 路由）")
+    print("[Supervisor] 规则路由到 retriever（娱乐区轻量召回 / 降级检索）")
     return {
         "next_agent": "retriever",
         "route_history": route_history + ["supervisor"],
@@ -717,9 +764,11 @@ def route_after_supervisor(state: AgentState) -> str:
 def build_graph() -> StateGraph:
     """构建名人对话工作流图（无 InfoGap 追问，无 Coder）
 
-    两条检索路径并存，由 settings.tool_retrieval_enabled 分流：
-    - 关闭（默认）：supervisor → retriever → supervisor → analyzer
-    - 打开：supervisor → tool_agent → supervisor（检索由模型按需触发，retriever 被绕过）
+    两条检索路径并存，由角色分区分流（判据见 resolve_retrieval_strategy）：
+    - 教育区：supervisor → tool_agent → supervisor（检索由模型按需触发）
+    - 娱乐区：supervisor → retriever → supervisor → analyzer（轻量召回 top-3）
+    retriever 另有两个入口：无角色人设时的规则降级（_rule_based_routing），
+    以及教育区工具化跑完仍无资料时的兜底（见 supervisor_node 的防死循环闸门）。
     两条路的收尾一致：analyzer / tool_agent 产出 analysis 后回 supervisor 定稿。
     """
 

@@ -4,7 +4,8 @@
 覆盖四件事：
 1. 模型请求调用 search_library → 检索被执行、结果回填、文档写回 state
 2. 模型选择直接回答 → 一次检索都不发生
-3. 开关 tool_retrieval_enabled 决定 supervisor 走 tool_agent 还是老的 retriever
+3. 分区决定检索策略：教育区走 tool_agent，娱乐区走 retriever
+   （判据 sup.resolve_retrieval_strategy，已无运行期开关）
 4. 防死循环：交回空 analysis（上游空响应 / 工具路径降级）时不再被送回 tool_agent
 
 LLM 全部打桩（按脚本产出 chunk），不触真实 API，也不碰 ChromaDB。
@@ -243,29 +244,38 @@ def test_tool_failure_degrades_without_breaking_answer(monkeypatch):
 
 
 # ============================================================
-# 情形三：开关决定路由
+# 情形三：分区决定检索策略
 # ============================================================
 
-def test_supervisor_routes_to_tool_agent_when_enabled(monkeypatch):
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
+@pytest.mark.parametrize("zone,expected", [
+    ("education", "tool"),
+    ("entertainment", "light"),
+    (None, "tool"),
+    ("", "tool"),
+])
+def test_resolve_retrieval_strategy(zone, expected):
+    """分区 → 检索策略：只有 entertainment 走轻量召回，其余按教育区处理"""
+    assert sup.resolve_retrieval_strategy(zone) == expected
+
+
+def test_education_zone_uses_tool_agent(monkeypatch):
+    """教育区走工具化：把"要不要查原书"交给模型自己判断（真 agent 环节）"""
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
     out = asyncio.run(sup.supervisor_node(_base_state()))
     assert out["next_agent"] == "tool_agent"
 
 
-def test_supervisor_keeps_old_retriever_path_when_disabled(monkeypatch):
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", False)
+def test_zone_missing_defaults_to_tool_agent(monkeypatch):
+    """zone 缺失按教育区处理，与 analysis_agent 的默认口径一致"""
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
-    out = asyncio.run(sup.supervisor_node(_base_state()))
-    assert out["next_agent"] == "retriever"
-    assert "tool_agent" not in out["route_history"]
+    out = asyncio.run(sup.supervisor_node(_base_state(zone=None)))
+    assert out["next_agent"] == "tool_agent"
 
 
 def test_entertainment_zone_never_uses_tool_agent(monkeypatch):
     """娱乐区检索是 23ms 软背景，工具化要给每条消息加一次 LLM 往返，必须挡住"""
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
     out = asyncio.run(sup.supervisor_node(_base_state(zone="entertainment")))
@@ -292,7 +302,6 @@ def test_graph_contains_tool_agent_node():
 
 def test_supervisor_never_re_enters_tool_agent_without_analysis(monkeypatch):
     """工具化跑过但没吐出正文时，supervisor 必须换目标，不能回送 tool_agent"""
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
     after_tool = ["supervisor", "tool_agent", "supervisor"]
@@ -318,7 +327,6 @@ def test_graph_terminates_when_tool_agent_returns_empty(monkeypatch):
 
     修复前这条链会一直 supervisor→tool_agent 互送，直到 6 次上限。
     """
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
     calls = {"tool": 0, "retriever": 0, "analyzer": 0}
@@ -370,7 +378,6 @@ def test_graph_terminates_when_tool_agent_returns_empty(monkeypatch):
 
 def test_supervisor_routes_to_tool_agent_only_once_across_rounds(monkeypatch):
     """分析一直为空也不能再选 tool_agent（退化路径或安全网强制结束都算通过）"""
-    monkeypatch.setattr(settings, "tool_retrieval_enabled", True)
     monkeypatch.setattr(settings, "light_chat_enabled", False)
 
     rh = ["supervisor", "tool_agent", "supervisor"]
