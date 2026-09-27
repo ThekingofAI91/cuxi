@@ -17,10 +17,10 @@
 - **沉浸模式**：峰哥/张雪峰关闭"要点/来源"展示，保持对话沉浸感；荣格/阿德勒/王阳明保留专业溯源
 - **合规与信任**：首页与侧栏提供「使用须知 · AI 仿真声明」，明确角色为 AI 仿真、内容仅供参考、逝者语料仅收生前公开言论
 - **法务三件套**：独立的「用户协议」（/terms）与「隐私政策」（/privacy）页面（含第三方 LLM 披露、账号注销、未成年人条款）；每条 AI 回答与圆桌发言带显著的「AI 生成」内容标识；支持一键注销账号（删除账号与全部登录会话）
-- **多智能体流水线**：Supervisor 规则路由（不烧 LLM）→ Retriever / Analyzer / Verifier / Summarizer
+- **多智能体流水线**：Supervisor 规则路由（不烧 LLM）→ Retriever / Analyzer / Verifier 三个节点；多轮历史超阈值时由 Supervisor 触发**后台任务**压缩旧轮次（不是图里的节点）
 - **争鸣（圆桌会议）**：2-3 位人物同桌，就同一议题交锋——**谁说话不由代码排班，由角色自己判断**（每轮并行问「有没有非说不可的话、要反驳谁的哪一句」，有人举手才发言；多人同时举手交给用户点将）；参会者平级、无中心调度，是项目里**第二个真 agent**；收敛靠发言配额的数学而非提示词调参，结尾只出**纪要（分歧地图）**、不评胜负，判断交回用户
 - **混合检索 + 来源加权**：向量 + BM25 双通道，Cross-Encoder 重排；语料按 original/oral/anchor/secondary 分级加权，二手解读强降权，防止"第三者评价"冒充名人原话
-- **防幻觉验证**：专业型角色回答前对引用做核查与置信度标注
+- **防幻觉验证（异步旁路）**：专业型角色回答推流完成后，后台再对引用做核查与置信度标注，结果以引用出处事件补推——不阻塞回答、也不重答
 - **工程化打磨**：限流、上传限制、会话 SQLite 持久化（重启不丢）、答案内存缓存、成本监控看板
 - **并发可调**：BM25/向量/重排的 CPU 并发上限、torch 线程数、uvicorn worker 数全部走配置，低配机器和高并发场景各取所需
 
@@ -33,14 +33,14 @@
 | 后端 | FastAPI + LangGraph + DeepSeek API |
 | 向量检索 | ChromaDB + BAAI/bge-small-zh-v1.5（512 维，CPU 可跑） |
 | 关键词检索 | rank-bm25（磁盘缓存，重启复用） |
-| 重排序 | BAAI/bge-reranker（Cross-Encoder） |
+| 重排序 | BAAI/bge-reranker-base（Cross-Encoder；可经 `RERANK_MODEL` 换成 v2-m3） |
 | 前端 | 原生 HTML/CSS/JS 按功能分模块（零构建，静态文件直接服务） |
 | 持久化 | SQLite（会话 / 账号 / 用量统计）+ ChromaDB（向量库） |
-| 评估 | RAGAS（scripts/evaluate_ragas.py）+ pytest（163 个用例） |
+| 评估 | 自建 54 题 LLM-as-Judge 四维（主口径）+ RAGAS 三维（抽样对照）+ pytest（248 个用例） |
 
 ## 并发容量（实测）
 
-在 16 核 CPU 机器上实测（完整检索 + 生成流水线，DeepSeek API；知识库碎片重组后）：
+在 16 核 CPU 机器上实测（完整检索 + 生成流水线，DeepSeek API；知识库碎片重组后。**当时重排用 bge-reranker-v2-m3**，仓库现默认是 base，见下方）：
 
 | 并发数 | 单请求延迟（min / max） | 说明 |
 |--------|------------------------|------|
@@ -51,12 +51,13 @@
 
 瓶颈与对策：
 
-- **CPU 精排是主要成本**：bge-reranker-v2-m3 对完整段落（~1000 字符）全候选精排 15 对需 20s+；
-  已配置为只精排 RRF 前 10 候选 + 200 字符截断 + torch 8 线程 × 2 并发（16 核不互相抢占），单请求精排 ~5-8s
+- **CPU 精排是主要成本**：v2-m3 对完整段落（~1000 字符）全候选精排 15 对需 20s+。
+  现默认 `RERANK_MODEL=BAAI/bge-reranker-base`（278M / ~1.1GB），只精排 RRF 前 5 候选（`rerank_candidates=5`）
+  + 每对 200 字符截断 + torch 8 线程 × 2 并发（16 核不互相抢占）
 - 单进程内纯 Python 计算吃 GIL（BM25 检索、RRF 融合），多请求时延迟随并发上涨
 - **LLM API 不是瓶颈**：20 并发纯 LLM 调用约 8s 完成
 - **要更低的 20 并发延迟**：设 `APP_WORKERS=2~4`（进程级并行，每 worker 独立加载模型约 2.5GB 内存；8GB 服务器建议 2，16GB 建议 4）。注意限流/答案缓存是进程内的，多 worker 时各算各的
-- 低配机器可换 `RERANK_MODEL=BAAI/bge-reranker-base`（~1.1GB，CPU 快 3-5 倍）
+- 想要更高精度可换回 `RERANK_MODEL=BAAI/bge-reranker-v2-m3`（更大更慢；实测 base 比 v2-m3 快 3.4 倍，但 top-1 一致率仅 5/8）
 
 ---
 
@@ -126,8 +127,9 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 │   ├── supervisor.py              #   主管：规则路由 + 轻聊快速通道 + 历史压缩 + 最终答案编译
 │   ├── retrieval_agent.py         #   检索智能体（混合检索）
 │   ├── analysis_agent.py          #   分析智能体
-│   ├── verification_agent.py      #   验证智能体（引用核查）
-│   └── roundtable.py              #   圆桌辩论编排（多角色回合制交锋）
+│   ├── verification_agent.py      #   验证智能体（异步引用核查）
+│   ├── tool_agent.py              #   工具化检索节点（模型自主决定是否查原书）
+│   └── roundtable.py              #   圆桌辩论编排（多角色自主发言 + 交锋）
 ├── scenes/persona_chat/           # 名人对话场景
 │   ├── config.py                  #   场景与角色注册
 │   ├── prompt_builder.py          #   酒馆式提示词装配（角色卡 + 世界书 + 后历史指令）
@@ -144,7 +146,8 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 │   ├── index.html                 # 页面骨架（head + markup + 模块脚本引用）
 │   ├── admin.html                 # 管理后台（独立单文件）
 │   └── assets/
-│       ├── css/main.css           # 全部样式（五套主题）
+│       ├── css/main.css           # 主样式（五套主题）
+│       ├── css/premium.css        # 补充样式（首页/对话页细节）
 │       ├── js/core.js             # 全局状态 / DOM 引用 / 主题 / 工具函数（最先加载）
 │       ├── js/storage.js          # localStorage + sessionStorage 双写持久化
 │       ├── js/home.js             # 首页三段式流程（介绍→分区→选人→详情）
@@ -154,11 +157,14 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 │       ├── js/roundtable.js       # 圆桌会议交互
 │       ├── js/feedback.js         # 意见反馈
 │       ├── js/auth.js             # 登录 / 注册 / 会话态
+│       ├── js/setup.js            # 首次访问的模型配置页
+│       ├── js/mobile.js           # 移动端适配（视口 / iOS 软键盘 / 布局）
 │       ├── js/main.js             # 启动初始化（最后加载）
 │       └── bg/                    # 首页人物背景图
 ├── scripts/
 │   ├── cost_report.py             # 成本日报
-│   └── evaluate_ragas.py          # RAGAS 评测
+│   ├── evaluate_ragas.py          # RAGAS 评估脚手架（需自行安装 ragas，见「测试与评估」）
+│   └── profile_rag.py 等          # 检索剖析 / 重排质量对照 / 图谱质量审计等辅助脚本
 └── tests/                         # 智能体 + API 集成测试
 ```
 
@@ -168,11 +174,11 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 | 人物 | 定位 | ChromaDB collection | 语料构成 |
 |------|------|---------------------|----------|
-| 荣格 | 解梦大师 · 潜意识捕手 | `persona_jung` | 原著（心理类型/原型与集体无意识…）+ 演讲与回忆录（2,993 块） |
-| 阿德勒 | 感情急救员 · 自卑超越教练 | `persona_adler` | 原著 + 演讲 + 《被讨厌的勇气》（后人虚构，降权）（699 块） |
-| 王阳明 | 心学宗师 · 破心中贼专家 | `persona_wangyangming` | 传习录 + 传记精选（1,273 块） |
-| 峰哥 | 下三路之神 · 街头社会学家 | `persona_fengge` | 2024 媒体专访实录 + 公开视频/直播语料 |
-| 张雪峰 | 长跑之王 · 升学指路 | `persona_zhangxuefeng` | 5 本著作 + 深度采访 + 语录分类辑录 |
+| 荣格 | 解梦大师 · 潜意识捕手 | `persona_jung` | 原著（心理类型/原型与集体无意识…）+ 演讲与回忆录（2,994 块） |
+| 阿德勒 | 感情急救员 · 自卑超越教练 | `persona_adler` | 原著 + 演讲 + 《被讨厌的勇气》（后人虚构，降权）（1,193 块） |
+| 王阳明 | 心学宗师 · 破心中贼专家 | `persona_wangyangming` | 传习录 + 传记精选（1,273 块，另有 65 份 epub/mobi 未入库） |
+| 峰哥 | 下三路之神 · 街头社会学家 | `persona_fengge` | 2024 媒体专访实录 + 公开视频/直播语料（90 块） |
+| 张雪峰 | 长跑之王 · 升学指路 | `persona_zhangxuefeng` | 5 本著作 + 深度采访 + 语录分类辑录（161 块） |
 
 > 说明：张雪峰语料信息截止 **2026-03-24**（其离世日），仅收录生前公开言论，不掺悼念内容。
 > 知识库已做碎片重组（2026-08-13）：扫描 PDF 的 OCR 逐行碎片（平均 40-60 字符）按原文顺序拼接去重后重新分块，
@@ -188,15 +194,15 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
    ▼
 Supervisor（规则路由，不调 LLM）
    │
-   ├─ 需要查资料? ──► Retriever（Multi-Query + HyDE + 向量/BM25 + 重排）
+   ├─ 需要查资料? ──► Retriever（向量 + BM25 + 重排；Multi-Query / HyDE 默认关闭）
    │                        │
    │                        ▼
    ├─ 分析回答?  ────► Analyzer（基于检索资料组织答案）
    │                        │
    │                        ▼
-   ├─ 有引用且角色开启验证? ► Verifier（逐条核查出处 + 置信度）
+   ├─ 有引用且角色开启验证? ► Verifier（回答推完后异步核查出处 + 置信度）
    │
-   └─ Summarizer（多轮历史超阈值时自动压缩）
+   └─ 多轮历史超阈值? ──► 后台任务压缩旧轮次（不是图节点，不阻塞回答）
    │
    ▼
 最终答案（SSE 流式返回）
@@ -237,7 +243,7 @@ Supervisor（规则路由，不调 LLM）
 
 ## 检索管线
 
-1. **查询增强**：一次 LLM 调用同时生成查询变体（Multi-Query）与假设文档（HyDE）
+1. **查询增强**：一次 LLM 调用同时生成查询变体（Multi-Query）与假设文档（HyDE）——**默认关闭**（`REWRITE_ENABLED=false`，原因见下节）
 2. **双通道召回**：变体查询批量向量检索 + 原问 BM25 关键词检索（精确命中专有名词）
 3. **RRF 融合 + 来源加权**：`source_profile.py` 按文件名把语料分为 original/oral/anchor/artificial/secondary，RRF 累加时乘以权重（secondary 0.25 强降权）
 4. **Cross-Encoder 重排**：bge-reranker 对候选深度精排，取 top-K
@@ -281,7 +287,7 @@ Supervisor（规则路由，不调 LLM）
 3. **图谱构建熔断**：连续 5 批 0 三元组 → 判定上游不可用，中止并清理 tmp，不再白烧几百次调用。
 4. **空图谱不算"已存在"**（`graph_exists` 要求 entities>0），空文件自动触发重建而不是永久装死；清理了 3 个空图谱文件与烂尾 tmp。
 5. **自动构建失败退避**：构建失败后 1 小时内不自动重试（手动 force 不受限），防每次对话重复触发注定失败的构建。
-6. **精排保持 bge-reranker-v2-m3**：实测 base 模型快 3.4 倍但 top-1 一致率仅 5/8 且不一致处质量更差，不切换；低配机器仍可按 `.env.example` 说明自行切换 `RERANK_MODEL`。
+6. **精排模型选择**：实测 base 比 v2-m3 快 3.4 倍，但 top-1 一致率仅 5/8 且不一致处质量更差。当时据此倾向"精度优先"；**仓库现默认值是 `BAAI/bge-reranker-base`**（`src/core/config.py` 的默认值与随附 `.env` 一致），要精度请自行换成 v2-m3。
 
 ### 检索延迟优化（2026-08-29）
 - **改写与原始检索重叠**：查询改写（Multi-Query + HyDE，一次 LLM 调用，预算 2s）不再阻塞检索——
@@ -339,17 +345,30 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 | GET | `/admin/feedback` | 拉取反馈列表（需令牌） |
 | POST | `/admin/feedback/{id}/status` | 标记反馈状态 pending/resolved/replied（需令牌） |
 
+> 上表是主要面向前端的功能接口；另有首次配置页的 `/setup/status`、`/setup/llm`、`/setup/test`，
+> 以及评测用的 `/persona/eval_query`（`tests/eval_rag.py` 走它跑四维评估），未逐条列出。
+
 ---
 
 ## 测试与评估
 
 ```bash
-pytest                              # 163 个用例：智能体行为 + API 集成 + 对话操作（重答/编辑/轻聊通道/角色卡）+ 设置页配置
-python scripts/evaluate_ragas.py     # 跑真实流水线，输出 faithfulness / answer_relevancy / context_precision
+pytest                              # 248 个用例：智能体行为 + API 集成 + 对话操作（重答/编辑/轻聊通道/角色卡）+ 设置页配置
 python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志）
 ```
 
-**54 题 LLM-as-Judge 四维评估**（有效样本 34 题，判官解析失败的题显式剔除而非默认给分）：
+**关于 RAGAS——现状说明（避免误导）**：仓库里的 `scripts/evaluate_ragas.py` 是早期脚手架，需要你自己 `pip install ragas`。
+但 ragas 会把 `langchain-core` 顶到 1.6.x，与本项目锁定的版本冲突，**所以它没法在项目自己的 venv 里跑通**。
+真正跑过的做法是两阶段解耦：
+
+1. 项目 venv 里跑真实流水线，落盘「问题 / 回答 / 检索到的上下文」（`output/_phase1_pipeline.py`）；
+2. 独立 venv（Python 3.13 + ragas 0.4.3 + langchain-community 0.3.31）只读那份 JSON 打分（`output/_phase2_ragas.py`）。
+
+即便这样，**受所用网关的 RPM/TPM 配额限制（突发即 429），RAGAS 目前仍是抽样状态、覆盖率不足**，
+所以它的数字**只作方法学对照，不单独引用**——下面那张四维表的自建评估才是主口径。
+
+**54 题 LLM-as-Judge 四维评估**（主口径；有效样本 34 题，判官解析失败的题显式剔除而非默认给分。
+走 `POST /persona/eval_query`，覆盖检索 + 生成链路，不含工具化检索与圆桌）：
 
 | 指标 | 得分（10 分制） |
 |---|---|
@@ -360,7 +379,8 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 
 最有价值的部分不是分数，是**归因**：分角色得分定位到王阳明的低分源于**传记类语料缺失**
 （其检索精度 7.62 与另两位持平，说明检索层没问题，是"库里根本没有"），
-由此得出"该修的是语料而不是检索"这一可执行结论。评测集见
+由此得出"该修的是语料而不是检索"这一可执行结论。完整报告（含分角色 / 分难度拆解与已知限制）见
+[`docs/eval-report.md`](docs/eval-report.md)；评测集见
 [`tests/eval_dataset_expanded.json`](tests/eval_dataset_expanded.json)，
 逐题得分见 [`tests/eval_results.json`](tests/eval_results.json)（不含检索原文，以遵守语料合规）。
 
@@ -463,7 +483,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 
 ## 备注
 
-- 前端已模块化：`index.html` 只留页面骨架，样式与交互逻辑拆分到 `assets/css/` 与 `assets/js/`（10 个按功能划分的文件，按依赖顺序加载，无打包工具）；五套主题通过 CSS 变量切换
+- 前端已模块化：`index.html` 只留页面骨架，样式与交互逻辑拆分到 `assets/css/` 与 `assets/js/`（12 个按功能划分的文件，按依赖顺序加载，无打包工具）；五套主题通过 CSS 变量切换
 - 账号数据：`data/accounts.db`（用户 + 登录会话，pbkdf2 哈希存储密码；Cookie 为 HttpOnly，前端 JS 不可读）
 - 本项目的定位是**展示型个人项目**：演示多智能体协作、混合检索、来源可信度设计与工程化细节；LLM 与向量模型均可在 CPU 上低成本运行
 
@@ -480,5 +500,5 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 1. **原始语料不进仓库。** 荣格、阿德勒、王阳明语料为已出版著作的电子版，受著作权保护；
    本仓库不包含这三个目录下的原始文档，`data/persona_chat/{jung,adler,wangyangming}/` 需使用者**自行准备合法来源**。
    娱乐区两位角色的背景素材为公开言论与访谈整理（Markdown），随角色人设一并提供。
-2. **娱乐区两位角色是在世真人**（峰哥、张雪峰）。任何商业化使用前必须先取得本人书面授权或移除该角色；
+2. **娱乐区两位角色取材于当代真人**（峰哥、张雪峰），牵涉真人形象与名誉。任何商业化使用前必须先取得授权或移除该角色；
    所有角色回答均为 **AI 生成**，不代表本人观点。

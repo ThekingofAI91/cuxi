@@ -1,7 +1,14 @@
 """
 RAGAS 评估脚手架 — 量化名人对话的检索与回答质量
 
-准备：
+⚠️ 重要：**本脚本不能在项目自己的 venv 里跑通。** ragas 会把 langchain-core 顶到 1.6.x，
+   与项目锁定的版本冲突。实际可用的做法是两阶段解耦：
+     1) 项目 venv 跑真实流水线，落盘问答与检索上下文（output/_phase1_pipeline.py）
+     2) 独立 venv（Python 3.13 + ragas 0.4.3 + langchain-community 0.3.31）只读 JSON 打分
+        （output/_phase2_ragas.py）
+   本脚本是单机快速自测的参考实现，请在**独立环境**里运行，不要装进项目 venv。
+
+准备（在独立环境里）：
     pip install ragas langchain-openai
     .env 中配置 LLM API（settings.llm_api_key / llm_base_url）
 
