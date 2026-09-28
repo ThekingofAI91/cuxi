@@ -321,11 +321,15 @@ async def tool_agent(state: AgentState) -> dict[str, Any]:
 
     except Exception as e:
         # 工具化失败不能拖垮回答：归还空 analysis，supervisor 会把它退回规则路径
-        # （有资料 → analyzer 复用；无资料 → retriever），本节点不会被重复进入
+        # （有资料 → analyzer 复用；无资料 → retriever），本节点不会被重复进入。
+        # sink 里的资料是这一轮已经花掉的检索成本，异常时不能丢：交回非空 docs，
+        # supervisor 就会走 analyzer 复用，而不是退回 retriever 把同一个
+        # retrieve_documents 再跑一遍（tool 与 retriever 共用同一实现，重跑纯然浪费）。
         print(f"[Tool Agent] 工具化检索失败（退回规则路径）: {e}")
         return {
             "analysis": "",
-            "retrieved_docs": [],
+            "retrieved_docs": sink.get("docs") or [],
+            "graph_used": bool(sink.get("graph_used")),
             "route_history": state.get("route_history", []) + ["tool_agent"],
             "error": str(e),
         }

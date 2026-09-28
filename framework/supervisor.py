@@ -520,10 +520,13 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
     print(f"[Supervisor] 路由历史: {route_history}")
     print(f"[Supervisor] 角色人设: {'有' if character_role_prompt else '无'}")
 
-    # 限制最大循环次数
+    # 限制最大循环次数。只留「进了几次 supervisor」这一个判据：
+    # 串行图里 supervisor 每轮必进一次，len(route_history) 与它近似线性相关，
+    # 原 `len(route_history) > 15` 基本被本判据覆盖，属冗余，已删。
+    # 框架层还有 recursion_limit（由 routes.py 传入），是最后一道保险丝。
     supervisor_count = route_history.count("supervisor")
-    if supervisor_count > 6 or len(route_history) > 15:
-        print(f"[Supervisor] 达到最大路由次数 (supervisor={supervisor_count}, total={len(route_history)})，强制结束")
+    if supervisor_count > 6:
+        print(f"[Supervisor] supervisor 决策次数达上限 (supervisor={supervisor_count}, total={len(route_history)})，强制结束")
         # 以角色口吻兜底，保证回答风格一致
         final_answer = await _generate_direct_response(
             query, history, character_role_prompt, stream_callback,

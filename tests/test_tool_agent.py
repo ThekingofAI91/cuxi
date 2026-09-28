@@ -243,6 +243,45 @@ def test_tool_failure_degrades_without_breaking_answer(monkeypatch):
     assert out["error"]
 
 
+def test_tool_failure_keeps_already_retrieved_docs(monkeypatch):
+    """异常发生在检索成功之后时，已检索到的资料不能丢
+
+    否则 supervisor 看到 retrieved_docs=[] 会退回 retriever，而 retriever 与 tool
+    共用同一个 retrieve_documents()——等于把刚跑完的检索原样再跑一遍。
+    交回非空 docs，supervisor 就会走 analyzer 复用，检索成本不白花。
+    """
+
+    async def fake_retrieve(query, history=None, light_retrieval=False, skip_retrieval=False):
+        return FAKE_DOCS, False, ""
+
+    monkeypatch.setattr(ta, "retrieve_documents", fake_retrieve)
+
+    class BreakingLLM:
+        """第一轮请求检索；第二轮直接炸——模拟收尾轮上游异常"""
+
+        def __init__(self):
+            self._n = 0
+
+        def bind_tools(self, tools):
+            return self
+
+        async def astream(self, messages):
+            self._n += 1
+            if self._n == 1:
+                for chunk in _tool_call_fragments(SEARCH_TOOL_NAME, '{"query": "格物"}', "call_1"):
+                    yield chunk
+                return
+            raise RuntimeError("收尾轮上游异常")
+
+    monkeypatch.setattr(ta, "get_chat_llm", lambda **kw: BreakingLLM())
+
+    out = asyncio.run(tool_agent(_base_state()))
+
+    assert out["analysis"] == ""
+    assert out["error"]
+    assert out["retrieved_docs"] == FAKE_DOCS
+
+
 # ============================================================
 # 情形三：分区决定检索策略
 # ============================================================

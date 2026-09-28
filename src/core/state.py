@@ -27,7 +27,7 @@ class AgentState(TypedDict):
     final_answer: str                   # Supervisor 最终汇总
 
     # ---- 对话管理 ----
-    history: list[dict]                 # 对话历史，Summarizer 维护
+    history: list[dict]                 # 对话历史（超限时由图外异步任务压缩为摘要）
     route_history: list[str]            # 路由记录，每个 Agent 执行完追加一条
 
     # ---- InfoGap 追问 ----
