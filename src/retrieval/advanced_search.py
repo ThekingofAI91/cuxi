@@ -606,15 +606,15 @@ async def advanced_retrieval(
         )
 
     # ---- Step 5: Cross-Encoder 重排序（只精排 RRF 前 N 条，其余按 RRF 顺序兜底）----
-    # 重组后块为完整段落（~1000 字符），全候选精排在 CPU 上 15 对要 20s+；
-    # 只精排 rerank_candidates（默认 10）对，剩余候选保持 RRF 顺序拼接，质量损失小、耗时减半。
+    # 重组后块为完整段落（~1000 字符），若对全部候选（默认 15 条 = top_k）都做 CPU 精排会显著拖慢单请求；
+    # 只精排 rerank_candidates（默认 5）对，剩余候选保持 RRF 顺序拼接，质量损失小、耗时减半。
     rerank_n = settings.rerank_candidates
     head = candidate_docs[:rerank_n]
     tail = candidate_docs[rerank_n:]
     if use_rerank and len(head) > 1:
         try:
             from src.retrieval.reranker import rerank_documents
-            # CPU 推理（30 对 × 512 token）需数秒，同步调用会阻塞事件循环，放线程池
+            # CPU 推理（默认 5 对 × 256 token）需数秒，同步调用会阻塞事件循环，放线程池
             _rerank_t0 = time.perf_counter()
             head = await asyncio.to_thread(rerank_documents, question, head, top_k=rerank_n)
             stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
