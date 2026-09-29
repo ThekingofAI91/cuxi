@@ -31,6 +31,15 @@ class LLMNotConfiguredError(RuntimeError):
     """
 
 
+class LLMEmptyResponseError(RuntimeError):
+    """上游连续返回空响应，重试与首 token 超时都已耗尽。
+
+    这是一种「业务失败」而非「配置错误」：调用方不该再退回任何无资料的兜底
+    生成（那会给出看似有据、实则凭空的回答），而应把失败如实透出，
+    由 API 层推 error 事件让用户重试。抛出时保证尚未向用户推送过任何 token。
+    """
+
+
 # ============================================================
 # 共享 HTTP 连接池（按事件循环隔离）
 # ============================================================
@@ -129,17 +138,21 @@ def get_chat_llm(*, with_fallback: bool = True, **kwargs: Any) -> Runnable:
 
 
 # ============================================================
-# 空响应容错（2026-08-29 新增）
+# 空响应容错（2026-08-29 新增；2026-09-29 加首 token 超时、删降级兜底）
 # ============================================================
 # 实测（deepseek-v4-flash 经第三方中转）：上游存在随机性故障——HTTP 200 但
 # content 为空（约 13s 超时后返回空壳），发生率随时段波动，同一 prompt 前一分钟
 # 成功、后一分钟全空。空响应不抛异常，ChatOpenAI 内置重试（针对网络错误/5xx）
-# 不会触发。危害：图谱构建每批 0 实体白烧调用；主链路分析拿到空回答 → 走
-# "分析为空→降级直答"兜底，用户侧表现为延迟翻倍（13s 超时 + 8s 再生成）。
+# 不会触发。危害：图谱构建每批 0 实体白烧调用；主链路分析拿到空回答则本轮白跑。
 #
 # 对策：关键调用点用 ainvoke_nonempty / astream_nonempty 包一层——
-# 空响应视为失败立即重试（再摇一次骰子，上游随机性下重试命中率很高）；
-# 流式版本仅在"一个 token 都没收到"时重试（此时尚未向用户推送任何内容，安全）。
+# 空响应视为失败立即重试（再摇一次骰子，上游随机性下重试命中率很高；
+# logs/server_main.log 实测 9 次空响应全部一次重试即命中）；
+# 流式版本仅在"尚未向用户推送任何 token"时重试（此时重复推送风险为零，安全），
+# 并额外卡一个「首 token 超时」——上游空壳会挂到它自身超时才回，等满纯属白等。
+#
+# 重试全耗尽后的表现由调用方决定：supervisor 已不再回退「无资料直答」
+# （会丢掉本轮检索资料），改为抛 LLMEmptyResponseError 明确失败。
 
 _EMPTY_RETRY_ATTEMPTS = 2
 
@@ -176,26 +189,82 @@ async def ainvoke_nonempty(
     return resp  # 全空则原样返回，由调用方按空内容走既有兜底
 
 
-async def astream_nonempty(llm: Runnable, messages: Any, attempts: int = _EMPTY_RETRY_ATTEMPTS):
+async def _aclose_quietly(stream: Any) -> None:
+    """关闭被放弃的流（首 token 超时 / 中途异常），避免遗留未关闭的上游连接。"""
+    aclose = getattr(stream, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        pass
+
+
+async def astream_nonempty(
+    llm: Runnable,
+    messages: Any,
+    attempts: int = _EMPTY_RETRY_ATTEMPTS,
+    ttft_timeout: float = None,
+):
+    """astream + 空响应重试 + 首 token 超时：逐 token 产出。
+
+    两条失败判据，都只在「尚未向调用方推送任何 token」时才成立，所以都能安全重试：
+      1. **首 token 超时**：上游空壳时会挂到它自身超时才回 200+空内容（实测约 13s），
+         等满纯属白等 → 卡住 ttft_timeout（默认取 settings.llm_ttft_timeout）立即放弃；
+      2. **整次流零 token**：正常结束但内容为空。
+    首 token 一到就不再计时 —— 正常生成本来就可能较慢，不设整段上限。
+    已推送过部分内容后失败一律不重试（否则会把内容重复推一遍）。
+
+    重试全部耗尽时返回空（由调用方决定如何兜底），不在此处抛业务异常：
+    空响应的「该怎么对外表现」是产品决策，不该由这层基础设施定。
     """
-    astream + 空响应重试：逐 token 产出；若整次流一个 token 都没产出
-    （上游空壳响应），视为失败重试。已产出部分内容后失败不重试（避免重复推送）。
-    """
+    timeout = (
+        ttft_timeout
+        if ttft_timeout is not None
+        else getattr(settings, "llm_ttft_timeout", 6.0)
+    )
     for i in range(attempts + 1):
         got = ""
+        stream = llm.astream(messages).__aiter__()
+        loop = asyncio.get_running_loop()
+        ttft_deadline = loop.time() + timeout
+        timed_out = False
         try:
-            async for chunk in llm.astream(messages):
+            while True:
+                # 只对第一个 token 计时；拿到后 wait=None（整段不再限时）
+                wait = None
+                if not got:
+                    wait = ttft_deadline - loop.time()
+                    if wait <= 0:
+                        timed_out = True
+                        break
+                try:
+                    chunk = await asyncio.wait_for(stream.__anext__(), timeout=wait)
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    # 首 token 迟迟不来，放弃本次尝试（必然 got 为空）
+                    timed_out = True
+                    break
                 token = getattr(chunk, "content", None) or ""
                 if token:
                     got += token
                     yield token
-            if got:
-                return
-            # 整个流空：未向调用方推送任何内容，安全重试
-            print(f"[LLM] 上游返回空流（第 {i + 1} 次），重试…")
         except Exception:
             if got:
                 raise  # 已推送部分内容，交由调用方既有逻辑处理
             if i >= attempts:
                 raise
             print(f"[LLM] 流式调用异常且无输出（第 {i + 1} 次），重试…")
+            continue
+        finally:
+            # 覆盖所有放弃路径（超时 / 异常 / 调用方提前关闭），不留悬挂的上游流；
+            # 正常读完的流再 aclose 是 no-op，无副作用。
+            await _aclose_quietly(stream)
+        if timed_out:
+            print(f"[LLM] 首 token 超过 {timeout:.0f}s 无输出（第 {i + 1} 次），重试…")
+            continue
+        if got:
+            return
+        # 整次流空：未向调用方推送任何内容，安全重试
+        print(f"[LLM] 上游返回空流（第 {i + 1} 次），重试…")

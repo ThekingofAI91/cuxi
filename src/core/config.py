@@ -33,6 +33,11 @@ class Settings(BaseSettings):
     # 稳定性：单次 LLM 请求超时（秒）+ 失败重试次数（默认重试 2 次）
     llm_request_timeout: float = 60
     llm_max_retries: int = 2
+    # 首 token 超时（秒）：流式调用里「等第一个 token」的上限，超了立即放弃当次尝试并重试。
+    # 上游中转偶发空壳时要挂到它自身超时才回 200+空内容（实测约 13s），等满就是白等；
+    # 卡住这个上限后，空壳场景的代价从 13s/次 降到本值/次（见 llm.astream_nonempty）。
+    # 取值依据：正常首 token 实测 1-3s，留 2x 余量取 6s，不会误杀慢生成。
+    llm_ttft_timeout: float = 6.0
     # LLM HTTP 连接池跨请求复用（按事件循环隔离的共享 httpx.AsyncClient）。
     # 默认每个 ChatOpenAI 实例各建一个连接池，而本项目每请求都新建实例 →
     # 每次 LLM 调用都要重付 TCP+TLS 握手（走第三方中转实测 0.1-0.5s/次）。

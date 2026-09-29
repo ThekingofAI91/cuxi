@@ -18,7 +18,12 @@ import asyncio
 import threading
 from typing import Any, Optional
 
-from src.core.llm import get_chat_llm, astream_nonempty, ainvoke_nonempty
+from src.core.llm import (
+    get_chat_llm,
+    astream_nonempty,
+    ainvoke_nonempty,
+    LLMEmptyResponseError,
+)
 from langgraph.graph import END, START, StateGraph
 
 from framework.analysis_agent import analysis_agent
@@ -40,6 +45,12 @@ from src.core.session_store import get_store as _get_session_store
 # 当前请求，create_task 子任务会复制父上下文，天然做到请求级隔离。
 
 _current_scene_config = contextvars.ContextVar("scene_config", default=None)
+
+# 上游连续空响应（首 token 超时 + 整次流空，重试全部耗尽）时的对外话术。
+# 不再回退到「无资料直答」：那会丢掉本轮检索到的全部资料，给出看似有据、
+# 实则凭空的回答，比如实报错更糟。routes.event_stream 会把它包成
+# type:'error' 事件推给前端（抛出时保证尚未向用户推送过任何 token）。
+_EMPTY_UPSTREAM_MSG = "模型服务暂时没有返回内容，请稍后重试"
 
 # 对话历史存储：session_id -> [(user_query, assistant_answer), ...]
 _conversation_history_store: dict[str, list[tuple[str, str]]] = {}
@@ -573,16 +584,25 @@ async def supervisor_node(state: AgentState) -> dict[str, Any]:
         # 改为 routes.event_stream 中「回答返回后异步执行」，经 type:'citations' 事件补推引用出处。
         final_answer = state.get("analysis", "").strip()
         if not final_answer:
-            print("[Supervisor] 分析为空，降级为直接生成")
-            final_answer = await _generate_direct_response(
-                query, history, character_role_prompt, stream_callback,
-                session_id=state.get("session_id"),
-            )
+            # analysis 非空但全是空白字符 → 等价于没有产出，按上游空响应处理
+            print("[Supervisor] 分析内容为空（仅空白字符），明确失败")
+            raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG)
         return {
             "next_agent": "__end__",
             "final_answer": final_answer,
             "route_history": route_history + ["supervisor"],
         }
+
+    # 已分析过一轮却仍无产出 → 明确失败，绝不再回送 analyzer。
+    # 分析节点内部已由 astream_nonempty 做过「首 token 超时 + 整次流空」双重判据的重试，
+    # 再送一次只会拿到同样的空结果，白白多烧 6 轮 supervisor↔analyzer 才到次数上限收手
+    # （每轮 analyzer 自己还要重试，上游持续空时能拖到分钟级）。
+    # 注意：原「分析为空 → 无资料直答」兜底已删——它丢掉本轮全部检索资料，
+    # 给出看似有据、实则凭空的回答，比如实报错更糟。此刻尚未向用户推送任何 token，
+    # 直接抛异常是安全的：routes.event_stream 会捕获并推 type:'error' 事件。
+    if "analysis_agent" in route_history and not has_analysis:
+        print("[Supervisor] 已分析过一轮且无产出，明确失败（不再回送 analyzer）")
+        raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG)
 
     # 防死循环：已检索过但尚未分析时，强制路由 analyzer，
     # 避免陷入 retriever→supervisor 无限循环，analyzer 永远不被调用
