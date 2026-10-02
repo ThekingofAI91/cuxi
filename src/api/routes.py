@@ -1868,14 +1868,23 @@ async def _roundtable_sse(agen, *, session_id: str, logger, client_ip: str, t0: 
     summary: dict = {}
     end_payload: dict = {}
     t0_local = t0
+    _summary_t0 = 0.0     # 纪要旁路的起止（纪要耗时只能在这里观测——
+    _summary_ms = 0.0     # end 事件先于纪要发出，end 的 payload 里拿不到）
     try:
         async for evt in agen:
             yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
             et = evt.get("type")
             if et == "end":
                 end_payload = evt
+            elif et == "summary_start":
+                _summary_t0 = time.time()
             elif et == "summary":
                 summary = evt.get("data", {}) or {}
+                if _summary_t0:
+                    _summary_ms = (time.time() - _summary_t0) * 1000
+            elif et in ("summary_end", "summary_error"):
+                if _summary_t0 and not _summary_ms:
+                    _summary_ms = (time.time() - _summary_t0) * 1000
     except Exception as e:
         logger.exception("roundtable_error ip=%s", client_ip)
         yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
@@ -1883,7 +1892,8 @@ async def _roundtable_sse(agen, *, session_id: str, logger, client_ip: str, t0: 
         return
 
     if not end_payload:
-        # 挂起等点将：不落库，等恢复后收场时再写
+        # 挂起等点将：不落库、也不记 monitor——会议还没开完，等恢复收场时再写，
+        # 否则监控里会出现一条"半场"记录（调用数与耗时都只有一半）。
         return
 
     try:
@@ -1897,11 +1907,34 @@ async def _roundtable_sse(agen, *, session_id: str, logger, client_ip: str, t0: 
         )
     except Exception:
         logger.exception("roundtable_save_failed session=%s", session_id)
+
+    # ---- 圆桌接入 monitor：整场记一条（与一对一同样的 usage_log / 延迟瀑布口径）----
+    # 段耗时来自图状态（host 决策 / 各次发言），纪要耗时在这里补上；
+    # latency 用 meeting_ms（整场，含挂起前的部分），而非本次请求时长。
+    _stages: dict = {}
+    try:
+        _stages = dict(end_payload.get("timings") or {})
+        if _summary_ms:
+            _stages["summary_ms"] = round(_summary_ms, 1)
+        _meeting_ms = int(end_payload.get("meeting_ms") or 0) or int((time.time() - t0_local) * 1000)
+        _stages["total_ms"] = _meeting_ms
+        get_monitor().record(
+            request_id=f"rt:{session_id}",
+            character="roundtable",
+            prompt_chars=int(end_payload.get("prompt_chars") or 0),
+            answer_chars=int(end_payload.get("answer_chars") or 0),
+            latency_ms=_meeting_ms,
+            stages=_stages,
+        )
+    except Exception:
+        logger.exception("roundtable_monitor_failed session=%s", session_id)
+
     logger.info(
-        "done ip=%s elapsed_ms=%d transcript_len=%d",
+        "done ip=%s elapsed_ms=%d transcript_len=%d stages=%s",
         client_ip,
         int((time.time() - t0_local) * 1000),
         len(end_payload.get("transcript") or []),
+        _stages,
     )
 
 

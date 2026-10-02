@@ -33,6 +33,7 @@ Supervisor Agent —— 一对一对话的唯一执行体。
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Awaitable, Callable, Optional
 
 from langchain_core.messages import AIMessage, ToolMessage
@@ -41,6 +42,7 @@ from pydantic import BaseModel, Field
 
 from src.core.config import settings
 from src.core.llm import LLMEmptyResponseError, get_chat_llm
+from src.core.logger import stage_mark
 from src.core.state import AgentState
 from src.retrieval.knowledge_graph import graph_exists
 
@@ -495,6 +497,25 @@ async def run_supervisor_agent(
     session_id = state.get("session_id")
     route_history: list[str] = list(state.get("route_history") or [])
 
+    # ---- 首字瀑布埋点：把原先单一的 first_token_ms 拆成四段 ----
+    #   prompt_ms   = 进入编排 → 消息装配完成（本地，毫秒级）
+    #   decide_ms   = 第 1 轮 LLM（带工具）耗时——模型在这里判断"要不要查、查多深"，通常无正文
+    #   retrieve_ms = 工具实际执行（检索）的累计耗时（本地管线）
+    #   prefill_ms  = 真正生成正文那一轮的 LLM 调用 → 首个 token 到达（上游 prefill + reasoning）
+    # 四段之和 ≈ routes 层的 first_token_ms；若决策轮自己吐了正文，两段会重叠，
+    # 那种情况下以 first_token_ms（从请求起点算的总首字）为准。
+    _t_enter = time.perf_counter()
+    _round_start = _t_enter            # 当前这一轮 LLM 调用的起点（prefill 的基准）
+    _round_tokens: list[float] = []    # 本轮首个 token 的到达时刻
+    _retrieve_ms = 0.0
+
+    async def _timed_callback(token: str) -> None:
+        """记下本轮首个 token 的到达时刻（供 prefill 计算），再原样转发给 routes 的流式回调。"""
+        if not _round_tokens:
+            _round_tokens.append(time.perf_counter())
+        if stream_callback is not None:
+            await stream_callback(token)
+
     async def _stage(name: str) -> None:
         if on_stage is not None:
             await on_stage(name)
@@ -535,6 +556,7 @@ async def run_supervisor_agent(
             post_history_directive=state.get("post_history_directive"),
             user_memory=state.get("user_memory"),
         )
+        stage_mark("prompt_ms", (time.perf_counter() - _t_enter) * 1000)
 
         rounds = max(1, int(getattr(settings, "tool_max_rounds", 2)))
         answer_parts: list[str] = []
@@ -544,10 +566,19 @@ async def run_supervisor_agent(
         for round_idx in range(rounds + 1):
             use_tools = round_idx < rounds
             target = llm_with_tools if use_tools else llm
-            text, calls = await _stream_round(target, messages, stream_callback)
+            _round_start = time.perf_counter()
+            _round_tokens.clear()
+            text, calls = await _stream_round(target, messages, _timed_callback)
             answer_parts.append(text)
 
+            if round_idx == 0 and calls:
+                # 第一轮就拿到工具调用 = 这一轮是"决策轮"（模型在判断要不要查）
+                stage_mark("decide_ms", (time.perf_counter() - _round_start) * 1000)
+
             if not calls:
+                # 这一轮不再要资料 = 就是产出正文的那一轮，此刻才能定性 prefill
+                if _round_tokens:
+                    stage_mark("prefill_ms", (_round_tokens[0] - _round_start) * 1000)
                 if not text.strip() and not answer_parts[:-1]:
                     print("[Supervisor Agent] 本轮重试后仍无任何输出，交给上层兜底")
                 break
@@ -556,8 +587,12 @@ async def run_supervisor_agent(
             print(f"[Supervisor Agent] 第 {round_idx + 1} 轮：模型请求检索 {len(calls)} 次")
             messages.append(AIMessage(content=text, tool_calls=calls))
             for call in calls:
+                _t_tool = time.perf_counter()
                 result = await _invoke_tool(tool, call)
+                _retrieve_ms += (time.perf_counter() - _t_tool) * 1000
                 messages.append(ToolMessage(content=result, tool_call_id=call["id"]))
+        if _retrieve_ms:
+            stage_mark("retrieve_ms", _retrieve_ms)
 
         answer = "".join(answer_parts).strip()
         docs = sink.get("docs") or []
@@ -576,11 +611,13 @@ async def run_supervisor_agent(
                 else _build_context(docs)
             )
             print("[Supervisor Agent] 模型空手但有资料，带资料重生成一次")
+            _round_start = time.perf_counter()
+            _round_tokens.clear()
             answer = await _generate_direct_response(
                 query,
                 history,
                 character_role_prompt,
-                stream_callback,
+                _timed_callback,
                 session_id=session_id,
                 context=context,
                 max_tokens=300 if zone == "entertainment" else None,
@@ -590,6 +627,8 @@ async def run_supervisor_agent(
                 user_memory=state.get("user_memory"),
             )
             answer = (answer or "").strip()
+            if _round_tokens:
+                stage_mark("prefill_ms", (_round_tokens[0] - _round_start) * 1000)
 
         if not answer:
             # 上游持续空响应：绝不回退"无资料直答"——那会丢掉本轮全部检索资料，

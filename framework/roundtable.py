@@ -39,7 +39,10 @@
   speaker_end   {character_id, content}
   converged     {round, reason: "host"|"quota"|"rounds"}
   budget_exhausted{llm_calls}
-  end           {session_id}
+  end           {session_id, topic, rounds, speakers, transcript, converge_reason,
+                 timings, prompt_chars, answer_chars, meeting_ms}
+                —— 权威快照：续跑流不推 start，故 end 必须自带完整记录。
+                尾部四个字段是给 monitor 落库的用量统计（段耗时 / 输入输出字符 / 整场耗时）。
   summary_start / summary {data:{clashes,positions,open,speeches,degraded}} / summary_error / summary_end
   error         {content}
 
@@ -53,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from operator import add
 from pathlib import Path
 from typing import Annotated, AsyncIterator, TypedDict
@@ -230,6 +234,31 @@ class RoundtableState(TypedDict, total=False):
     converge_reason: str            # "host" | "quota" | "rounds" | "budget"
     llm_calls: int
     ended: bool
+
+    # ---- 用量/耗时统计（供 monitor 落库，随 checkpoint 一起持久化）----
+    started_at: float               # 会议起点（epoch 秒）——整场耗时以它为准，跨请求续跑也不丢
+    timings: dict                   # {host_ms, speaker_ms} 累积的 LLM 段耗时（毫秒）
+    prompt_chars: int               # 全场 LLM 调用的输入字符累计（monitor 估 token 用）
+    answer_chars: int               # 全场 LLM 输出的字符累计
+
+
+def _messages_chars(messages) -> int:
+    """统计一批消息的输入字符数（兼容 (role, content) 元组与 BaseMessage）。"""
+    total = 0
+    for m in messages or []:
+        if isinstance(m, (tuple, list)) and len(m) >= 2:
+            total += len(str(m[1] or ""))
+        else:
+            total += len(str(getattr(m, "content", "") or ""))
+    return total
+
+
+def _merge_timings(prev, **delta) -> dict:
+    """在已有耗时上累加本次增量（节点级耗时是"多次调用求和"，不是取最大）。"""
+    out = {k: float(v) for k, v in (prev or {}).items()}
+    for k, v in delta.items():
+        out[k] = round(out.get(k, 0.0) + float(v or 0.0), 1)
+    return out
 
 
 def _noop_write(*_args, **_kwargs) -> None:
@@ -678,6 +707,21 @@ async def host_node(state: RoundtableState) -> dict:
     picker = str(state.get("picker") or "user")
     topic = str(state.get("topic") or "")
 
+    # 本次 host 调用（可能零 LLM：开场排班 / 收敛闸门）的用量与耗时增量
+    _host_ms = 0.0
+    _host_prompt = 0
+    _host_out = 0
+
+    def _tfields() -> dict:
+        """把本次 host 调用的耗时/字符增量并入 state（无 LLM 的路径下返回空 dict）。"""
+        if not (_host_ms or _host_prompt or _host_out or state.get("timings")):
+            return {}
+        return {
+            "timings": _merge_timings(state.get("timings"), host_ms=_host_ms),
+            "prompt_chars": int(state.get("prompt_chars") or 0) + _host_prompt,
+            "answer_chars": int(state.get("answer_chars") or 0) + _host_out,
+        }
+
     # ---- 1. 开场轮：固定排班，零 LLM ----
     waiting = [e.get("id") for e in roster if e.get("id") and e.get("id") not in opened]
     if waiting:
@@ -696,7 +740,7 @@ async def host_node(state: RoundtableState) -> dict:
         write({"type": "converged", "round": round_index, "reason": reason})
         if reason == "budget":
             write({"type": "budget_exhausted", "llm_calls": llm_calls})
-        return {
+        out = {
             "converged": True,
             "converge_reason": reason,
             "ended": True,
@@ -704,6 +748,8 @@ async def host_node(state: RoundtableState) -> dict:
             "pending_kind": "",
             "pending_reason": "",
         }
+        out.update(_tfields())
+        return out
 
     if round_index >= max_rounds:
         return _converge("rounds")
@@ -759,12 +805,17 @@ async def host_node(state: RoundtableState) -> dict:
         )
         llm_calls += 1
         decision = {"next_speaker_id": "", "reason": "", "converged": False}
+        _host_prompt = _messages_chars(messages)
+        _t_host = time.perf_counter()
         try:
             llm = get_chat_llm(temperature=0.3, max_tokens=_HOST_MAX_TOKENS)
             resp = await ainvoke_nonempty(llm, messages, attempts=1)
-            decision = parse_host_decision(getattr(resp, "content", "") or "")
+            _raw = str(getattr(resp, "content", "") or "")
+            _host_out = len(_raw)
+            decision = parse_host_decision(_raw)
         except Exception as e:
             print(f"[Roundtable] 主持人决策失败: {e}")
+        _host_ms = (time.perf_counter() - _t_host) * 1000
 
         if decision.get("converged"):
             out = _converge("host")
@@ -798,6 +849,7 @@ async def host_node(state: RoundtableState) -> dict:
         "pending_reason": reason,
         "llm_calls": llm_calls,
         "ended": False,
+        **_tfields(),
     }
 
 
@@ -852,11 +904,14 @@ async def speaker_node(state: RoundtableState) -> dict:
 
     full = ""
     label = f"{ch.id} {'开场' if is_opening else f'交锋{rnd}'}"
+    _prompt_chars = _messages_chars(messages)
+    _t_speech = time.perf_counter()
     async for tok in _stream_llm_with_retry(messages, label=label):
         if not tok:
             continue
         full += tok
         write({"type": "token", "character_id": ch.id, "content": tok})
+    _speech_ms = (time.perf_counter() - _t_speech) * 1000
 
     if not full:
         full = f"（{ch.name} 暂时无法发言。）"
@@ -881,6 +936,9 @@ async def speaker_node(state: RoundtableState) -> dict:
         "ledger": ledger,
         "llm_calls": int(state.get("llm_calls") or 0) + 1,
         "pending_speaker": "",
+        "timings": _merge_timings(state.get("timings"), speaker_ms=_speech_ms),
+        "prompt_chars": int(state.get("prompt_chars") or 0) + _prompt_chars,
+        "answer_chars": int(state.get("answer_chars") or 0) + len(full),
     }
     if is_opening:
         out["opening_done"] = [cid]
@@ -990,6 +1048,11 @@ async def _tail_events(graph, config: dict, session_id: str) -> AsyncIterator[di
     ledger = dict(values.get("ledger") or {})
     transcript = list(values.get("transcript") or [])
 
+    # 整场耗时以 started_at 为准——跨请求续跑出来的那条流也不会把它重置成
+    # "这次请求的起点"，否则点将恢复那一场的 latency 会被算成只有最后一段。
+    _started = float(values.get("started_at") or 0.0)
+    _meeting_ms = int((time.time() - _started) * 1000) if _started else 0
+
     yield {
         "type": "end",
         "session_id": session_id,
@@ -998,6 +1061,11 @@ async def _tail_events(graph, config: dict, session_id: str) -> AsyncIterator[di
         "speakers": list(values.get("roster") or []),
         "transcript": transcript,
         "converge_reason": str(values.get("converge_reason") or ""),
+        # 用量统计（供 monitor 落库）：段耗时 / 输入输出字符 / 整场耗时
+        "timings": dict(values.get("timings") or {}),
+        "prompt_chars": int(values.get("prompt_chars") or 0),
+        "answer_chars": int(values.get("answer_chars") or 0),
+        "meeting_ms": _meeting_ms,
     }
 
     if not getattr(settings, "roundtable_summary_enabled", True):
@@ -1104,6 +1172,10 @@ async def stream_roundtable(
         "converge_reason": "",
         "llm_calls": 0,
         "ended": False,
+        "started_at": time.time(),
+        "timings": {},
+        "prompt_chars": 0,
+        "answer_chars": 0,
     }
 
     config = _rt_config(session_id)
