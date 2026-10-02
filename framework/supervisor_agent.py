@@ -10,7 +10,8 @@ Supervisor Agent —— 一对一对话的唯一执行体。
 
 分档不再按分区走两条路，而是由工具的 strong 参数承担：
     strong=True  → 强检索：改写 + 向量/BM25 混合召回 + Cross-Encoder 精排 +
-                   知识图谱增强，15 条，带来源与章节，正文标 [n] 供前端渲染出处。
+                   知识图谱增强，8 条完整段落（每条 ~1000 字不截断），
+                   带来源与章节，正文标 [n] 供前端渲染出处。
     strong=False → 轻量检索：只做向量+BM25 召回 top-3，作为"模糊印象"，
                    不带来源标注——说出"根据《xxx》第三章"正是娱乐区要压掉的 AI 味。
     模型按请求性质自己选；工具描述里带本区的倾向提示（教育区偏 true，娱乐区偏 false），
@@ -57,7 +58,7 @@ StageCallback = Optional[Callable[[str], Awaitable[None]]]
 SEARCH_TOOL_DESCRIPTION = """查询这位人物相关的原著与背景资料库，返回可引用的原文片段。
 
 strong 怎么填：
-- true（强检索）：走完整检索管线，返回 15 条带来源与章节的原文，回答需要在句末标 [n]。
+- true（强检索）：走完整检索管线，返回 8 条带来源与章节的完整段落（每条 ~1000 字），回答需要在句末标 [n]。
   用在：得落到原话、具体事实、数字、年份、书名、人名上才站得住的问题。
 - false（轻量检索）：只做一轮向量+关键词召回 top-3，作为模糊印象返回，不标来源。
   用在：只是聊到某个话题、想要一点背景底色，不需要逐句可溯源。
@@ -184,7 +185,11 @@ async def retrieve_documents(
             max_tokens=256,
         )
 
-        top_k = 15  # 与 HTTP 层 /persona/eval_query 保持一致
+        # 条数与每条注入长度是一对：8 条 × ~1000 字完整段落 ≈ 8K 字，
+        # 总量与旧口径（15 × 450 ≈ 6.8K）相当 → prefill 基本不涨，
+        # 但每条都是完整语义段落（长文本语义完整性优先，老大 10-02 定）。
+        # 与 HTTP 层 /persona/eval_query 保持一致。
+        top_k = 8
 
         # 轻量检索（工具 strong=false）：跳过 Multi-Query+HyDE 改写、
         # 跳过 Cross-Encoder 重排、跳过知识图谱，仅用原始问题做向量+BM25 召回 top-3
@@ -290,7 +295,7 @@ class SearchQuery(BaseModel):
     )
     strong: bool = Field(
         default=True,
-        description="检索力度。true=强检索（全管线 15 条、带来源，正文需标 [n]）；"
+        description="检索力度。true=强检索（全管线 8 条完整段落、带来源，正文需标 [n]）；"
         "false=轻量检索（top-3 模糊印象、不标来源）。判断标准见工具说明。",
     )
 

@@ -271,9 +271,12 @@ def _build_context(docs: list) -> str:
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get("source", "未知来源")
         heading = doc.metadata.get("heading", "未知章节")
-        content = doc.page_content[:450]  # 限制每条长度：检索用完整块，注入 LLM 只取头部
-        # （重组后块为 ~1000 字符完整段落，全量注入会让每次 LLM 调用 prefill 12K+ 字符，
-        #   单请求 40s+、高并发排队严重；截到 450 字符保留段落核心语义，速度显著回升）
+        # 注入条数与每条截断是一对参数（2026-10-02 老大定）：
+        #   8 条 × 1000 字完整段落 ≈ 8K 字，总量与旧口径（15 × 450 ≈ 6.8K）相当，
+        #   prefill 基本不涨；但每条是完整语义段落，长文本的论据不会被拦腰截断。
+        #   （更早的全量注入实测：15 × 1000 ≈ 15K 字 → 单请求 40s+、高并发排队严重，
+        #   所以"完整段落"必须配"减条数"才吃得下。）
+        content = doc.page_content[:1000]  # 块本就按 1000 切，等于注入完整段落
         context_parts.append(f"[{i}] 来源: {source} | 章节: {heading}\n{content}")
 
     return "\n\n---\n\n".join(context_parts)
@@ -286,8 +289,8 @@ def _build_light_context(docs: list) -> str:
     两个刻意的设计：
     1. 不标注来源——学术格式会诱导模型说出"根据《xxx》第三章"，娱乐区人设当场崩；
        这里要的效果是"角色自己想起来了"，不是"模型在引用资料"。
-    2. 截得更短（150 字 vs 教育区 450 字）——娱乐区回答上限才 300 token，
-       塞 1350 字进去既撑大 prefill 拖慢首字，又容易把回答带成长篇大论。
+    2. 截得更短（150 字 vs 教育区完整段落）——娱乐区回答上限才 300 token，
+       塞进完整段落既撑大 prefill 拖慢首字，又容易把回答带成长篇大论。
     """
     if not docs:
         return ""

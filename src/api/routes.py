@@ -794,12 +794,12 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
         use_rewrite = settings.rewrite_enabled
 
-        # 执行高级检索
+        # 执行高级检索（条数与主链路 retrieve_documents 保持一致：8 条完整段落）
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
             llm=retrieval_llm,
-            top_k=15,
+            top_k=8,
             use_multi_query=use_rewrite,
             use_hyde=use_rewrite,
             num_variants=2,
