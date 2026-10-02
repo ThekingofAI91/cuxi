@@ -1,7 +1,7 @@
 """
 API 集成测试：SSE 流式 / 缓存命中 / 限流 / 敏感拦截 / 会话持久化 / 上传限制。
 
-图执行用 FakeGraph 打桩，不触真实 LLM 与 ChromaDB；存储全部落到临时目录。
+一对一编排用 FakePipeline 打桩，不触真实 LLM 与 ChromaDB；存储全部落到临时目录。
 """
 
 import os
@@ -20,17 +20,27 @@ import src.core.monitor as monitor_mod  # noqa: E402
 from src.core.config import settings  # noqa: E402
 
 
-class FakeGraph:
+class FakePipeline:
+    """打桩一对一编排（framework/supervisor_agent.run_supervisor_agent）。
+
+    supervisor 自己持有检索工具，本桩只需返回与真实现同构的 dict；
+    on_stage 对应前端 agent_done 进度事件（阶段名 supervisor / retrieval_agent）。
+    """
+
     def __init__(self):
         self.calls = 0
 
-    async def astream(self, state, config=None, stream_mode="updates"):
+    async def __call__(self, state, on_stage=None):
         self.calls += 1
-        yield {
-            "supervisor": {
-                "final_answer": "测试回答：荣格认为这是好事儿。",
-                "route_history": ["supervisor", "retriever", "analyzer"],
-            }
+        if on_stage is not None:
+            await on_stage("supervisor")
+        answer = "测试回答：荣格认为这是好事儿。"
+        return {
+            "final_answer": answer,
+            "analysis": answer,
+            "retrieved_docs": [],
+            "graph_used": False,
+            "route_history": ["supervisor", "retriever", "analyzer"],
         }
 
 
@@ -57,14 +67,18 @@ def client(tmp_path, monkeypatch):
     routes._RATE_STORE.clear()
     routes._ANSWER_CACHE.clear()
     routes._session_store.clear()
-    from framework.supervisor import _conversation_history_store, _conversation_summaries
+    from framework.runtime import _conversation_history_store, _conversation_summaries
 
     _conversation_history_store.clear()
     _conversation_summaries.clear()
     monitor_mod._monitor = None
 
-    fake = FakeGraph()
-    monkeypatch.setattr(routes, "get_persona_graph", lambda: fake)
+    # 编排函数在 routes 内是延迟导入（每次调用都从源模块取属性），
+    # 所以打桩要落在 framework.supervisor_agent 上，而不是 routes 的模块属性。
+    import framework.supervisor_agent as _sa
+
+    fake = FakePipeline()
+    monkeypatch.setattr(_sa, "run_supervisor_agent", fake)
     c = TestClient(app)
     return c, fake
 

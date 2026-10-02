@@ -50,7 +50,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
         # 基于检索资料 + 对话历史，流式输出角色口吻回答，不再产出结构化 JSON 报告；
         # supervisor 直接以 analysis 作为最终回答，省掉一次长 LLM 二次生成。
         if character_role_prompt:
-            from framework.supervisor import _generate_direct_response
+            from framework.runtime import _generate_direct_response
             # 上下文格式按分区：教育区保留来源标注（要可溯源），
             # 娱乐区换成轻量记忆式（标注来源会诱导模型说"根据《xxx》"，正是要压掉的 AI 味）
             context = None
@@ -142,7 +142,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 {context}"""
 
             if history:
-                from framework.supervisor import format_history_for_prompt, get_scene_config
+                from framework.runtime import format_history_for_prompt, get_scene_config
                 from src.core.config import settings as _settings
                 history_text = format_history_for_prompt(history, max_turns=_settings.max_history_turns, session_id=state.get("session_id"))
                 _config = get_scene_config()
@@ -219,7 +219,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
             messages = [("system", system_msg)]
 
             if history:
-                from framework.supervisor import format_history_for_prompt, get_scene_config
+                from framework.runtime import format_history_for_prompt, get_scene_config
                 from src.core.config import settings as _settings
                 history_text = format_history_for_prompt(history, max_turns=_settings.max_history_turns, session_id=state.get("session_id"))
                 _config = get_scene_config()

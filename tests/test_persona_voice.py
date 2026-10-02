@@ -26,7 +26,7 @@ def test_persona_voice_directive_present():
 
 def test_generate_direct_response_injects_voice_and_relaxed_tokens():
     """角色模式：role_prompt + 差异化铁律都进系统提示，且 max_tokens 放宽。"""
-    from framework import supervisor
+    from framework import runtime
 
     captured = {}
 
@@ -42,9 +42,9 @@ def test_generate_direct_response_injects_voice_and_relaxed_tokens():
 
     role = "你是测试人物张三，终生反对一切权威，说话尖刻直接。"
 
-    with patch.object(supervisor, "get_chat_llm", return_value=fake_llm) as mk:
+    with patch.object(runtime, "get_chat_llm", return_value=fake_llm) as mk:
         asyncio.run(
-            supervisor._generate_direct_response(
+            runtime._generate_direct_response(
                 "你怎么看教育？", [], role, fake_callback,
                 session_id="test-session",
             )

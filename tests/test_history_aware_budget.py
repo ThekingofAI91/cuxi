@@ -8,7 +8,7 @@ test_history_aware_budget.py — 历史感知检索查询的字符预算
 3. 极端情况（压缩到底仍超）：查询至少完整包含当前问题
 """
 
-from framework.retrieval_agent import _QUERY_CHAR_BUDGET, build_history_aware_query
+from framework.supervisor_agent import _QUERY_CHAR_BUDGET, build_history_aware_query
 
 
 def test_short_history_format_unchanged():

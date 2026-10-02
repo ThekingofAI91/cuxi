@@ -34,9 +34,15 @@ SAMPLE_QUESTIONS = {
 }
 
 
-async def run_one(graph, character, char_config, question: str) -> dict:
-    """执行一次完整流水线，返回回答与检索上下文（供 RAGAS 打分）"""
-    from framework.supervisor import set_scene_config
+async def run_one(character, char_config, question: str) -> dict:
+    """执行一次完整流水线，返回回答与检索上下文（供 RAGAS 打分）
+
+    走生产同一条路：framework/supervisor_agent.run_supervisor_agent
+    （supervisor 自持 search_library 工具）。2026-09-30 前本脚本跑的是已删除的
+    LangGraph 图，故历史 RAGAS 数值与新口径不严格可比，重跑后再对外引用。
+    """
+    from framework.runtime import set_scene_config
+    from framework.supervisor_agent import run_supervisor_agent
     from src.core.state import AgentState
 
     set_scene_config(char_config)
@@ -54,9 +60,13 @@ async def run_one(graph, character, char_config, question: str) -> dict:
         "error": None,
         "character_role_prompt": character.role_prompt,
         "enable_verification": character.enable_verification,
+        "zone": getattr(character, "zone", "education"),
+        "sampling": None,
+        "post_history_directive": None,
+        "user_memory": None,
         "stream_callback": None,
     }
-    final = await graph.ainvoke(state, config={"recursion_limit": 25})
+    final = await run_supervisor_agent(state)
     docs = final.get("retrieved_docs", []) or []
     return {
         "question": question,
@@ -74,7 +84,6 @@ async def main() -> None:
 
     from dataclasses import replace
 
-    from framework import get_persona_graph
     from scenes.persona_chat.config import persona_chat_config
 
     character = persona_chat_config.characters.get(args.character)
@@ -84,10 +93,9 @@ async def main() -> None:
         )
 
     char_config = replace(persona_chat_config, chroma_collection=character.chroma_collection)
-    graph = get_persona_graph()
 
     questions = SAMPLE_QUESTIONS.get(args.character, SAMPLE_QUESTIONS["jung"])[: args.questions]
-    results = [await run_one(graph, character, char_config, q) for q in questions]
+    results = [await run_one(character, char_config, q) for q in questions]
 
     # RAGAS 指标（未安装时仅输出流水线结果）
     try:

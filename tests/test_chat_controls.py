@@ -2,16 +2,17 @@
 对话操作与角色卡测试。
 
 覆盖：
-- 轻聊快速通道：_is_lightweight_turn 整句白名单判定（寒暄直答、真实提问不误判）
 - 历史截断 / 弹轮：truncate_conversation_history / pop_last_turn（重新生成与历史编辑的后端基础）
 - 世界书扫描窗口：最近几轮对话里的关键词也能命中词条（compose_lorebook_scan_text）
 - 角色卡导出/导入：card_io.export_card / parse_card 往返与非法输入
+
+（2026-09-30：轻聊快速通道的整句白名单判定已随规则快速通道一起删除——
+寒暄与闲聊现在由 supervisor_agent 的模型自行决定"不检索 / 轻量检索"。）
 """
 import pytest
 
-from framework import supervisor
-from framework.supervisor import (
-    _is_lightweight_turn,
+from framework import runtime
+from framework.runtime import (
     truncate_conversation_history,
     pop_last_turn,
 )
@@ -25,32 +26,6 @@ from scenes.persona_chat.prompt_builder import (
 
 
 # ============================================================
-# 轻聊快速通道
-# ============================================================
-
-@pytest.mark.parametrize("q", [
-    "你好", "您好！", "哈喽哈喽", "在吗？",
-    "你是谁", "你叫什么名字？", "自我介绍一下",
-    "谢谢啦", "再见！", "晚安", "辛苦了",
-    "真的吗？？", "好的", "嗯嗯", "哈哈哈", "666",
-    "  Hello!!  ", "OK。",
-])
-def test_lightweight_turn_matches_social_phrases(q):
-    assert _is_lightweight_turn(q), f"'{q}' 应命中轻聊通道"
-
-
-@pytest.mark.parametrize("q", [
-    "你好，我想问抑郁症怎么治疗",        # 寒暄开头 + 真实提问：绝不能吞进直答通道
-    "荣格所说的集体无意识是什么？",
-    "你好你好你好，我最近总是梦见蛇，这是什么征兆",
-    "", "？？？这个问题我没想清楚，帮我分析下职业选择",
-    "我是谁",  # 主语是用户自己，属于需要展开的哲学问题，不是"你是谁"
-])
-def test_lightweight_turn_rejects_real_questions(q):
-    assert not _is_lightweight_turn(q), f"'{q}' 不应命中轻聊通道"
-
-
-# ============================================================
 # 历史截断 / 弹轮
 # ============================================================
 
@@ -58,20 +33,20 @@ def test_lightweight_turn_rejects_real_questions(q):
 def history_session():
     """准备一个 4 轮历史的测试会话，结束后清理。"""
     sid = "test-controls-session"
-    supervisor._conversation_history_store[sid] = [
+    runtime._conversation_history_store[sid] = [
         (f"问题{i}", f"回答{i}") for i in range(1, 5)
     ]
-    supervisor._conversation_summaries.pop(sid, None)
+    runtime._conversation_summaries.pop(sid, None)
     yield sid
-    supervisor._conversation_history_store.pop(sid, None)
-    supervisor._conversation_summaries.pop(sid, None)
+    runtime._conversation_history_store.pop(sid, None)
+    runtime._conversation_summaries.pop(sid, None)
 
 
 def test_truncate_conversation_history(history_session):
     sid = history_session
     n = truncate_conversation_history(sid, 2)
     assert n == 2
-    assert supervisor._conversation_history_store[sid] == [("问题1", "回答1"), ("问题2", "回答2")]
+    assert runtime._conversation_history_store[sid] == [("问题1", "回答1"), ("问题2", "回答2")]
     # 截断到超出当前长度是空操作；不存在的会话返回 -1
     assert truncate_conversation_history(sid, 10) == 2
     assert truncate_conversation_history("no-such-session", 3) == -1
@@ -80,13 +55,13 @@ def test_truncate_conversation_history(history_session):
 def test_truncate_to_zero_clears(history_session):
     sid = history_session
     assert truncate_conversation_history(sid, 0) == 0
-    assert supervisor._conversation_history_store[sid] == []
+    assert runtime._conversation_history_store[sid] == []
 
 
 def test_pop_last_turn(history_session):
     sid = history_session
     assert pop_last_turn(sid, expect_query="问题4") is True
-    turns = supervisor._conversation_history_store[sid]
+    turns = runtime._conversation_history_store[sid]
     assert turns[-1] == ("问题3", "回答3")
     # 校验失败时不弹（防止并发误删）
     assert pop_last_turn(sid, expect_query="问题1") is False
@@ -95,7 +70,7 @@ def test_pop_last_turn(history_session):
 
 def test_pop_last_turn_empty_session():
     sid = "test-pop-empty"
-    supervisor._conversation_history_store.pop(sid, None)
+    runtime._conversation_history_store.pop(sid, None)
     assert pop_last_turn(sid) is False
 
 

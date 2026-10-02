@@ -13,22 +13,22 @@ from typing import Optional
 
 from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from langgraph.errors import GraphRecursionError
 from pydantic import BaseModel
 
-from framework.supervisor import (
+from framework.runtime import (
     set_scene_config,
-    get_persona_graph, get_chroma_client,
-    get_conversation_history, append_conversation, _generate_direct_response,
+    get_chroma_client,
+    get_conversation_history, append_conversation,
     _conversation_history_store,
     _summarize_old_turns, delete_conversation_history,
     truncate_conversation_history, pop_last_turn,
 )
 from framework.roundtable import (
     MAX_ROUNDTABLE_CHARS,
-    get_roundtable_session,
+    drop_roundtable_checkpoint,
+    resume_roundtable,
+    roundtable_pending_choice,
     stream_roundtable,
-    submit_roundtable_choice,
 )
 from src.core.config import settings
 from src.core.state import AgentState
@@ -639,7 +639,7 @@ async def get_pending_answer(session_id: str):
     """
     获取“尚未被前端接收”的回答（刷新页面后恢复用）。
 
-    前端在 SSE 流式传输中断开（刷新/关闭页面）时，后端 run_graph
+    前端在 SSE 流式传输中断开（刷新/关闭页面）时，后端的一对一编排
     作为独立后台任务仍会继续执行，完成后把最终答案写入 _session_store。
     页面重新加载后前端轮询本端点，即可把丢失的回答捞回来。
 
@@ -790,7 +790,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             max_tokens=256,
         )
 
-        # 改写开关与主链路（retrieval_agent）保持同一配置口径——此前这里硬编码
+        # 改写开关与主链路（retrieve_documents）保持同一配置口径——此前这里硬编码
         # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
         use_rewrite = settings.rewrite_enabled
 
@@ -964,7 +964,7 @@ async def _run_graph_build(collection_name: str, force: bool = False):
             "status": "building", "started_at": time.time(), "stats": None, "error": None,
         }
     try:
-        from framework.supervisor import get_chroma_client
+        from framework.runtime import get_chroma_client
         from src.retrieval.knowledge_graph import build_knowledge_graph
         client = get_chroma_client()
         collection = client.get_or_create_collection(
@@ -1220,7 +1220,7 @@ async def delete_character(char_id: str):
     delete_custom_character_file(char_id)
     # 清空向量库
     try:
-        from framework.supervisor import get_chroma_client
+        from framework.runtime import get_chroma_client
         client = get_chroma_client()
         client.delete_collection(name=char.chroma_collection)
         from src.retrieval.advanced_search import invalidate_bm25_cache
@@ -1458,7 +1458,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
         """生成 SSE 事件流（token 级流式）"""
         stages_begin()  # 阶段耗时收集：检索/重排/首字/核查 → monitor 延迟瀑布
         token_queue: asyncio.Queue = asyncio.Queue()
-        graph_error: list[Exception] = []
+        pipeline_error: list[Exception] = []
         # 本请求独立的结果容器：即使两个请求共享同一 session_id（如同一浏览器
         # 两个标签页），也绝不从共享的 _session_store 读最终答案，
         # 避免并发时互相覆盖导致串扰/丢回答
@@ -1480,8 +1480,8 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                 stage_mark("first_token_ms", (_first_token_at[0] - t0) * 1000)
             await token_queue.put(token)
 
-        async def run_graph():
-            """在后台任务中运行图执行"""
+        async def run_pipeline():
+            """在后台任务中运行一对一编排（framework/supervisor_agent.py）"""
             # persona 场景配置（contextvar 按请求隔离，create_task 复制父上下文）
             # 按角色注入对应的 chroma_collection，避免 adler 用户误检索荣格大库
             # （修复：先前全局 persona_chat_config 的 chroma_collection 写死为 persona_jung）
@@ -1489,8 +1489,6 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             char_config = _dc_replace(persona_chat_config, chroma_collection=character.chroma_collection)
             set_scene_config(char_config)
             try:
-                # 使用缓存的 persona 图（场景编译一次即可，避免每次请求重新编译）
-                graph = get_persona_graph()
                 history = get_conversation_history(session_id)
                 print(f"[Persona Query] 加载会话历史: session={session_id}, 轮次={len(history)}")
 
@@ -1502,12 +1500,11 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     character, query=request.query, scan_text=_scan_text
                 )
 
-                # 检索策略：娱乐区走轻量召回（top_k=3，无改写 / 无重排 / 无图谱）。
-                # 实测中位仅 23ms，相比 8-15s 的生成可忽略；换回的是"贴合角色背景资料"。
-                # 真正贵的是重排（实测 10.4s）与检索改写（1 次 LLM 往返），两者娱乐区都不走。
-                # 置 settings.entertainment_light_retrieval = False 可回到零检索。
+                # 检索力度不再由 API 层预判分区（旧的 light_retrieval / skip_retrieval
+                # 两个 state 字段已随分区路由一起废弃）：改由 supervisor_agent 的
+                # search_library 工具入参 strong 在运行时决定——模型按请求性质选
+                # 强检索（全管线 15 条，可溯源）或轻量（top-3 软背景，娱乐区默认）。
                 _is_ent = character.zone == "entertainment"
-                _light = _is_ent and settings.entertainment_light_retrieval
                 # 娱乐区但无示例对话/世界书：只能靠背景检索撑住，日志留痕便于发现"弱角色卡"
                 if _is_ent and not has_tavern_components(character):
                     logger.info("ent_char_no_card char=%s（缺示例对话/世界书）", character_id)
@@ -1543,17 +1540,21 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     # 按角色的采样覆盖，未配置则 None（沿用默认）
                     "sampling": _sampling_for(character),
                     "zone": character.zone,
-                    "light_retrieval": _light,
-                    "skip_retrieval": _is_ent and not _light,
                     "user_memory": _memory_block,
                     "stream_callback": stream_callback,
                 }
 
-                accumulated = {}
-                async for update in graph.astream(initial_state, config={"recursion_limit": 25}, stream_mode="updates"):
-                    for node_name, node_output in update.items():
-                        accumulated.update(node_output)
-                        await token_queue.put({"__node_done__": node_name, "output": node_output})
+                # 一对一：supervisor 自己持有检索工具的唯一执行体
+                # （framework/supervisor_agent.py）。教育区/娱乐区不再分两条路，
+                # 检索力度由工具的 strong 参数在运行时决定。
+                from framework.supervisor_agent import run_supervisor_agent
+
+                async def _on_stage(name: str) -> None:
+                    # 阶段进度：agent_done 事件，前端据此显示"判断该怎么回应""翻查原著"。
+                    # 阶段名沿用旧节点标识，前端映射表零改动。
+                    await token_queue.put({"__node_done__": name, "output": {}})
+
+                accumulated = await run_supervisor_agent(initial_state, on_stage=_on_stage)
 
                 answer = accumulated.get("final_answer", "")
                 info_gap_qs = accumulated.get("info_gap_questions")
@@ -1597,25 +1598,8 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                         while len(_ANSWER_CACHE) > 512:
                             _ANSWER_CACHE.pop(next(iter(_ANSWER_CACHE)), None)
                     print(f"[Persona Query] 已缓存答案: {cache_key}")
-            except GraphRecursionError:
-                print("[Persona Query] 图执行超出递归限制")
-                fallback = await _generate_direct_response(
-                    request.query, get_conversation_history(session_id),
-                    build_character_prompt(character, query=request.query), stream_callback,
-                    max_tokens=300 if character.zone == "entertainment" else None,
-                    zone=character.zone,
-                    post_history_directive=build_post_history_directive(
-                        character, query=request.query
-                    ),
-                    sampling=_sampling_for(character),
-                )
-                append_conversation(session_id, request.query, fallback)
-                result_box["final_answer"] = fallback
-                result_box["graph_used"] = False
-                _session_store[session_id].update({"final_answer": fallback, "query": request.query})
-                _persist_session_db(session_id)
             except Exception as e:
-                graph_error.append(e)
+                pipeline_error.append(e)
             finally:
                 await token_queue.put(None)
 
@@ -1635,7 +1619,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                 yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
                 return
 
-            graph_task = asyncio.create_task(run_graph())
+            pipeline_task = asyncio.create_task(run_pipeline())
 
             while True:
                 item = await token_queue.get()
@@ -1647,10 +1631,10 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                 elif isinstance(item, str):
                     yield f"data: {json.dumps({'type': 'token', 'content': item})}\n\n"
 
-            await graph_task
+            await pipeline_task
 
-            if graph_error:
-                raise graph_error[0]
+            if pipeline_error:
+                raise pipeline_error[0]
 
             final_answer = result_box.get("final_answer", "")
             route_history = result_box.get("route_history", [])
@@ -1685,7 +1669,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             if character.enable_verification and final_answer:
                 try:
                     from framework.verification_agent import verification_agent
-                    from framework.supervisor import _citation_block
+                    from framework.runtime import _citation_block
                     _v_docs = result_box.get("retrieved_docs", []) or []
                     _v_analysis = result_box.get("analysis", "") or final_answer
                     if _v_docs:
@@ -1781,12 +1765,16 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
 @router.post("/persona/roundtable")
 async def persona_roundtable_endpoint(http_request: Request, request: "RoundtableRequest"):
     """
-    圆桌会议端点（流式输出）：将多名名人拉入同一议题，自主发言、相互交锋。
+    圆桌会议端点（流式输出）：将多名名人拉入同一议题，主持人决定谁发言、相互交锋。
 
     请求体：{ topic, character_ids:[...], rounds, session_id?, picker? }
-    返回 SSE 事件流：start / round / intent_start / intent / contention / choice /
-    converged / budget_exhausted / speaker_start / token / speaker_end / end /
+    返回 SSE 事件流：start / round / choice / choice_request / speaker_start / token /
+    speaker_end / converged / budget_exhausted / end /
     summary_start / summary / summary_end / error。
+
+    picker="agent" 时主持人是 LLM：每轮它自己决定下一位谁发言并给出请缨理由。
+    picker="user" 时用户当主持人：遇到决策点会推 `choice_request` 并**挂起**这条流
+    （不会再收到 end）。前端随后 POST .../choice 继续，那条请求返回的是续流的 SSE。
     """
     rid = uuid.uuid4().hex[:12]
     set_request_id(rid)
@@ -1848,48 +1836,14 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
     t0 = time.time()
 
     async def event_stream():
-        speakers_meta: list = []
-        transcript: list = []
-        summary: dict = {}
-        cur = None
-        try:
-            async for evt in stream_roundtable(topic, valid_ids, rounds, session_id, picker=picker):
-                yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
-                et = evt.get("type")
-                if et == "start":
-                    speakers_meta = evt.get("speakers", []) or []
-                elif et == "speaker_start":
-                    cur = {
-                        "character_id": evt.get("character_id"),
-                        "name": evt.get("name", ""),
-                        "content": "",
-                    }
-                elif et == "speaker_end" and cur is not None:
-                    cur["content"] = evt.get("content", "")
-                    transcript.append(cur)
-                    cur = None
-                elif et == "summary":
-                    summary = evt.get("data", {}) or {}
-            # 圆桌会话落库：完整流式结束后写入 SQLite，可历史回看
-            try:
-                _get_session_store().save_roundtable(
-                    session_id=session_id,
-                    topic=topic,
-                    speakers=speakers_meta,
-                    rounds=rounds,
-                    transcript=transcript,
-                    summary=summary,
-                )
-            except Exception:
-                logger.exception("roundtable_save_failed session=%s", session_id)
-            logger.info(
-                "done ip=%s elapsed_ms=%d speakers=%d rounds=%d transcript_len=%d",
-                client_ip, int((time.time() - t0) * 1000), len(valid_ids), rounds, len(transcript),
-            )
-        except Exception as e:
-            logger.exception("roundtable_error ip=%s", client_ip)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
-            yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
+        async for chunk in _roundtable_sse(
+            stream_roundtable(topic, valid_ids, rounds, session_id, picker=picker),
+            session_id=session_id,
+            logger=logger,
+            client_ip=client_ip,
+            t0=t0,
+        ):
+            yield chunk
 
     return StreamingResponse(
         event_stream(),
@@ -1902,24 +1856,111 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
     )
 
 
+async def _roundtable_sse(agen, *, session_id: str, logger, client_ip: str, t0: float):
+    """把圆桌编排产出的事件流转成 SSE 行，并在正常收场时落库。
+
+    两条边界要分清：
+    · **收场**：收到 `end`。此时 `end` 里带着权威的完整记录（roster/transcript），
+      直接用它落库——不能靠累积前面逐个事件，因为点将恢复出来的那条流不发 `start`。
+    · **挂起**：收到 `choice_request` 后流就结束了（没有 `end`）。这时不落库：
+      会议还没开完，等恢复后收场时再写，否则历史里会出现一条"半场"记录。
+    """
+    summary: dict = {}
+    end_payload: dict = {}
+    t0_local = t0
+    try:
+        async for evt in agen:
+            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+            et = evt.get("type")
+            if et == "end":
+                end_payload = evt
+            elif et == "summary":
+                summary = evt.get("data", {}) or {}
+    except Exception as e:
+        logger.exception("roundtable_error ip=%s", client_ip)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+        yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
+        return
+
+    if not end_payload:
+        # 挂起等点将：不落库，等恢复后收场时再写
+        return
+
+    try:
+        _get_session_store().save_roundtable(
+            session_id=session_id,
+            topic=end_payload.get("topic") or "",
+            speakers=end_payload.get("speakers") or [],
+            rounds=int(end_payload.get("rounds") or 0),
+            transcript=end_payload.get("transcript") or [],
+            summary=summary,
+        )
+    except Exception:
+        logger.exception("roundtable_save_failed session=%s", session_id)
+    logger.info(
+        "done ip=%s elapsed_ms=%d transcript_len=%d",
+        client_ip,
+        int((time.time() - t0_local) * 1000),
+        len(end_payload.get("transcript") or []),
+    )
+
+
 @router.post("/persona/roundtable/{session_id}/choice")
 async def roundtable_choice_endpoint(session_id: str, request: "RoundtableChoiceRequest"):
-    """用户点将：多人同时举手时，由用户指定下一位发言者。
+    """用户点将（用户当主持人时）：把选择喂回挂起的会议，并**继续推送后续事件的 SSE 流**。
 
-    圆桌的自主发言是**双向交互**——SSE 流跑到争用点会挂起等待，这里把用户的选择
-    写进内存里的会议会话并唤醒它。之所以不用 WebSocket：只要"流挂起 + 另一个
-    普通 POST 唤醒"就够了，不必为此引入新协议。
-    character_id 传空字符串表示**主动弃权**，交给主持人代班（按"无人选择"处理）。
-    会议已结束（或超时已被主持人代班接管）返回 409，前端忽略即可。
+    返回的不是 JSON 而是 SSE——因为点将不是"写个值就走"，它要把会议接着开下去。
+    与旧实现的区别：不再"写进内存 + 唤醒某个正在等待的流"，而是把选择作为
+    `Command(resume=...)` 交给 LangGraph，从 checkpoint 恢复现场。所以点将请求可以
+    落在任意一个 worker 上，也不会因进程重启而丢——只要连的是同一个 checkpoint 库。
+
+    character_id 传空字符串表示**弃权**：由主持人规则兜底挑一位（按"说得最少"轮转），
+    会议不会卡死。会议已经结束则返回 409。
     """
-    session = get_roundtable_session(session_id)
-    if session is None:
-        raise HTTPException(status_code=409, detail="这场会议已经结束了")
     cid = (request.character_id or "").strip()
-    if cid and cid not in session.ledger:
-        raise HTTPException(status_code=400, detail="该人物不在本场会议中")
-    submit_roundtable_choice(session_id, cid)
-    return {"ok": True, "session_id": session_id, "character_id": cid}
+    pending = await roundtable_pending_choice(session_id)
+    if pending is None:
+        raise HTTPException(status_code=409, detail="这场会议已经结束了")
+    if cid:
+        allowed = {str(c.get("id")) for c in (pending.get("candidates") or [])}
+        if allowed and cid not in allowed:
+            raise HTTPException(status_code=400, detail="该人物此刻不可被点将")
+
+    logger = get_logger("persona.roundtable")
+    t0 = time.time()
+
+    async def event_stream():
+        async for chunk in _roundtable_sse(
+            resume_roundtable(session_id, cid),
+            session_id=session_id,
+            logger=logger,
+            client_ip="choice",
+            t0=t0,
+        ):
+            yield chunk
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/persona/roundtable/{session_id}/pending")
+async def roundtable_pending_endpoint(session_id: str):
+    """查这场会议此刻是否挂在"等点将"，是则返回候选人。
+
+    用途：用户当主持人时挂起了会议，前端刷新/断线重连后靠它把点将弹窗找回来。
+    挂起状态落在 SQLite 的 checkpoint 里，所以换进程、隔一段时间回来都还在。
+    """
+    pending = await roundtable_pending_choice(session_id)
+    if pending is None:
+        return {"pending": False}
+    return {"pending": True, **pending}
 
 
 # ============================================================
@@ -1943,8 +1984,9 @@ async def roundtable_get_endpoint(session_id: str):
 
 @router.delete("/persona/roundtable/{session_id}")
 async def roundtable_delete_endpoint(session_id: str):
-    """删除一场圆桌会议记录"""
+    """删除一场圆桌会议记录（连同它在 checkpoint 库里的图现场一起清掉）"""
     _get_session_store().delete_roundtable(session_id)
+    await drop_roundtable_checkpoint(session_id)
     return {"ok": True, "session_id": session_id}
 
 
@@ -1954,7 +1996,8 @@ class RoundtableRequest(BaseModel):
     character_ids: list[str]
     rounds: int = 1
     session_id: Optional[str] = None
-    # 谁主持：user = 用户主持（多人争抢时弹窗点将）；agent = 主持人代班（直接裁决）
+    # 谁当主持人：user = 用户自己（遇决策点挂起等他点将，他全权负责）；
+    #             agent = 主持人 agent（每轮自己决定下一位谁发言并给出请缨理由）
     picker: str = "user"
 
 

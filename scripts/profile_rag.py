@@ -3,7 +3,7 @@ import time
 import unicodedata
 
 t0 = time.time()
-from framework.supervisor import get_chroma_client
+from framework.runtime import get_chroma_client
 from src.retrieval.embedder import get_embedder
 from src.core.config import settings
 

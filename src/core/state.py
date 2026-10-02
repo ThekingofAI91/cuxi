@@ -1,6 +1,9 @@
 """
 state.py — 整个系统的数据契约
-所有 Agent 共享的 State，贯穿 LangGraph StateGraph。
+
+一次请求的全部输入输出都装在这个 dict 里，在各能力函数之间传递。
+（2026-09-30：一对一已不用 LangGraph，AgentState 不再对应任何状态图的 channel，
+只是一个普通 TypedDict；字段名保留历史叫法。）
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ from langchain_core.documents import Document
 
 
 class AgentState(TypedDict):
-    """LangGraph 全局状态，所有 Node 共享读写。"""
+    """请求级状态：编排函数读写它，并逐级传给下游能力函数。"""
 
     # ---- 输入 ----
     query: str                          # 用户输入

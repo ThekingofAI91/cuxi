@@ -1,6 +1,6 @@
 """
 `astream_nonempty` 的首 token 超时 + 空响应重试测试；
-外加 supervisor 在「分析节点跑过一轮却无产出」时明确失败（不再回退无资料直答）。
+外加 supervisor_agent 在「模型整轮无产出」时明确失败（不再回退无资料直答）。
 
 LLM 全部打桩（按脚本产出 chunk / 挂起 / 抛异常），不触真实 API。
 
@@ -20,7 +20,8 @@ import pytest
 
 from src.core.config import settings
 from src.core.llm import LLMEmptyResponseError, astream_nonempty
-from framework import supervisor as sup
+from framework import runtime as rt
+from framework import supervisor_agent as sup_agent
 
 
 def _chunk(text):
@@ -130,7 +131,7 @@ def test_no_retry_after_tokens_already_pushed():
 
 
 # ============================================================
-# supervisor：分析为空 → 明确失败
+# supervisor_agent：模型空产出 → 明确失败（绝不无资料直答）
 # ============================================================
 
 def _sup_state(**over):
@@ -142,38 +143,47 @@ def _sup_state(**over):
         "verification": "",
         "final_answer": "",
         "history": [],
-        "route_history": ["supervisor"],
+        "route_history": [],
         "character_role_prompt": "你是王阳明本人，说话笃定。",
         "zone": "education",
+        "sampling": None,
+        "post_history_directive": None,
+        "user_memory": None,
         "stream_callback": None,
     }
     state.update(over)
     return state
 
 
-def test_supervisor_fails_when_analyzer_ran_but_produced_nothing(monkeypatch):
-    """analyzer 已跑过一轮仍无分析 → 明确失败，不再回送 analyzer、也不走无资料直答。
+class SilentLLM:
+    """产出为空 / 只有空白的假模型：整轮既不吐正文也不请求工具"""
 
-    修复前这里会一路回送 analyzer，直到 supervisor_count>6 才用无资料直答收手。
-    """
-    monkeypatch.setattr(settings, "light_chat_enabled", False)
+    def __init__(self, payload=None):
+        self._payload = payload
+
+    def bind_tools(self, tools):
+        return self
+
+    async def astream(self, messages):
+        if self._payload is not None:
+            yield _chunk(self._payload)
+
+
+def _patch_silent_llm(monkeypatch, payload=None):
+    import framework.supervisor_agent as sa
+
+    monkeypatch.setattr(sa, "get_chat_llm", lambda **kw: SilentLLM(payload))
+
+
+def test_supervisor_agent_fails_on_persistently_empty_upstream(monkeypatch):
+    """上游整轮无正文也无工具请求（重试耗尽）→ 明确失败，不无资料直答。"""
+    _patch_silent_llm(monkeypatch)
     with pytest.raises(LLMEmptyResponseError):
-        asyncio.run(sup.supervisor_node(_sup_state(
-            route_history=["supervisor", "retrieval_agent", "supervisor", "analysis_agent"],
-        )))
+        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
 
 
-def test_supervisor_fails_on_whitespace_only_analysis(monkeypatch):
-    """analysis 非空但全是空白 → 等价于没产出，同样明确失败而不是无资料直答。"""
-    monkeypatch.setattr(settings, "light_chat_enabled", False)
+def test_supervisor_agent_fails_on_whitespace_only_output(monkeypatch):
+    """正文非空但全是空白 → 等价于没产出，同样明确失败而不是无资料直答。"""
+    _patch_silent_llm(monkeypatch, payload="   \n\n")
     with pytest.raises(LLMEmptyResponseError):
-        asyncio.run(sup.supervisor_node(_sup_state(analysis="   \n\n")))
-
-
-def test_supervisor_still_routes_to_analyzer_before_analyzer_ever_ran(monkeypatch):
-    """边界：检索过但 analyzer 还没跑 → 仍要送 analyzer（新增的失败闸不能抢在前面）。"""
-    monkeypatch.setattr(settings, "light_chat_enabled", False)
-    out = asyncio.run(sup.supervisor_node(_sup_state(
-        route_history=["supervisor", "retrieval_agent", "supervisor"],
-    )))
-    assert out["next_agent"] == "analyzer"
+        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))

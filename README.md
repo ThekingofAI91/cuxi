@@ -2,7 +2,7 @@
 
 一个让你与历史名人、当代人气人物促膝而谈的 AI 应用：荣格、阿德勒、王阳明、峰哥、张雪峰，五位人物各有一套专属人设、知识库和界面主题。谈话分两种方式——「问道」（与先贤深谈，言必有据）与「会心」（与有趣的人闲谈，不设防）。
 
-后端用 LangGraph 多智能体协作 + 混合检索 RAG，前端零构建（HTML + 按功能拆分的原生 JS 模块），手机优先、桌面为尊。
+后端一对一对话是一条自研 async 编排——supervisor 直接持有检索工具，运行时决定查不查、查多深，没有状态图；LangChain 只用组件层（`ChatOpenAI` / `Tool` / `bind_tools`），检索是「向量 + BM25 + Cross-Encoder 重排」的混合 RAG。圆桌（争鸣）走另一条路：主持人拓扑上 LangGraph——那里控制流真有环，也需要跨请求挂起。前端零构建（HTML + 按功能拆分的原生 JS 模块），手机优先、桌面为尊。
 
 ---
 
@@ -17,8 +17,8 @@
 - **沉浸模式**：峰哥/张雪峰关闭"要点/来源"展示，保持对话沉浸感；荣格/阿德勒/王阳明保留专业溯源
 - **合规与信任**：首页与侧栏提供「使用须知 · AI 仿真声明」，明确角色为 AI 仿真、内容仅供参考、逝者语料仅收生前公开言论
 - **法务三件套**：独立的「用户协议」（/terms）与「隐私政策」（/privacy）页面（含第三方 LLM 披露、账号注销、未成年人条款）；每条 AI 回答与圆桌发言带显著的「AI 生成」内容标识；支持一键注销账号（删除账号与全部登录会话）
-- **多智能体流水线**：Supervisor 规则路由（不烧 LLM）→ Retriever / Analyzer / Verifier 三个节点；多轮历史超阈值时由 Supervisor 触发**后台任务**压缩旧轮次（不是图里的节点）
-- **争鸣（圆桌会议）**：2-3 位人物同桌，就同一议题交锋——**谁说话不由代码排班，由角色自己判断**（每轮并行问「有没有非说不可的话、要反驳谁的哪一句」，有人举手才发言；多人同时举手交给用户点将）；参会者平级、无中心调度，是项目里**第二个真 agent**；收敛靠发言配额的数学而非提示词调参，结尾只出**纪要（分歧地图）**、不评胜负，判断交回用户
+- **一对一编排**：supervisor 是唯一执行体，自己持有检索工具——模型运行时决定「不查 / 轻量查（top-3 软背景）/ 强查（全管线 15 条带来源）」，教育区与娱乐区不再分两条路，差别落在工具的 `strong` 参数上；引用核查与历史压缩都在回答推完之后异步跑，不占首字
+- **争鸣（圆桌会议）**：2-3 位人物同桌，就同一议题交锋——**主持人是一台 LangGraph 上的主智能体**（`framework/roundtable.py`），每轮由它决定「下一位谁发言」，并代写该角色的**请缨理由**（以自己的口吻概括），前端显示「某某主动请缨」而不是「主持人点名」；发言的子智能体复用的是一对一那套 supervisor 架构（自持检索工具、逐 token 流式），**子智能体之间没有边、只连主持人**；用户自任主持人时，会议在决策点挂起（`interrupt()` + SQLite checkpoint）等用户点将，**跨请求、跨进程、重启都不丢**；收敛靠发言配额的数学而非提示词调参，结尾只出**纪要（分歧地图）**、不评胜负，判断交回用户
 - **混合检索 + 来源加权**：向量 + BM25 双通道，Cross-Encoder 重排；语料按 original/oral/anchor/secondary 分级加权，二手解读强降权，防止"第三者评价"冒充名人原话
 - **防幻觉验证（异步旁路）**：专业型角色回答推流完成后，后台再对引用做核查与置信度标注，结果以引用出处事件补推——不阻塞回答、也不重答
 - **工程化打磨**：限流、上传限制、会话 SQLite 持久化（重启不丢）、答案内存缓存、成本监控看板
@@ -30,13 +30,13 @@
 
 | 层 | 技术 |
 |----|------|
-| 后端 | FastAPI + LangGraph + DeepSeek API |
+| 后端 | FastAPI + DeepSeek API（一对一：自研 async 编排 + LangChain 组件层；争鸣：LangGraph 主持人拓扑） |
 | 向量检索 | ChromaDB + BAAI/bge-small-zh-v1.5（512 维，CPU 可跑） |
 | 关键词检索 | rank-bm25（磁盘缓存，重启复用） |
 | 重排序 | BAAI/bge-reranker-base（Cross-Encoder；可经 `RERANK_MODEL` 换成 v2-m3） |
 | 前端 | 原生 HTML/CSS/JS 按功能分模块（零构建，静态文件直接服务） |
 | 持久化 | SQLite（会话 / 账号 / 用量统计）+ ChromaDB（向量库） |
-| 评估 | 自建 54 题 LLM-as-Judge 四维（主口径）+ RAGAS 三维全量对照 + pytest（248 个用例） |
+| 评估 | 自建 54 题 LLM-as-Judge 四维（主口径）+ RAGAS 三维全量对照 + pytest（227 个用例） |
 
 ## 并发容量（实测）
 
@@ -123,13 +123,12 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 .
 ├── main.py                        # FastAPI 入口（启动预热 + 会话恢复）
 ├── init_persona_data.py           # 语料入库脚本（可指定单角色）
-├── framework/                     # LangGraph 智能体
-│   ├── supervisor.py              #   主管：规则路由 + 轻聊快速通道 + 历史压缩 + 最终答案编译
-│   ├── retrieval_agent.py         #   检索智能体（混合检索）
-│   ├── analysis_agent.py          #   分析智能体
+├── framework/                     # 编排与能力层
+│   ├── supervisor_agent.py        #   一对一唯一执行体：supervisor 自持检索工具（含检索实现 retrieve_documents），运行时决定查不查/查多深
+│   ├── runtime.py                 #   共享运行时设施：场景上下文 + 会话历史 + 消息装配 + 直接生成 + Chroma 单例
+│   ├── analysis_agent.py          #   分析智能体（评测旁路与非人设场景）
 │   ├── verification_agent.py      #   验证智能体（异步引用核查）
-│   ├── tool_agent.py              #   工具化检索节点（模型自主决定是否查原书）
-│   └── roundtable.py              #   圆桌辩论编排（多角色自主发言 + 交锋）
+│   └── roundtable.py              #   争鸣：LangGraph 主持人拓扑（主智能体定人 + 子智能体发言 + 跨请求挂起）
 ├── scenes/persona_chat/           # 名人对话场景
 │   ├── config.py                  #   场景与角色注册
 │   ├── prompt_builder.py          #   酒馆式提示词装配（角色卡 + 世界书 + 后历史指令）
@@ -188,21 +187,23 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 ## 多智能体架构
 
+一对一只有**一个执行体**：supervisor 自己持有检索工具，没有中间节点、没有状态图。
+
 ```
 用户提问
    │
    ▼
-Supervisor（规则路由，不调 LLM）
+Supervisor（唯一执行体，持有 search_library 工具）
    │
-   ├─ 需要查资料? ──► Retriever（向量 + BM25 + 重排；Multi-Query / HyDE 默认关闭）
-   │                        │
-   │                        ▼
-   ├─ 分析回答?  ────► Analyzer（基于检索资料组织答案）
-   │                        │
-   │                        ▼
-   ├─ 有引用且角色开启验证? ► Verifier（回答推完后异步核查出处 + 置信度）
+   ├─ 模型自行决定这一次：
+   │     不查（寒暄、闲聊）
+   │     / 轻量查 strong=false（top-3 向量+BM25，作为软背景，不带来源）
+   │     / 强查   strong=true （改写+混合召回+精排+图谱，15 条带来源）
+   │        └─ 命中后以 ToolMessage 回填原文 → 模型依资料作答，正文标 [n]
    │
-   └─ 多轮历史超阈值? ──► 后台任务压缩旧轮次（不是图节点，不阻塞回答）
+   └─ 回答流式推完之后（都不在关键路径上）
+        ├─ Verifier：异步核查引用出处，经 SSE citations 事件补推
+        └─ 历史压缩：超阈值时后台任务压缩旧轮次
    │
    ▼
 最终答案（SSE 流式返回）
@@ -210,20 +211,23 @@ Supervisor（规则路由，不调 LLM）
 
 要点：
 
-- **规则优先路由**：Supervisor 按关键词规则分流，跳过 LLM 路由调用，省成本降延迟；路由循环有上限兜底（GraphRecursionError 防护）
-- **验证按人设开关**：`enable_verification` 默认开启；峰哥/张雪峰（沉浸角色）关闭，避免"要点/来源"破坏代入感
-- **历史感知检索**：结合最近对话轮次解决"那个梦""这跟它有什么关系"这类指代问题
+- **不做分区路由**：教育区与娱乐区走同一条路，差别落在检索工具的 `strong` 参数上，由模型在运行时填。
+- **工具描述即产品策略**：工具说明里写清"什么时候查、什么时候不查、`strong` 怎么填"，并附本区倾向提示（教育区偏强检索、娱乐区偏轻量）。模型对工具的理解完全来自这段文字，所以它是这套设计真正的载体。
+- **验证不阻塞首字**：verifier 在回答推完之后异步执行，超时即放弃本次引用出处推送，绝不拖住"完成"状态。
+- **历史感知检索**：结合最近对话轮次解决"那个梦""这跟它有什么关系"这类指代问题。
 
-### 两处真 agent（其余是确定性编排）
+### 真 agent 在哪
 
-上面这张图的路径**在代码里写死**，LLM 只产文本、不改控制流。按 Anthropic 的判据（workflow＝路径由代码预定义；agent＝LLM 在运行时决定流程与工具），主体的定性是 **multi-node workflow**；真正算 agent 的只有两处，这也是本项目敢叫「多智能体」的全部依据：
+按 Anthropic 的判据（workflow＝路径由代码预定义；agent＝LLM 在运行时决定流程与工具），本项目真正算 agent 的只有两处；其余（检索实现、引用核查、历史压缩）都是确定性的能力函数。
 
 | 位置 | 那个自由度 | 说明 |
 |---|---|---|
-| `framework/tool_agent.py` | 教育区：模型自己决定**要不要查原书** | 娱乐区不走工具——检索是 23ms 软背景，加一次 LLM 往返（3-8s）不划算 |
-| `framework/roundtable.py` | 争鸣：参会者自己决定**说不说、反驳谁** | 参会者平级、无中心调度；意愿判据是「要反驳谁的哪一句」 |
+| `framework/supervisor_agent.py` | 模型自己决定**查不查、查多深** | 一对一不分教育/娱乐两条路：检索工具的 `strong` 参数承担分档——`true` 走全管线（15 条带来源，正文标 `[n]`），`false` 走轻量 top-3 软背景。模型按请求性质自选，工具描述里带本区倾向提示 |
+| `framework/roundtable.py` | 争鸣：主持人决定**下一位谁发言**（并代写其请缨理由） | 主持人＝图上主智能体，参会者＝它的子智能体（之间无连边）。用户自任主持时，决策点 `interrupt()` 挂起，等用户点将 |
 
-圆桌**不套 LangGraph**：它的控制流不是一个图，而是「一轮内并行问意愿 → 争用仲裁 → 发言 → 收敛判断」的循环，中间还要挂起等用户输入。用 async generator 直接产出 SSE 事件更直白（`POST /persona/roundtable`，事件见 `framework/roundtable.py` 模块头注释）。
+圆桌**是项目里唯一上 LangGraph 的地方**，判据与一对一弃图正好互补：一对一那条链路每节点每请求最多进一次、可达路径只有 5 条且进入时即确定——路径已被代码预定，画成图只是把直筒流程拆成盒子，所以弃图是对的；而圆桌**真的在图上有环**（host 每轮都被重新进入，走几轮由讨论内容决定），且用户自任主持人时**真的需要跨请求挂起**（挂在哪由运行时决定，不是代码写死的分支）。环 + 挂起，正是图的正当用途——上图不是因为"该用框架了"，而是控制流本身长成了图。
+
+挂起用 `interrupt()` + `AsyncSqliteSaver`，会议状态落 SQLite（`roundtable_checkpoint_db_path`）：**多 worker / 进程重启都不会弄丢等待中的会议**（旧的进程内 `asyncio.Event` 方案在多 worker 下会静默失效）。事件与拓扑说明见 `framework/roundtable.py` 模块头注释。
 
 ### 角色差异化与回答完整性（2026-08-23 优化）
 - **人设主导，不做"分析助手"**：`direct_response_system_prompt` 改为第一人称肯定式框架，不再把角色框成"基于著作的分析助手"，避免不同人物回答雷同。
@@ -234,7 +238,7 @@ Supervisor（规则路由，不调 LLM）
 ### 对话操作与轻聊通道（2026-08-29 新增）
 - **重新生成**：对最后一条回答一键重答。后端弹出最后一轮（`pop_last_turn`，带 query 校验防并发误删）、跳过答案缓存，给出新回答；旧回答保留为多版本，前端 ‹ › 随时切回。
 - **历史编辑**：任意一条用户消息可编辑重答，之后的对话作废。前端截断本地历史，请求携带 `truncate_to_turns` 让后端同步截断存储的历史（两端一致，被编辑轮次之后的旧回答不会作为上下文复活）。
-- **轻聊快速通道**：`_is_lightweight_turn` 用"去标点后整句白名单"识别寒暄/道谢/语气回应/身份询问，命中则跳过检索管线一次直出（教育区省掉 5-8s 精排，首字 ~2s）。判定刻意保守——"你好，我想问抑郁症怎么治"不会命中"你好"，真实提问永远走检索。开关：`LIGHT_CHAT_ENABLED`。
+- **寒暄不再走规则快速通道**（2026-09-30 变更）：原先用整句白名单识别寒暄并跳过检索，现已删除——寒暄交给 supervisor_agent 的模型自行判断"不检索 / 轻量检索"。模型选择不调工具时同样是 1 次 LLM 往返，与旧的规则快速通道等速，却少了一层"代码替模型做决定"。
 - **语音朗读**：每条回答可朗读/停止（浏览器内置 SpeechSynthesis，零后端成本；引用出处区块不朗读）。
 - **世界书扫描窗口**：世界书关键词匹配范围从"仅本轮消息"扩为"最近 3 轮对话 + 本轮消息"（`compose_lorebook_scan_text`），"我们刚才聊的那个XX"类指代也能命中词条，长对话里设定不再静默失效。
 - **角色卡导入/导出**：`card_io.py` 定义原生 JSON 卡片格式（`gkrm-card`，字段以本项目概念体系为准）。任意角色可从详情页导出；自建角色导出时自动从 collection 反查背景全文，导入后切块重建知识库，实现完整往返；内置角色只导出软设定（语料文件不随卡分发）。
@@ -327,11 +331,12 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 | DELETE | `/persona/characters/{char_id}` | 删除自建角色（内置角色不可删） |
 | GET | `/persona/characters/{char_id}/export` | 导出角色卡（原生 JSON：人设/世界书/示例对话，自建角色含背景知识库） |
 | POST | `/persona/characters/import` | 导入角色卡，创建为自建角色并立即可对话 |
-| POST | `/persona/roundtable` | 圆桌会议（争鸣）开场：SSE 流式返回自主发言（`intent` / `contention` / `choice` / `token` …）；流跑到争用点会挂起 |
-| POST | `/persona/roundtable/{session_id}/choice` | 争用仲裁：提交用户点将结果，唤醒挂起的流（用户不主持时由主持人代班） |
+| POST | `/persona/roundtable` | 圆桌会议（争鸣）开场：SSE 流式返回（`round` / `choice` / `speaker_start` / `token` / `end` …）；用户自任主持人时在决策点挂起并推送 `choice_request` |
+| POST | `/persona/roundtable/{session_id}/choice` | 提交下一位发言人，续跑挂起的会议（同样 SSE 流式返回剩余过程） |
+| GET | `/persona/roundtable/{session_id}/pending` | 该场是否正等待用户点将（返回候选人与各自已发言次数） |
 | GET | `/persona/roundtable/history` | 圆桌会议历史（最近 30 天，按时间倒序；不含完整发言） |
 | GET | `/persona/roundtable/{session_id}` | 查看某场圆桌（议题 / 与会者 / 完整发言记录与纪要） |
-| DELETE | `/persona/roundtable/{session_id}` | 删除某场圆桌记录 |
+| DELETE | `/persona/roundtable/{session_id}` | 删除某场圆桌记录（同时清掉它的 checkpoint，避免挂起的会议残留） |
 | DELETE | `/conversation/{session_id}` | 删除会话 |
 | GET | `/conversation/pending/{session_id}` | 恢复未完成的流式回答 |
 | GET | `/conversation/{session_id}/meta` | 会话元信息 |
@@ -353,7 +358,7 @@ python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; inva
 ## 测试与评估
 
 ```bash
-pytest                              # 248 个用例：智能体行为 + API 集成 + 对话操作（重答/编辑/轻聊通道/角色卡）+ 设置页配置
+pytest                              # 227 个用例：智能体行为 + 圆桌图拓扑 + API 集成 + 对话操作（重答/编辑/角色卡）+ 设置页配置
 python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志）
 ```
 
@@ -452,7 +457,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 - 构建可能对全库 chunk 做几百次 LLM 调用（耗时数分钟），因此用**后台任务**跑，前端轮询 `GET /persona/graph/status`。
 
 **2) 查询期（AI 自主判断，默认纯文本检索）**
-- 默认只用「向量 + BM25 + 重排」文本检索；由 AI 在 `retrieval_agent` 中自主调用 `should_trigger_graph_retrieval` 判断文本质量（用户无感知、无按钮）：
+- 默认只用「向量 + BM25 + 重排」文本检索；由 AI 在 `retrieve_documents`（`framework/supervisor_agent.py`）中自主调用 `should_trigger_graph_retrieval` 判断文本质量（用户无感知、无按钮）：
   - 文本召回条数不足（`GRAPH_TRIGGER_MIN_DOCS`）或 top 相关性偏弱（`GRAPH_TRIGGER_SCORE`）→ 启动图谱；
   - 查询命中图谱实体但文本结果没覆盖该实体 → 也启动图谱（实体覆盖缺口）；
   - 文本质量达标 → **跳过图谱**，不浪费子图扩展与证据并集的开销。
@@ -490,7 +495,7 @@ python scripts/cost_report.py        # 成本日报（基于 SQLite 用量日志
 | 文件 | 职责 |
 |------|------|
 | `src/retrieval/knowledge_graph.py` | 图谱构建（三元组抽取+合并+落盘）与查询期检索（实体对齐 + BFS 子图 + 渲染） |
-| `framework/retrieval_agent.py` | 在混合检索后并入图谱证据文档 |
+| `framework/supervisor_agent.py` | 检索实现（`retrieve_documents`）：在混合检索后并入图谱证据文档 |
 | `src/api/routes.py` | `graph/build` / `graph/status` 端点 |
 
 ## 备注

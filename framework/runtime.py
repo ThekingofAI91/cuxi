@@ -1,36 +1,32 @@
 """
-Supervisor Agent — 整个系统的大脑
-通用框架层，通过 scene_config 注入场景特定的prompt和配置
+Runtime 能力层 —— 场景上下文 / 会话历史 / 消息装配 / 生成 / 向量库单例
 
-当前项目只保留名人对话场景（persona_chat）：
-图结构 = supervisor → retriever / analyzer / tool_agent
-- 问候/闲聊直接回复；其余默认先检索再分析
-- 检索策略按角色分区决定（resolve_retrieval_strategy）：
-  教育区走 tool_agent（模型自己判断要不要查资料，真 agent 环节），
-  娱乐区走 retriever 轻量召回（top-3 向量+BM25，不加 LLM 往返）
-- 引用核查（verifier）已移出图内关键路径，改为回答返回后异步执行，
-  经 type:'citations' 事件补推引用出处（见 src/api/routes.py 的 event_stream）
+架构变化（2026-10-02：supervisor.py 改名 runtime.py）：
+    一对一对话的唯一执行体是 framework/supervisor_agent.py：它自己持有
+    search_library 工具（检索实现也在该文件），"这轮查不查、查多深"由模型
+    运行时决定（strong 参数）。本模块是它与其他模块依赖的"能力库"——
+    消息装配、直接生成、会话历史、向量库单例、场景上下文。
+
+    原 LangGraph 状态图（supervisor_node / route_after_supervisor /
+    build_graph / get_persona_graph）以及随之失效的
+    resolve_retrieval_strategy（分区路由判据）、_is_lightweight_turn
+    （轻聊规则快速通道）已一并删除：一对一不需要图，圆桌争鸣另行设计。
+
+能力清单：
+- 消息装配 build_direct_messages（人设 → 用户记忆 → 资料 → 历史 → 后历史指令）
+- 直接生成 _generate_direct_response（空响应重试 + 首 token 超时）
+- 引用出处摘取 _citation_block（供 routes 层异步补推 type:'citations'）
+- 会话历史读写与摘要压缩（_conversation_history_store + session_store 持久化）
+- ChromaDB client 单例（首次构造加锁，见 get_chroma_client）
 """
 
 import contextvars
 import re
 import asyncio
 import threading
-from typing import Any, Optional
 
-from src.core.llm import (
-    get_chat_llm,
-    astream_nonempty,
-    ainvoke_nonempty,
-    LLMEmptyResponseError,
-)
-from langgraph.graph import END, START, StateGraph
-
-from framework.analysis_agent import analysis_agent
-from framework.retrieval_agent import retrieval_agent
-from framework.verification_agent import verification_agent
+from src.core.llm import get_chat_llm, astream_nonempty, ainvoke_nonempty
 from src.core.config import settings
-from src.core.state import AgentState
 from src.core.session_store import get_store as _get_session_store
 
 
@@ -479,264 +475,6 @@ async def _generate_direct_response(
         return f"你好！我是{fallback}，请问有什么可以帮你的？"
 
 
-# ============================================================
-# 检索策略：按分区决定（架构决策，不是运行期配置）
-# ============================================================
-
-def resolve_retrieval_strategy(zone: Optional[str]) -> str:
-    """按角色分区返回检索策略："tool"（工具化）或 "light"（轻量召回）。
-
-    这是架构决策而非调参开关——两个区的产品目标不同，检索方式就必须不同：
-
-    - education（含 zone 缺失）："tool"。教育区要凭据、要可溯源，价值在于"该查的
-      查得到原文，不该查的一次都不查"；为此值得多付一次 LLM 往返（3-8s）。
-      zone 缺失时按教育区处理，与 analysis_agent 的默认口径
-      （state.get("zone", "education")）保持一致。
-    - entertainment："light"。娱乐区靠角色卡撑人设，检索只是 23ms 的软背景，
-      给每条消息加一次 LLM 往返得不偿失。轻量召回落点在 retriever 节点：
-      retrieve_documents(light_retrieval=...) 跳过改写/重排/图谱，只留 top-3 向量+BM25。
-      前提：state["light_retrieval"] 由 API 层置位（src/api/routes.py，受
-      settings.entertainment_light_retrieval 控制）；非 API 路径（脚本直连图）
-      若未置位，娱乐区会退化成完整检索。
-
-    单测见 tests/test_tool_agent.py。
-    """
-    return "light" if zone == "entertainment" else "tool"
-
-
-async def supervisor_node(state: AgentState) -> dict[str, Any]:
-    """
-    Supervisor 节点：意图识别 + 路由决策（名人对话场景）
-
-    路由策略（跳过 LLM 路由，省一次调用）：
-    1. 引用核查已完成 → 编译最终答案
-    2. 已有分析结果 → 直接作为最终回答（引用核查已移出图内，异步补推）
-    3. 已检索但未分析 → analyzer（防死循环）
-    4. 工具化检索已跑过但仍无分析 → analyzer（有资料）/ retriever（无资料）
-    5. 问候/闲聊 → 直接回复
-    6. 其余 → retriever / tool_agent（工具化开启时）
-
-    注：历史轮次过多时的压缩由 _update_conversation_history 的异步任务
-    在图外完成，不占用图内路由。
-    """
-    config = get_scene_config()
-    query = state["query"]
-    history = state.get("history", [])
-    route_history = state.get("route_history", [])
-    character_role_prompt = state.get("character_role_prompt", "")
-    stream_callback = state.get("stream_callback")
-
-    print(f"\n[Supervisor] 收到 query: {query}")
-    print(f"[Supervisor] 当前历史轮次: {len(history)}")
-    print(f"[Supervisor] 路由历史: {route_history}")
-    print(f"[Supervisor] 角色人设: {'有' if character_role_prompt else '无'}")
-
-    # 限制最大循环次数。只留「进了几次 supervisor」这一个判据：
-    # 串行图里 supervisor 每轮必进一次，len(route_history) 与它近似线性相关，
-    # 原 `len(route_history) > 15` 基本被本判据覆盖，属冗余，已删。
-    # 框架层还有 recursion_limit（由 routes.py 传入），是最后一道保险丝。
-    supervisor_count = route_history.count("supervisor")
-    if supervisor_count > 6:
-        print(f"[Supervisor] supervisor 决策次数达上限 (supervisor={supervisor_count}, total={len(route_history)})，强制结束")
-        # 以角色口吻兜底，保证回答风格一致
-        final_answer = await _generate_direct_response(
-            query, history, character_role_prompt, stream_callback,
-            session_id=state.get("session_id"),
-            context=(state.get("analysis") or "").strip() or None,
-        )
-        if not final_answer or final_answer == "未找到相关信息。请尝试换个问法或上传相关文档后再试。":
-            final_answer = await _generate_direct_response(
-                query, history, character_role_prompt, stream_callback,
-                session_id=state.get("session_id"),
-                context=state.get("analysis") or None,
-            )
-        return {
-            "next_agent": "__end__",
-            "final_answer": final_answer,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    has_analysis = bool(state.get("analysis"))
-    has_verification = bool(state.get("verification"))
-    has_docs = bool(state.get("retrieved_docs"))
-
-    # 引用核查已完成 → 编译最终答案（回答 + 引用可信度 + 出处）
-    if "verification_agent" in route_history:
-        print("[Supervisor] 引用核查已完成，编译最终答案")
-        final_answer = _compile_final_answer(state)
-        if not final_answer or final_answer == "未找到相关信息。请尝试换个问法或上传相关文档后再试。":
-            print("[Supervisor] Agent 无有效结果，用 LLM 直接回复")
-            final_answer = await _generate_direct_response(
-                query, history, character_role_prompt, stream_callback,
-                session_id=state.get("session_id"),
-                context=state.get("analysis") or None,
-            )
-        return {
-            "next_agent": "__end__",
-            "final_answer": final_answer,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # 已有分析结果：分析已以角色口吻流式生成，直接作为最终回答结束。
-    # 引用核查（verifier）已移出图内关键路径，改为回答返回后异步执行（见 routes.event_stream）。
-    if has_analysis and not has_verification:
-        # 引用核查（verifier）不再在图内路由：其串行 LLM 调用会阻塞首字/定稿，
-        # 改为 routes.event_stream 中「回答返回后异步执行」，经 type:'citations' 事件补推引用出处。
-        final_answer = state.get("analysis", "").strip()
-        if not final_answer:
-            # analysis 非空但全是空白字符 → 等价于没有产出，按上游空响应处理
-            print("[Supervisor] 分析内容为空（仅空白字符），明确失败")
-            raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG)
-        return {
-            "next_agent": "__end__",
-            "final_answer": final_answer,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # 已分析过一轮却仍无产出 → 明确失败，绝不再回送 analyzer。
-    # 分析节点内部已由 astream_nonempty 做过「首 token 超时 + 整次流空」双重判据的重试，
-    # 再送一次只会拿到同样的空结果，白白多烧 6 轮 supervisor↔analyzer 才到次数上限收手
-    # （每轮 analyzer 自己还要重试，上游持续空时能拖到分钟级）。
-    # 注意：原「分析为空 → 无资料直答」兜底已删——它丢掉本轮全部检索资料，
-    # 给出看似有据、实则凭空的回答，比如实报错更糟。此刻尚未向用户推送任何 token，
-    # 直接抛异常是安全的：routes.event_stream 会捕获并推 type:'error' 事件。
-    if "analysis_agent" in route_history and not has_analysis:
-        print("[Supervisor] 已分析过一轮且无产出，明确失败（不再回送 analyzer）")
-        raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG)
-
-    # 防死循环：已检索过但尚未分析时，强制路由 analyzer，
-    # 避免陷入 retriever→supervisor 无限循环，analyzer 永远不被调用
-    if "retrieval_agent" in route_history and not has_analysis:
-        print("[Supervisor] 已检索但尚无分析结果，强制路由到 analyzer（避免重复检索死循环）")
-        return {
-            "next_agent": "analyzer",
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # 防死循环：工具化检索已经跑过一轮仍未产出分析（上游空响应 / 工具路径整体降级），
-    # 说明这条路本轮走不通，绝不能再把它送回 tool_agent。
-    # 没有这道闸，tool_agent 交回空 analysis 时 supervisor 的条件会一路穿透到
-    # 工具分支，于是反复回送：实测一次问答因此 supervisor↔tool_agent 来回 7 轮、
-    # 单次耗时 61 秒（logs/app.log 的 elapsed_ms 实测），
-    # 直到 supervisor_count>6 的强制结束才收手。
-    # 退回目标分两种：拿到过资料就走 analyzer——analyzer 自己读
-    # state["retrieved_docs"] 建上下文，资料不白查；一条都没查到才回 retriever 走老路。
-    if "tool_agent" in route_history and not has_analysis:
-        target = "analyzer" if has_docs else "retriever"
-        print(f"[Supervisor] 工具化检索未产出结果，退回 {target}（防重复进入 tool_agent）")
-        return {
-            "next_agent": target,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # ---- 轻聊快速通道：社交寒暄/语气回应直接生成，不进检索管线 ----
-    # 这类消息不需要任何知识库资料，走全管线要白付检索改写 + 精排的 5-8s；
-    # 快速通道一次 LLM 直出，首字延迟从 ~20s 降到 ~2s。
-    # 判定用「整句精确匹配 + 去标点后全等」，绝不吞掉真实提问
-    # （"你好，我想问抑郁症怎么治" 不匹配"你好"，仍走检索）。
-    if getattr(settings, "light_chat_enabled", True) and _is_lightweight_turn(query):
-        print("[Supervisor] 轻聊快速通道：直接生成（跳过检索）")
-        final_answer = await _generate_direct_response(
-            query, history, character_role_prompt, stream_callback,
-            session_id=state.get("session_id"),
-            max_tokens=300 if state.get("zone") == "entertainment" else None,
-            zone=state.get("zone", "education"),
-            post_history_directive=state.get("post_history_directive"),
-            sampling=state.get("sampling"),
-        )
-        return {
-            "next_agent": "__end__",
-            "final_answer": final_answer,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # 兜底：无角色人设时走规则路由（正常不会走到，persona 请求必带 role_prompt）
-    if not character_role_prompt:
-        next_agent = _rule_based_routing(query)
-        print(f"[Supervisor] 规则路由降级: {next_agent}")
-        return {
-            "next_agent": next_agent,
-            "route_history": route_history + ["supervisor"],
-        }
-
-    # ---- 检索策略：按分区决定（判据见 resolve_retrieval_strategy）----
-    # 教育区 → tool_agent：把"这一轮要不要查原书"交给模型自己判断（tool_agent
-    # 绑定 search_library），这是本项目唯一的真 agent 环节：LLM 输出决定控制流。
-    # 娱乐区 → retriever：轻量召回 top-3 作为角色背景，不给每条消息加 LLM 往返。
-    # "tool_agent" not in route_history 是硬约束：一次请求最多进 tool_agent 一次。
-    # 上面的防重入闸门已经挡住了空结果回送，这里再挡一道，两道都失效才算真漏。
-    if (
-        resolve_retrieval_strategy(state.get("zone")) == "tool"
-        and "tool_agent" not in route_history
-    ):
-        print("[Supervisor] 教育区检索策略：工具化（交由模型自行判断是否检索）")
-        return {
-            "next_agent": "tool_agent",
-            "route_history": route_history + ["supervisor"],
-        }
-
-    print("[Supervisor] 规则路由到 retriever（娱乐区轻量召回 / 降级检索）")
-    return {
-        "next_agent": "retriever",
-        "route_history": route_history + ["supervisor"],
-    }
-
-
-# 轻聊快速通道的整句白名单（去空白标点、转小写后全等匹配）。
-# 只收录"无论如何都不需要知识库"的社交短语；身份类（你是谁/自我介绍）
-# 只靠人设就能答，也不必检索。
-_LIGHT_PHRASES = frozenset({
-    "你好", "您好", "嗨", "哈喽", "哈罗", "hello", "hi", "hey", "yo",
-    "在吗", "在不在", "你是谁", "你叫什么", "你叫什么名字", "你是",
-    "自我介绍", "自我介绍一下", "介绍一下你自己", "介绍下自己", "介绍一下自己",
-    "谢谢", "谢谢啦", "感谢", "多谢", "thanks", "thank", "thx",
-    "再见", "拜拜", "晚安", "早", "早上好", "中午好", "下午好", "晚上好",
-    "辛苦了", "辛苦", "真的吗", "原来如此", "这样啊", "是吗", "好的",
-    "好吧", "行吧", "好", "行", "可以", "嗯", "嗯嗯", "哦", "哦哦",
-    "好哒", "好嘞", "ok", "okay", "哈哈", "哈哈哈", "哈哈哈哈", "666",
-    "明白", "了解", "收到", "懂了", "明白了", "了解了",
-})
-
-
-def _is_lightweight_turn(query: str) -> bool:
-    """判断是否为轻聊轮：寒暄、道谢、语气回应、身份询问。
-
-    规则刻意保守（整句全等 + 去标点 + 长度上限），宁可漏判走检索，
-    不可误判把真实提问送进无资料直答通道。
-    """
-    q = re.sub(r"[\s！!？?。，,、~～.．…·]+", "", (query or "").strip()).lower()
-    if not q or len(q) > 12:
-        return False
-    if q in _LIGHT_PHRASES:
-        return True
-    # 叠词寒暄：哈喽哈喽 / 谢谢谢谢 / 晚安晚安（两半相同且本身是社交短语）
-    half = len(q) // 2
-    if len(q) % 2 == 0 and half >= 2 and q[:half] == q[half:] and q[:half] in _LIGHT_PHRASES:
-        return True
-    # 纯语气复读：哈哈哈…、嗯嗯嗯…、？？？…、666…
-    if len(q) <= 8 and re.fullmatch(r"(.)\1{1,7}", q):
-        return True
-    return False
-
-
-def _rule_based_routing(query: str) -> str:
-    """基于规则的路由降级（persona 场景）"""
-    config = get_scene_config()
-    if config and hasattr(config, 'routing_keywords'):
-        query_lower = query.lower()
-        for agent, keywords in config.routing_keywords.items():
-            if any(kw in query_lower for kw in keywords):
-                return agent
-        return getattr(config, 'default_agent', 'retriever')
-
-    # 兜底：分析类问题走 analyzer，其余一律检索
-    query_lower = query.lower()
-    analysis_keywords = ["对比", "分析", "区别", "异同", "总结", "趋势", "原因", "compare", "difference"]
-    if any(kw in query_lower for kw in analysis_keywords):
-        return "analyzer"
-    return "retriever"
-
-
 def _citation_block(verification: str) -> str:
     """从引用核查报告中提取「引用出处」列表，供回答返回后异步推送。
 
@@ -751,91 +489,3 @@ def _citation_block(verification: str) -> str:
     if not citation_match:
         return ""
     return citation_match.group(1).strip()
-
-
-def _compile_final_answer(state: AgentState) -> str:
-    """编译最终答案：角色回答 + 引用出处"""
-    analysis = state.get("analysis", "")
-    verification = state.get("verification", "")
-
-    core_answer = analysis or ""
-    citation = _citation_block(verification) if verification else ""
-
-    final = (core_answer + citation).strip() if (core_answer or citation) else ""
-    if not final:
-        final = "未找到相关信息。请尝试换个问法或上传相关文档后再试。"
-
-    return final
-
-
-# ============================================================
-# 路由函数
-# ============================================================
-
-def route_after_supervisor(state: AgentState) -> str:
-    """Supervisor 之后的路由"""
-    next_agent = state.get("next_agent", "__end__")
-    if next_agent == "__end__":
-        return "__end__"
-    return next_agent
-
-
-# ============================================================
-# 构建 LangGraph StateGraph
-# ============================================================
-
-def build_graph() -> StateGraph:
-    """构建名人对话工作流图（无 InfoGap 追问，无 Coder）
-
-    两条检索路径并存，由角色分区分流（判据见 resolve_retrieval_strategy）：
-    - 教育区：supervisor → tool_agent → supervisor（检索由模型按需触发）
-    - 娱乐区：supervisor → retriever → supervisor → analyzer（轻量召回 top-3）
-    retriever 另有两个入口：无角色人设时的规则降级（_rule_based_routing），
-    以及教育区工具化跑完仍无资料时的兜底（见 supervisor_node 的防死循环闸门）。
-    两条路的收尾一致：analyzer / tool_agent 产出 analysis 后回 supervisor 定稿。
-    """
-
-    workflow = StateGraph(AgentState)
-
-    workflow.add_edge(START, "supervisor")
-
-    # 图内导入 tool_agent：它要复用 supervisor 的 build_direct_messages，
-    # 模块顶层互相 import 会成环，所以延迟到这里
-    from framework.tool_agent import tool_agent as tool_agent_node
-
-    workflow.add_node("supervisor", supervisor_node)
-    workflow.add_node("retriever", retrieval_agent)
-    workflow.add_node("analyzer", analysis_agent)
-    workflow.add_node("tool_agent", tool_agent_node)
-    workflow.add_node("verifier", verification_agent)
-
-    workflow.add_conditional_edges(
-        "supervisor",
-        route_after_supervisor,
-        {
-            "retriever": "retriever",
-            "analyzer": "analyzer",
-            "tool_agent": "tool_agent",
-            "verifier": "verifier",
-            "__end__": END,
-        },
-    )
-
-    workflow.add_edge("retriever", "supervisor")
-    workflow.add_edge("analyzer", "supervisor")
-    workflow.add_edge("tool_agent", "supervisor")
-    workflow.add_edge("verifier", "supervisor")
-
-    return workflow.compile()
-
-
-# 全局图实例（persona 场景图，编译一次，缓存复用）
-_persona_graph = None
-
-
-def get_persona_graph():
-    """获取 persona 场景的 LangGraph 图（缓存单例）"""
-    global _persona_graph
-    if _persona_graph is None:
-        _persona_graph = build_graph()
-    return _persona_graph

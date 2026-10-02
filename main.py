@@ -54,7 +54,7 @@ def _warmup_sync():
         print("[Warmup] Rerank 模型就绪", flush=True)
 
         # 3. 预热各角色 collection 的 BM25 索引（全量拉取 + 构建，耗时大头）
-        from framework.supervisor import get_chroma_client
+        from framework.runtime import get_chroma_client
         from src.retrieval.advanced_search import _ensure_bm25_ready
         from scenes.persona_chat.config import persona_chat_config
 
@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
     import json as _json
 
     from src.core.session_store import get_store as _get_session_store
-    from framework.supervisor import _conversation_history_store, _conversation_summaries
+    from framework.runtime import _conversation_history_store, _conversation_summaries
     from src.api.routes import _session_store
 
     try:
@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
 # 创建 FastAPI 应用
 app = FastAPI(
     title="促膝 · Persona Chat",
-    description="多智能体RAG名人对话系统 - 基于LangGraph的智能问答系统",
+    description="名人对话 RAG 系统 - 自研 async 编排，supervisor 自持检索工具",
     version="0.1.0",
     lifespan=lifespan,
 )

@@ -60,7 +60,7 @@ def ingest_texts(
     import chromadb
     from chromadb.config import Settings as ChromaSettings
 
-    from framework.supervisor import get_chroma_client
+    from framework.runtime import get_chroma_client
     from src.retrieval.advanced_search import invalidate_bm25_cache
 
     client = get_chroma_client()

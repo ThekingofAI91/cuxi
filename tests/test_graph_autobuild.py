@@ -6,24 +6,18 @@
 1. 聊天端点角色首次被对话且图谱缺失时自动后台构建（graph_auto_build 开关，默认开）
 2. AI 真正触发图谱增强时，检索链路置 graph_used=True 并随回答下发给前端（显示徽标）
 
-本文件校验核心回归点：retrieval_agent 在 AI 决定调用图谱时正确标记 graph_used，
-跳过时不标记；config 默认开启自动构建。
+本文件校验核心回归点：retrieve_documents 在 AI 决定调用图谱时正确返回 graph_used=True，
+跳过时为 False；config 默认开启自动构建。
 全部为内存单测：mock 掉 ChromaDB / LLM / 高级检索，不连真实库、不调模型。
+
+（2026-09-30：检索入口由图节点 retrieval_agent(state) 改为函数
+retrieve_documents(query, ...)，断言相应改为解包三元组。）
 """
 
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 
 from src.core.config import settings
-
-
-def _fake_state(query="什么是集体潜意识？", history=None):
-    return {
-        "query": query,
-        "history": history or [],
-        "route_history": [],
-        "graph_used": False,
-    }
 
 
 def _bind_retrieval_mocks(graph_exists_val, trigger_val, with_kg_docs):
@@ -47,17 +41,17 @@ def _bind_retrieval_mocks(graph_exists_val, trigger_val, with_kg_docs):
     scene_cfg.chroma_collection = "persona_test"
 
     return {
-        "framework.supervisor.get_scene_config": patch(
-            "framework.supervisor.get_scene_config", return_value=scene_cfg),
-        "framework.supervisor.get_chroma_client": patch(
-            "framework.supervisor.get_chroma_client", return_value=fake_client),
+        "framework.runtime.get_scene_config": patch(
+            "framework.runtime.get_scene_config", return_value=scene_cfg),
+        "framework.runtime.get_chroma_client": patch(
+            "framework.runtime.get_chroma_client", return_value=fake_client),
         "src.core.llm.get_chat_llm": patch(
             "src.core.llm.get_chat_llm", return_value=MagicMock()),
         "src.retrieval.advanced_search.advanced_retrieval": patch(
             "src.retrieval.advanced_search.advanced_retrieval", return_value=adv_result),
         # graph_exists 在 retrieval_agent 顶部 import，需 patch 模块属性
-        "framework.retrieval_agent.graph_exists": patch(
-            "framework.retrieval_agent.graph_exists", return_value=graph_exists_val),
+        "framework.supervisor_agent.graph_exists": patch(
+            "framework.supervisor_agent.graph_exists", return_value=graph_exists_val),
         # 以下在函数体内动态 import，patch 源模块即可
         "src.retrieval.knowledge_graph.should_trigger_graph_retrieval": patch(
             "src.retrieval.knowledge_graph.should_trigger_graph_retrieval",
@@ -77,13 +71,14 @@ async def test_graph_used_true_when_ai_triggers():
     for m in mocks.values():
         m.start()
     try:
-        from framework.retrieval_agent import retrieval_agent
-        out = await retrieval_agent(_fake_state())
+        from framework.supervisor_agent import retrieve_documents
+        docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():
             m.stop()
-    assert out["graph_used"] is True
-    assert any("retrieval_agent" in str(r) for r in out["route_history"])
+    assert graph_used is True
+    assert error == ""
+    assert any(d.page_content == "知识图谱关联证据" for d in docs)
 
 
 @pytest.mark.asyncio
@@ -93,12 +88,12 @@ async def test_graph_used_false_when_skipped():
     for m in mocks.values():
         m.start()
     try:
-        from framework.retrieval_agent import retrieval_agent
-        out = await retrieval_agent(_fake_state())
+        from framework.supervisor_agent import retrieve_documents
+        docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():
             m.stop()
-    assert out["graph_used"] is False
+    assert graph_used is False
 
 
 @pytest.mark.asyncio
@@ -108,12 +103,12 @@ async def test_graph_used_false_when_no_graph_built():
     for m in mocks.values():
         m.start()
     try:
-        from framework.retrieval_agent import retrieval_agent
-        out = await retrieval_agent(_fake_state())
+        from framework.supervisor_agent import retrieve_documents
+        docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():
             m.stop()
-    assert out["graph_used"] is False
+    assert graph_used is False
 
 
 def test_graph_auto_build_enabled_by_default():
