@@ -45,6 +45,53 @@ class Settings(BaseSettings):
     # 在 openai SDK 层生效，不受此客户端影响。
     llm_shared_http_client: bool = True
 
+    # ---- 多模态 PDF 转录（无文本层扫描件的救回路径）----
+    # 场景：部分 PDF（如《传习录注疏》311 页里 310 页无文本层）走不到本地 OCR
+    # （有元素就不触发），文本层里只剩版权页残文。这里改为「按页渲成图片 →
+    # 交多模态模型转录正文」，不做任何本地 OCR 预处理。
+    #
+    # 模型名不能照着名字挑，必须实测「图片是否真进了上下文」：
+    # 网关（token.sensenova.cn）当前 9 个模型里只有 sensenova-6.8-flash-lite 真支持
+    # 视觉（图片贡献约 +300 prompt token，转录准确）。deepseek-v4-flash 是**假支持**——
+    # 默认模式 4000 completion 全被 thinking 吃掉、finish_reason=length、正文为空；
+    # 关掉思考（reasoning_effort=none）后回「无法识别您提供的图片内容」。
+    # 换模型前请用 output/_probe_vision2.py 那套判据复测：
+    #   ① usage.prompt_tokens 是否随图片显著上升（不升 = 网关忽略 image_url）
+    #   ② finish_reason == "length" 且 completion 撞 max_tokens = 推理模型 thinking 吃光预算
+    vision_model: str = "sensenova-6.8-flash-lite"
+    vision_enabled: bool = False        # 总开关（init_persona_data.py --vision 才会真的走这条路）
+    vision_dpi: int = 200               # 渲图分辨率：dpi=150 失败率 1/4、200 失败率 1/4，
+                                       # 但 200 的识别更完整（页均 23-44s vs 13-49s）
+    vision_max_tokens: int = 16000      # 单页转录上限。实测阶梯：
+                                       #   4000 →《传习录注疏》p157 撞 length 只转 327 字
+                                       #   8000 → 同一页完整 691 字、零繁体（单开本够用）
+                                       # 但《阳明先生文录》是档案馆双页跨页高清扫描，
+                                       # 一张图约 35 行竖排繁体、实测 400-500 字，
+                                       # 8000 时 4 页里 3 页撞过 length（成功率 75%）。
+                                       # 抬到 16000 给 thinking 留预算，正文不被挤掉。
+    vision_temperature: float = 0.1     # 转录是照抄任务，不要创造性发挥
+    # 页间节流（秒）：网关可持续 3-6 次/分。实测页均耗时分两类——
+    # 单开本 9.3s（口诀）、双页跨页高清 94.7s（阳明先生文录，慢在 thinking），
+    # 两者都在可持续区间内，但批量时留出间隔避免 429（实测突发即 429）
+    vision_page_interval_sec: float = 30.0
+    # 单页失败重试次数（含首次）。失败判据有四条：空 content、
+    # finish_reason == "length"（思考/预算吃光，正文不完整）、
+    # 模型回「无法识别图片」（网关忽略 image_url）、
+    # 400 image resolution exceeds limit（请求非法，重试无用，见 pick_dpi）
+    vision_max_retries: int = 2
+    # 跨页扫描（一图两书页）是否切半转录。
+    # 实测《阳明先生文录》1116 页全是 2592x1728 横版跨页图，每张 400-500 字：
+    #   整张转录 → 成功率 75%、单页 126s
+    #   切半转录 → 每次只 200-250 字，能一次转完（成功率接近 100%）
+    # 竖排古籍右起阅读，所以右半先转。代价是请求数翻倍。
+    vision_split_spread: bool = True
+    # 单页超时（秒）：实测成功页 9.3-145.2s（跨页高清的最慢），
+    # 留 1.5x 余量。定太小会把慢页误判成失败，白白重试一遍。
+    vision_page_timeout_sec: float = 240.0
+    # 断点续跑缓存：转录过且内容非空的页记在此文件，重跑时跳过。
+    # 745 页约 6-8 小时，中途必须能续；缓存是纯文本，不入库。
+    vision_cache_dir: str = "./data/.vision_cache"
+
     # ---- 并发 / 性能 ----
     # 重排序模型：默认 bge-reranker-base（278M，1.1GB）。
     # 实测（优化七十二，2026-08-30）：24 个真实查询 × 3 个教育区库的检索级 A/B，

@@ -89,3 +89,6 @@ tests/*_run.log
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 多模态转录断点缓存（可重建，不入库）
+data/.vision_cache/
