@@ -161,9 +161,16 @@
     gap: 34px; padding: 40px 48px;
     background: #FAFAF7;
   }
-  .zone-deck { display: flex; gap: 26px; flex-wrap: wrap; justify-content: center; max-width: 720px; }
+  /* 四张卡（问道 / 会心 / 争鸣 / 传奇）。用 grid 而非 flex-wrap：flex 在中等
+     宽度会把第 4 张甩到第二行居中，出现「3 + 1」的落单排布；grid 只整体降列
+     （4 → 2 → 1，见文件末尾的分区层响应式），任何时候都不会有孤卡。
+     列宽用 1fr 随容器缩，不再写死 280。 */
+  .zone-deck {
+    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 20px; width: 100%; max-width: 1210px;
+  }
   .zone-card {
-    width: 280px; min-height: 184px;
+    width: 100%; min-height: 184px;
     display: flex; flex-direction: column; align-items: flex-start; gap: 12px;
     padding: 28px 26px;
     background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 14px;
@@ -2508,9 +2515,8 @@ html.setup-open, html.setup-open body { overflow: hidden; }
    争鸣（圆桌会议）—— 自主发言制新增的界面
    ============================================================ */
 
-/* 首页分区层：三张卡并列（问道 / 会心 / 争鸣）。
-   3 x 280 + 2 x 26 = 892，原来的 720 会把第三张挤到第二行。 */
-.zone-deck { max-width: 960px; }
+/* 首页分区层的列数与折行规则已统一到上面「stage 1.5」段的 .zone-deck（grid），
+   这里只补争鸣卡的顶部色条。 */
 .zone-rt { border-top: 3px solid #6b8cff; }
 
 .rt-subtitle {
@@ -2650,4 +2656,246 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 
 .rt-summary-counts {
   margin: 6px 0 0; font-size: 12px; color: #8A857C; letter-spacing: .3px;
+}
+
+
+/* ============================================================
+   传奇（剧情模式）—— 用户演主角的独立玩法
+   ============================================================ */
+
+/* 首页分区层：四张卡的列数与上限（4 列、max-width 1210）在「stage 1.5」段统一声明，
+   这里只补传奇卡的顶部色条。 */
+.zone-lg { border-top: 3px solid #8a6bbf; }
+
+.lg-subtitle {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 12px; font-weight: 400; letter-spacing: 2px;
+  color: #6B6B66; padding-left: 9px; border-left: 1px solid rgba(22,22,22,.16);
+}
+
+.legend-view {
+  position: fixed; inset: 0; z-index: 1200;
+  display: flex; flex-direction: column;
+  background: #FAFAF7; color: #161616;
+}
+.legend-view[hidden] { display: none; }
+.lg-header {
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 22px; border-bottom: 1px solid rgba(22,22,22,.1);
+  background: rgba(255,255,255,.5); flex: none;
+}
+.lg-title {
+  display: flex; align-items: center; gap: 10px;
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 20px; font-weight: 600; color: #161616;
+}
+.lg-back {
+  margin-left: auto; background: transparent; border: 1px solid rgba(22,22,22,.22);
+  color: #6B6B66; border-radius: 999px; padding: 8px 16px; cursor: pointer; font-size: 13px;
+  transition: all .15s ease;
+}
+.lg-back:hover { background: rgba(22,22,22,.06); color: #161616; }
+
+/* ---------- 阶段一：存档列表 ---------- */
+.lg-lobby {
+  flex: 1; overflow-y: auto; padding: 26px 22px 40px;
+  display: flex; flex-direction: column; align-items: center; gap: 20px;
+}
+.lg-lobby[hidden] { display: none; }
+.lg-intro { text-align: center; max-width: 520px; }
+.lg-brand {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 15px; letter-spacing: 6px; text-indent: 6px; color: #8A857C; margin: 0 0 8px;
+}
+.lg-tagline {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 20px; color: #161616; margin: 0 0 10px;
+}
+.lg-rule { font-size: 12.5px; line-height: 1.9; color: #8A857C; margin: 0; }
+
+.lg-saves { width: 100%; max-width: 560px; display: flex; flex-direction: column; gap: 10px; }
+.lg-empty {
+  text-align: center; font-size: 13px; line-height: 2; color: #8A857C;
+  padding: 26px 20px; border: 1px dashed rgba(22,22,22,.16); border-radius: 12px;
+}
+.lg-save-card {
+  display: flex; align-items: center; gap: 14px;
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 12px;
+  padding: 14px 16px;
+}
+.lg-save-main { flex: 1; min-width: 0; }
+.lg-save-title {
+  font-size: 15px; color: #161616; margin-bottom: 4px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lg-save-meta { font-size: 12px; color: #8A857C; }
+.lg-save-ops { display: flex; gap: 8px; flex: none; }
+.lg-new-btn {
+  width: 100%; max-width: 560px;
+  background: #161616; color: #FAFAF7; border: none; border-radius: 10px;
+  padding: 13px; font-size: 14px; cursor: pointer; font-family: inherit;
+  transition: opacity .15s ease;
+}
+.lg-new-btn:hover { opacity: .88; }
+
+/* ---------- 阶段二：创建设定 ---------- */
+.lg-setup {
+  flex: 1; overflow-y: auto; padding: 22px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.lg-setup[hidden] { display: none; }
+.lg-field { display: flex; flex-direction: column; gap: 7px; }
+.lg-field > label { font-size: 13px; color: #161616; }
+.lg-req { color: #c0562e; margin-left: 3px; }
+.lg-input, .lg-textarea {
+  width: 100%; box-sizing: border-box;
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 9px;
+  padding: 10px 12px; font-size: 14px; color: #161616;
+  font-family: inherit; line-height: 1.65; resize: vertical;
+}
+.lg-textarea { min-height: 84px; }
+.lg-input:focus, .lg-textarea:focus { outline: none; border-color: #8a6bbf; }
+.lg-hint { font-size: 11.5px; line-height: 1.7; color: #8A857C; }
+.lg-row { display: flex; gap: 14px; }
+.lg-row .lg-field { flex: 1; }
+
+.lg-styles { display: flex; gap: 8px; }
+.lg-style-btn {
+  flex: 1; background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 9px;
+  padding: 10px 6px; font-size: 13px; color: #6B6B66; cursor: pointer;
+  font-family: inherit; transition: all .15s ease;
+}
+.lg-style-btn.active { border-color: #8a6bbf; color: #161616; background: #F5F1FB; }
+
+.lg-npcs { display: flex; flex-direction: column; gap: 10px; }
+.lg-npc-row {
+  display: flex; flex-direction: column; gap: 8px;
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 10px; padding: 12px;
+}
+.lg-npc-grid { display: flex; gap: 8px; }
+.lg-npc-grid .lg-input { flex: 1; }
+.lg-npc-persona { min-height: 62px; }
+.lg-npc-del {
+  align-self: flex-start; background: transparent; border: none; padding: 0;
+  font-size: 12px; color: #8A857C; cursor: pointer; font-family: inherit;
+}
+.lg-npc-del:hover { color: #c0562e; }
+.lg-add-npc {
+  align-self: flex-start; background: transparent; border: 1px dashed rgba(22,22,22,.24);
+  border-radius: 999px; padding: 7px 16px; font-size: 12.5px; color: #6B6B66;
+  cursor: pointer; font-family: inherit; transition: all .15s ease;
+}
+.lg-add-npc:hover { border-color: #8a6bbf; color: #161616; }
+
+.lg-actions { display: flex; gap: 10px; margin-top: 4px; }
+.lg-btn {
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 9px;
+  padding: 11px 20px; font-size: 14px; color: #6B6B66; cursor: pointer;
+  font-family: inherit; transition: all .15s ease;
+}
+.lg-btn.primary { flex: 1; background: #161616; color: #FAFAF7; border-color: #161616; }
+.lg-btn.primary:hover { opacity: .88; }
+.lg-btn.ghost:hover { background: rgba(22,22,22,.06); color: #161616; }
+.lg-btn.small { padding: 7px 14px; font-size: 12.5px; }
+.lg-btn.danger:hover { color: #c0562e; border-color: #c0562e; }
+.lg-btn:disabled { opacity: .5; cursor: not-allowed; }
+.lg-status { font-size: 12.5px; color: #8A857C; min-height: 18px; }
+
+/* ---------- 阶段三：游戏进行中 ---------- */
+.lg-game {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+}
+.lg-game[hidden] { display: none; }
+.lg-scenebar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 22px; border-bottom: 1px solid rgba(22,22,22,.08);
+  font-size: 12px; color: #8A857C; flex: none;
+}
+.lg-scene-hero {
+  font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
+  font-size: 14px; color: #161616;
+}
+.lg-scene-style {
+  margin-left: auto; border: 1px solid rgba(22,22,22,.14); border-radius: 999px;
+  padding: 2px 10px;
+}
+.lg-transcript {
+  flex: 1; overflow-y: auto; padding: 22px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.lg-narration {
+  font-size: 15px; line-height: 2.05; color: #26241F;
+  font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
+}
+.lg-para { margin: 0 0 12px; }
+.lg-para:last-child { margin-bottom: 0; }
+.lg-dialogue { margin: 0 0 12px; padding-left: 2px; }
+.lg-speaker { color: #6b4fa0; font-weight: 600; margin-right: 6px; }
+.lg-speaker::after { content: "："; color: #B9B2A4; }
+.lg-line { color: #161616; }
+.lg-typing { color: #B9B2A4; }
+.lg-error { color: #c0562e; font-size: 13.5px; }
+
+.lg-action-echo {
+  align-self: flex-end; max-width: 78%;
+  background: #EDEAE2; border-radius: 12px; padding: 10px 14px;
+  font-size: 14px; line-height: 1.8; color: #26241F;
+}
+.lg-action-tag {
+  display: block; font-size: 11px; color: #8A857C; margin-bottom: 3px;
+  letter-spacing: 1px;
+}
+
+.lg-input-row {
+  display: flex; gap: 10px; align-items: flex-end;
+  padding: 12px 22px 6px; border-top: 1px solid rgba(22,22,22,.08); flex: none;
+}
+.lg-action {
+  flex: 1; box-sizing: border-box; min-height: 48px; max-height: 140px;
+  background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 10px;
+  padding: 11px 13px; font-size: 16px; color: #161616;
+  font-family: inherit; line-height: 1.6; resize: none;
+}
+.lg-action:focus { outline: none; border-color: #8a6bbf; }
+.lg-send {
+  flex: none; background: #161616; color: #FAFAF7; border: none;
+  border-radius: 10px; padding: 13px 22px; font-size: 14px;
+  cursor: pointer; font-family: inherit; transition: opacity .15s ease;
+}
+.lg-send:hover:not(:disabled) { opacity: .88; }
+.lg-send:disabled { opacity: .5; cursor: not-allowed; }
+.lg-game-hint {
+  font-size: 11px; color: #B9B2A4; padding: 0 22px 12px; flex: none;
+}
+
+/* ---------- 移动端 ---------- */
+@media (max-width: 560px) {
+  .lg-header { padding: 12px 14px; }
+  .lg-lobby { padding: 18px 14px 30px; }
+  .lg-setup { padding: 16px 14px 28px; }
+  .lg-row { flex-direction: column; gap: 16px; }
+  .lg-transcript { padding: 16px 14px; }
+  .lg-narration { font-size: 14.5px; line-height: 1.98; }
+  .lg-input-row { padding: 10px 14px 6px; }
+  /* 输入框字号 <16px 时 iOS 聚焦会整页放大（与主对话输入框同一条规矩） */
+  .lg-action { font-size: 16px; }
+  .lg-save-card { flex-direction: column; align-items: stretch; }
+  .lg-save-ops { justify-content: flex-end; }
+  .lg-actions .lg-btn { min-height: 46px; }
+}
+
+
+/* ============================================================
+   首页分区层响应式：按容器宽度整体降列（4 → 2 → 1）
+   ------------------------------------------------------------
+   ★必须放文件末尾：base 的 .zone-deck 在「stage 1.5」段声明为 4 列，
+   这里靠「同选择器 + 更靠后」覆盖它，不靠 !important。
+   4 列时卡宽 =（可用宽 - 60）/ 4；窄于 ~1150 视口就掉到 250px 以下，
+   于是降到两列、并收窄 deck 免得两张卡拉满整屏。
+   ============================================================ */
+@media (max-width: 1150px) {
+  .zone-deck { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 640px; }
+}
+@media (max-width: 640px) {
+  .zone-deck { grid-template-columns: 1fr; max-width: 100%; }
 }

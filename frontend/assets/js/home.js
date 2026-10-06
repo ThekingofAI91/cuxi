@@ -373,11 +373,15 @@ if (homeIntro) {
 }
 document.querySelectorAll('#zoneDeck .zone-card').forEach((el) => {
   el.addEventListener('click', () => {
-    // 「争鸣」是玩法入口而非分区：直接进圆桌，跳过角色选择，
+    // 「争鸣」「传奇」是玩法入口而非分区：直接进各自的独立视图，跳过角色选择，
     // 也**不写 state.homeZone**——zone 是硬逻辑（检索策略 / prompt 分支 / 标不标来源），
     // 把玩法混进分区语义迟早出错。
     if (el.dataset.mode === 'roundtable') {
       openRoundtable();
+      return;
+    }
+    if (el.dataset.mode === 'legend') {
+      openLegend();
       return;
     }
     homeSelectZone(el.dataset.zone);

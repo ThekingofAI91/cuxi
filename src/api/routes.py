@@ -30,6 +30,18 @@ from framework.roundtable import (
     roundtable_pending_choice,
     stream_roundtable,
 )
+from framework.legend import MAX_ACTION_CHARS as LEGEND_MAX_ACTION_CHARS
+from framework.legend import stream_turn as legend_stream_turn
+from scenes.persona_chat.legend_store import (
+    MAX_NPCS as LEGEND_MAX_NPCS,
+    LegendSave,
+    delete_legend,
+    generate_legend_id,
+    list_legends,
+    load_legend,
+    save_legend,
+    validate_new_save,
+)
 from src.core.config import settings
 from src.core.state import AgentState
 from src.core.session_store import get_store as _get_session_store
@@ -2166,3 +2178,252 @@ async def persona_upload_document(
             status_code=500,
             detail=f"文档处理失败: {str(e)}",
         )
+
+
+# ============================================================
+# 传奇（剧情模式）
+# ============================================================
+# 与「争鸣」同级的一种玩法：用户给出世界观/主角/配角，然后自己扮演主角推进剧情，
+# 叙述与所有配角由同一个模型扮演（为什么是单模型而非多智能体，见 framework/legend.py）。
+#
+# 与自建角色的边界（用户明确要求「不进入其他对话体系」）：
+#   传奇存档是自包含的一坨 JSON（世界观 + 角色卡 + 剧情历史），
+#   既不写进 `data/persona_chat/custom/`，也不建 `custom_*` collection，
+#   更不会出现在首页「对话对象」列表里。删档即彻底消失。
+
+class LegendNPCIn(BaseModel):
+    """传奇里的一个配角（提交用）"""
+    name: str
+    role: str = ""      # 身份/定位
+    persona: str = ""   # 性格、口吻、与主角的关系
+
+
+class LegendCreateRequest(BaseModel):
+    """新建一局传奇"""
+    world: str                              # 世界观设定（必填）
+    protagonist_name: str                   # 主角名（必填）
+    protagonist_desc: str = ""              # 主角身份与设定
+    npcs: list[LegendNPCIn] = []            # 配角（0~4 个）
+    opening: str = ""                       # 开场情境（可空，让模型自己起头）
+    style: str = "classic"                  # 叙事风格：classic / light / dark
+
+
+class LegendActRequest(BaseModel):
+    """玩家的一次行动。action 留空 = 开局（模型自己起头）"""
+    action: str = ""
+    # 前端持有的最近历史，用于服务重启后恢复上下文（与 /persona/query 同样的思路）
+    history: list[dict] = []
+
+
+def _legend_sse_headers() -> dict:
+    return {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    }
+
+
+def _legend_event(payload: dict) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+@router.post("/persona/legend/create")
+async def persona_legend_create(http_request: Request, request: LegendCreateRequest):
+    """新建一局传奇：只落盘设定，不生成内容（开局在 act 里做）。
+
+    为什么创建与开局分开：设定校验失败的代价应该很低（一次 400），
+    而开局要调模型（数秒 + token）。先让用户确认设定通过了再花这笔钱。
+    """
+    client_ip = _client_ip(http_request)
+    npcs = [n.model_dump() for n in (request.npcs or [])]
+
+    ok, why = validate_new_save(
+        world=request.world,
+        protagonist_name=request.protagonist_name,
+        npcs=npcs,
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=why)
+
+    _check_rate(
+        (lambda u: f"user:{u['id']}" if u else client_ip)(get_current_user(http_request)),
+        per_minute=settings.rate_limit_per_minute,
+        per_day=settings.rate_limit_per_day,
+    )
+
+    # 输入侧内容安全：设定里的敏感内容同样要在进入模型前拦掉
+    for field_name, text in (("世界观", request.world),
+                             ("主角设定", request.protagonist_desc),
+                             ("开场情境", request.opening)):
+        if contains_sensitive(text):
+            raise HTTPException(status_code=400, detail=f"{field_name}包含不适宜的内容")
+    for n in npcs:
+        if contains_sensitive(n.get("persona", "")) or contains_sensitive(n.get("role", "")):
+            raise HTTPException(status_code=400, detail=f"配角「{n.get('name','')}」的设定包含不适宜的内容")
+
+    style = request.style if request.style in ("classic", "light", "dark") else "classic"
+    save = LegendSave(
+        id=generate_legend_id(request.protagonist_name),
+        title=request.protagonist_name.strip(),
+        world=request.world.strip(),
+        protagonist_name=request.protagonist_name.strip(),
+        protagonist_desc=(request.protagonist_desc or "").strip(),
+        npcs=[{
+            "name": n["name"].strip(),
+            "role": (n.get("role") or "").strip(),
+            "persona": (n.get("persona") or "").strip(),
+        } for n in npcs if (n.get("name") or "").strip()],
+        opening=(request.opening or "").strip(),
+        style=style,
+    )
+    save_legend(save)
+    get_logger("persona.legend").info(
+        "create ip=%s id=%s npcs=%d", client_ip, save.id, len(save.npcs))
+    return {
+        "id": save.id,
+        "title": save.title,
+        "protagonist": save.protagonist_name,
+        "npcs": [n["name"] for n in save.npcs],
+    }
+
+
+@router.post("/persona/legend/{legend_id}/act")
+async def persona_legend_act(http_request: Request, legend_id: str,
+                             request: LegendActRequest):
+    """推进一步剧情（SSE 流式）。
+
+    action 留空 = 开局。返回事件：start / token / end / error。
+
+    ★不检索、不标来源：传奇是虚构叙事，没有语料可查，也绝不能给出「出处」。
+    这跟「问道」区的硬逻辑正好相反，是这一模式的定义性特征。
+    """
+    rid = uuid.uuid4().hex[:12]
+    set_request_id(rid)
+    logger = get_logger("persona.legend")
+    client_ip = _client_ip(http_request)
+
+    save = load_legend(legend_id)
+    if save is None:
+        raise HTTPException(status_code=404, detail="存档不存在或已删除")
+
+    action = (request.action or "").strip()
+    if len(action) > LEGEND_MAX_ACTION_CHARS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"单次行动最多 {LEGEND_MAX_ACTION_CHARS} 字",
+        )
+    if contains_sensitive(action):
+        logger.info("blocked_sensitive ip=%s", client_ip)
+
+        async def _refusal():
+            yield _legend_event({"type": "error", "content": refusal_message()})
+            yield _legend_event({"type": "end", "legend_id": legend_id})
+        return StreamingResponse(_refusal(), media_type="text/event-stream",
+                                 headers=_legend_sse_headers())
+
+    _check_rate(
+        (lambda u: f"user:{u['id']}" if u else client_ip)(get_current_user(http_request)),
+        per_minute=settings.rate_limit_per_minute,
+        per_day=settings.rate_limit_per_day,
+    )
+
+    # 服务重启后前端可把最近历史回灌（存档里也有，这里以更长的为准）
+    if request.history and not save.turns:
+        save.turns = [
+            {"role": h.get("role"), "content": h.get("content") or "",
+             "ts": h.get("ts") or 0.0}
+            for h in request.history
+            if h.get("role") in ("user", "narrator") and (h.get("content") or "").strip()
+        ]
+
+    is_opening = not action
+    logger.info("act ip=%s id=%s opening=%s len=%d",
+                client_ip, legend_id, is_opening, len(action))
+
+    async def event_stream():
+        started = time.time()
+        yield _legend_event({
+            "type": "start",
+            "legend_id": save.id,
+            "title": save.title,
+            "protagonist": save.protagonist_name,
+            "npcs": [n["name"] for n in save.npcs],
+            "opening": is_opening,
+        })
+        buf: list[str] = []
+        try:
+            async for token in legend_stream_turn(save, None if is_opening else action):
+                buf.append(token)
+                yield _legend_event({"type": "token", "content": token})
+        except Exception as e:
+            logger.warning("stream_failed id=%s: %s", legend_id, e)
+            yield _legend_event({
+                "type": "error",
+                "content": "这一轮生成失败了，请重试（已写好的内容不会丢）。",
+            })
+            yield _legend_event({"type": "end", "legend_id": legend_id})
+            return
+
+        text = "".join(buf).strip()
+        if not text:
+            yield _legend_event({
+                "type": "error",
+                "content": "模型这一轮没有产出内容，请重试。",
+            })
+            yield _legend_event({"type": "end", "legend_id": legend_id})
+            return
+
+        text = sanitize_output(text)
+        ts = time.time()
+        # 只有真的生成了才写历史：开局那次不算一轮（它没有玩家的行动）
+        if not is_opening:
+            save.turns.append({"role": "user", "content": action, "ts": ts})
+        save.turns.append({"role": "narrator", "content": text, "ts": ts})
+        save_legend(save)
+
+        yield _legend_event({
+            "type": "end",
+            "legend_id": save.id,
+            "turns": save.turn_count(),
+            "chars": len(text),
+            "elapsed_ms": int((time.time() - started) * 1000),
+        })
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers=_legend_sse_headers())
+
+
+@router.get("/persona/legends")
+async def persona_legend_list():
+    """所有传奇存档的摘要（不含剧情全文），按最近更新倒序。"""
+    return {"legends": list_legends(), "max_npcs": LEGEND_MAX_NPCS}
+
+
+@router.get("/persona/legend/{legend_id}")
+async def persona_legend_get(legend_id: str):
+    """读取一局传奇的完整存档（用于续玩）。"""
+    save = load_legend(legend_id)
+    if save is None:
+        raise HTTPException(status_code=404, detail="存档不存在或已删除")
+    return {
+        "id": save.id,
+        "title": save.title,
+        "world": save.world,
+        "protagonist_name": save.protagonist_name,
+        "protagonist_desc": save.protagonist_desc,
+        "npcs": save.npcs,
+        "opening": save.opening,
+        "style": save.style,
+        "turns": save.turns,
+        "turn_count": save.turn_count(),
+        "created_at": save.created_at,
+        "updated_at": save.updated_at,
+    }
+
+
+@router.delete("/persona/legend/{legend_id}")
+async def persona_legend_delete(legend_id: str):
+    """删档。彻底删除——传奇不建 collection，没有别处残留。"""
+    if not delete_legend(legend_id):
+        raise HTTPException(status_code=404, detail="存档不存在或已删除")
+    return {"deleted": True, "id": legend_id}

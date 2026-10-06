@@ -14,7 +14,7 @@
 <meta property="og:title" content="促膝 · 隔空促膝，如面而谈">
 <meta property="og:description" content="与荣格、阿德勒、王阳明等历史智者对话。AI 仿真角色，内容仅供学习与参考。">
 <title>促膝 · 隔空促膝，如面而谈</title>
-<link rel="stylesheet" href="/assets/css/main.css?v=1790062621" />
+<link rel="stylesheet" href="/assets/css/main.css?v=1791273415" />
 <link rel="stylesheet" href="/assets/css/premium.css?v=1789462086" />
 </head>
 <body data-theme="original">
@@ -47,6 +47,10 @@
       <button class="zone-card zone-rt" data-mode="roundtable" type="button">
         <span class="zone-card-name">争鸣</span>
         <span class="zone-card-desc">让几位智者同桌而立，各执一词，彼此交锋</span>
+      </button>
+      <button class="zone-card zone-lg" data-mode="legend" type="button">
+        <span class="zone-card-name">传奇</span>
+        <span class="zone-card-desc">你写世界，你来演主角，故事由你往下推</span>
       </button>
     </div>
   </section>
@@ -219,6 +223,90 @@
         <button class="rt-ask-cancel" id="rtAskCancel" type="button">让主持人定</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- ===== 传奇（剧情模式）视图 ===== -->
+<div class="legend-view" id="legendView" hidden>
+  <div class="lg-header">
+    <div class="lg-title">传奇<span class="lg-subtitle">剧情模式</span></div>
+    <button class="lg-back" id="lgBackBtn" type="button">返回</button>
+  </div>
+
+  <!-- 阶段一：存档列表 -->
+  <div class="lg-lobby" id="lgLobby">
+    <div class="lg-intro">
+      <p class="lg-brand">促膝</p>
+      <p class="lg-tagline">世界由你设，主角由你演。</p>
+      <p class="lg-rule">你给出世界观、主角与配角；叙述和配角的言行交给 AI。
+        故事怎么走，由你替主角做决定。</p>
+    </div>
+    <div class="lg-saves" id="lgSaves"></div>
+    <button class="lg-new-btn" id="lgNewBtn" type="button">＋ 新建一局</button>
+  </div>
+
+  <!-- 阶段二：创建设定 -->
+  <div class="lg-setup" id="lgSetup" hidden>
+    <div class="lg-field">
+      <label>世界观设定<span class="lg-req">*</span></label>
+      <textarea class="lg-textarea" id="lgWorld" maxlength="2000"
+        placeholder="时代、地点、规则、氛围。例如：大唐末年，长安城暗流涌动，江湖与庙堂的界限早已模糊。城里有三股势力，谁都想要那卷失踪的账册。"></textarea>
+      <div class="lg-hint">这是整个故事的舞台。写清「什么可能发生、什么不可能」，AI 才不会乱来。</div>
+    </div>
+
+    <div class="lg-row">
+      <div class="lg-field">
+        <label>主角名字<span class="lg-req">*</span></label>
+        <input class="lg-input" id="lgHeroName" type="text" maxlength="20"
+          placeholder="如：李寻" />
+      </div>
+      <div class="lg-field">
+        <label>叙事风格</label>
+        <div class="lg-styles" id="lgStyles">
+          <button class="lg-style-btn active" data-style="classic" type="button">正剧</button>
+          <button class="lg-style-btn" data-style="light" type="button">轻松</button>
+          <button class="lg-style-btn" data-style="dark" type="button">肃杀</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="lg-field">
+      <label>主角身份与设定</label>
+      <textarea class="lg-textarea" id="lgHeroDesc" maxlength="600"
+        placeholder="你是谁、会什么、想要什么。例如：一个靠替人送信为生的落魄游侠，剑法一般，但记性极好，长安城一半的秘密都从信里经过。"></textarea>
+      <div class="lg-hint">这一栏是你要扮演的人。AI 会照着它来描写世界对你的反应，但不会替你说话或做决定。</div>
+    </div>
+
+    <div class="lg-field">
+      <label>配角（最多 <span id="lgMaxNpc">4</span> 位）</label>
+      <div class="lg-npcs" id="lgNpcs"></div>
+      <button class="lg-add-npc" id="lgAddNpcBtn" type="button">＋ 添加配角</button>
+      <div class="lg-hint">配角由 AI 扮演。给出名字 + 定位 + 性格，TA 才会像个活人而不是背景板。</div>
+    </div>
+
+    <div class="lg-field">
+      <label>开场情境（可选）</label>
+      <textarea class="lg-textarea" id="lgOpening" maxlength="400"
+        placeholder="留空则由 AI 自己起头。想指定开局就写，例如：我在酒肆里等一个不会来的人。"></textarea>
+    </div>
+
+    <div class="lg-actions">
+      <button class="lg-btn ghost" id="lgSetupCancelBtn" type="button">取消</button>
+      <button class="lg-btn primary" id="lgCreateBtn" type="button">开始故事</button>
+    </div>
+    <div class="lg-status" id="lgStatus"></div>
+  </div>
+
+  <!-- 阶段三：游戏进行中 -->
+  <div class="lg-game" id="lgGame" hidden>
+    <div class="lg-scenebar" id="lgSceneBar"></div>
+    <div class="lg-transcript" id="lgTranscript"></div>
+    <div class="lg-input-row">
+      <textarea class="lg-action" id="lgAction" rows="2" maxlength="1000"
+        placeholder="替主角做一个决定，或说一句话。例如：我把信推到苏娘面前，问她昨夜谁来过。"></textarea>
+      <button class="lg-send" id="lgSendBtn" type="button">行动</button>
+    </div>
+    <div class="lg-game-hint">回车发送，Shift+回车换行</div>
   </div>
 </div>
 
@@ -421,13 +509,14 @@
     <p class="setup-note">配置写在服务端 <code>data/user_config.json</code>（已加入 .gitignore）。也可以改用项目根目录的 .env，两者填一个即可。</p>
   </div>
 </div>
-<script src="/assets/js/core.js?v=1790166537"></script>
+<script src="/assets/js/core.js?v=1791272337"></script>
 <script src="/assets/js/storage.js?v=1789462086"></script>
-<script src="/assets/js/home.js?v=1790000932"></script>
+<script src="/assets/js/home.js?v=1791272337"></script>
 <script src="/assets/js/conversations.js?v=1789462086"></script>
 <script src="/assets/js/chat.js?v=1789978994"></script>
 <script src="/assets/js/create.js?v=1789462086"></script>
-<script src="/assets/js/roundtable.js?v=1790166537"></script>
+<script src="/assets/js/roundtable.js?v=1791272337"></script>
+  <script src="/assets/js/legend.js?v=1791273415"></script>
 <script src="/assets/js/feedback.js?v=1789462086"></script>
 <script src="/assets/js/auth.js?v=1789462086"></script>
 <script src="/assets/js/setup.js?v=1789462086"></script>

@@ -111,6 +111,32 @@ const rtSummary = document.getElementById('rtSummary');
 // 注：「争鸣」没有独立按钮（旧 roundtableBtn / introRoundtableBtn 已随首页分区层改造移除）——
 // 入口是首页第三张卡 .zone-card[data-mode=roundtable]，由 home.js 直接调 openRoundtable()。
 
+// 传奇（剧情模式）相关 DOM
+const legendView = document.getElementById('legendView');
+const lgBackBtn = document.getElementById('lgBackBtn');
+const lgLobby = document.getElementById('lgLobby');
+const lgSaves = document.getElementById('lgSaves');
+const lgNewBtn = document.getElementById('lgNewBtn');
+const lgSetup = document.getElementById('lgSetup');
+const lgWorld = document.getElementById('lgWorld');
+const lgHeroName = document.getElementById('lgHeroName');
+const lgHeroDesc = document.getElementById('lgHeroDesc');
+const lgMaxNpcEl = document.getElementById('lgMaxNpc');
+const lgNpcs = document.getElementById('lgNpcs');
+const lgAddNpcBtn = document.getElementById('lgAddNpcBtn');
+const lgOpening = document.getElementById('lgOpening');
+const lgStyles = document.getElementById('lgStyles');
+const lgSetupCancelBtn = document.getElementById('lgSetupCancelBtn');
+const lgCreateBtn = document.getElementById('lgCreateBtn');
+const lgStatus = document.getElementById('lgStatus');
+const lgGame = document.getElementById('lgGame');
+const lgSceneBar = document.getElementById('lgSceneBar');
+const lgTranscript = document.getElementById('lgTranscript');
+const lgAction = document.getElementById('lgAction');
+const lgSendBtn = document.getElementById('lgSendBtn');
+// 注：「传奇」同样没有独立按钮 —— 入口是首页第四张卡
+// .zone-card[data-mode=legend]，由 home.js 直接调 openLegend()。
+
 // ============================================================
 // 主题：按角色切换三种视觉风格（original / paper / noir）
 // ============================================================

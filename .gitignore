@@ -40,6 +40,8 @@ data/deleted_sessions.json
 data/persona_chat/custom/
 data/persona_chat/graphs/
 data/persona_chat/memory/
+# 传奇存档：用户运行期产生（世界观 + 角色卡 + 剧情历史），不属于源码
+data/persona_chat/legends/
 # 上传的原始文档
 data/raw/*
 
