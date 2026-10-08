@@ -14,7 +14,7 @@
 <meta property="og:title" content="促膝 · 隔空促膝，如面而谈">
 <meta property="og:description" content="与荣格、阿德勒、王阳明等历史智者对话。AI 仿真角色，内容仅供学习与参考。">
 <title>促膝 · 隔空促膝，如面而谈</title>
-<link rel="stylesheet" href="/assets/css/main.css?v=1791273415" />
+<link rel="stylesheet" href="/assets/css/main.css?v=1791290000" />
 <link rel="stylesheet" href="/assets/css/premium.css?v=1789462086" />
 </head>
 <body data-theme="original">
@@ -285,6 +285,24 @@
     </div>
 
     <div class="lg-field">
+      <label>状态栏（可选）</label>
+      <div class="lg-hint">定义好之后，AI 每轮结束会自己更新数值，游戏里常驻显示。
+        数值适合「能加减的量」（好感度、体力），词条适合「一个标记」（警觉、中毒）。</div>
+
+      <div class="lg-sfield-group">
+        <div class="lg-sfield-head">通用 —— 在场每个人物各有一份</div>
+        <div class="lg-sfields" id="lgStateFieldList"></div>
+        <button class="lg-add-npc" id="lgAddStateFieldBtn" type="button">＋ 添加通用词条</button>
+      </div>
+
+      <div class="lg-sfield-group">
+        <div class="lg-sfield-head">仅主角 —— 只有主角拥有</div>
+        <div class="lg-sfields" id="lgOnlyFieldList"></div>
+        <button class="lg-add-npc" id="lgAddOnlyFieldBtn" type="button">＋ 添加主角词条</button>
+      </div>
+    </div>
+
+    <div class="lg-field">
       <label>开场情境（可选）</label>
       <textarea class="lg-textarea" id="lgOpening" maxlength="400"
         placeholder="留空则由 AI 自己起头。想指定开局就写，例如：我在酒肆里等一个不会来的人。"></textarea>
@@ -300,6 +318,7 @@
   <!-- 阶段三：游戏进行中 -->
   <div class="lg-game" id="lgGame" hidden>
     <div class="lg-scenebar" id="lgSceneBar"></div>
+    <div class="lg-statebar" id="lgStateBar" hidden></div>
     <div class="lg-transcript" id="lgTranscript"></div>
     <div class="lg-input-row">
       <textarea class="lg-action" id="lgAction" rows="2" maxlength="1000"
@@ -516,7 +535,7 @@
 <script src="/assets/js/chat.js?v=1789978994"></script>
 <script src="/assets/js/create.js?v=1789462086"></script>
 <script src="/assets/js/roundtable.js?v=1791272337"></script>
-  <script src="/assets/js/legend.js?v=1791273415"></script>
+  <script src="/assets/js/legend.js?v=1791290000"></script>
 <script src="/assets/js/feedback.js?v=1789462086"></script>
 <script src="/assets/js/auth.js?v=1789462086"></script>
 <script src="/assets/js/setup.js?v=1789462086"></script>

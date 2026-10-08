@@ -31,14 +31,21 @@ from framework.roundtable import (
     stream_roundtable,
 )
 from framework.legend import MAX_ACTION_CHARS as LEGEND_MAX_ACTION_CHARS
+from framework.legend import StatePatchFilter as LegendStatePatchFilter
+from framework.legend import extract_state_patch as legend_extract_state_patch
 from framework.legend import stream_turn as legend_stream_turn
 from scenes.persona_chat.legend_store import (
     MAX_NPCS as LEGEND_MAX_NPCS,
+    MAX_ONLY_FIELDS as LEGEND_MAX_ONLY_FIELDS,
+    MAX_STATE_FIELDS as LEGEND_MAX_STATE_FIELDS,
     LegendSave,
+    apply_state_patch,
     delete_legend,
     generate_legend_id,
     list_legends,
     load_legend,
+    normalize_fields,
+    reset_state,
     save_legend,
     validate_new_save,
 )
@@ -2198,6 +2205,17 @@ class LegendNPCIn(BaseModel):
     persona: str = ""   # 性格、口吻、与主角的关系
 
 
+class LegendStateFieldIn(BaseModel):
+    """状态栏里的一个字段（作者定义的词条/属性）。
+
+    kind: number = 数值（好感度、体力…）；tag = 词条（「受伤」「警觉」…）。
+    """
+    name: str
+    kind: str = "number"
+    init: float | str | None = None
+    desc: str = ""
+
+
 class LegendCreateRequest(BaseModel):
     """新建一局传奇"""
     world: str                              # 世界观设定（必填）
@@ -2206,6 +2224,9 @@ class LegendCreateRequest(BaseModel):
     npcs: list[LegendNPCIn] = []            # 配角（0~4 个）
     opening: str = ""                       # 开场情境（可空，让模型自己起头）
     style: str = "classic"                  # 叙事风格：classic / light / dark
+    # 状态栏字段定义：通用（每个在场人物各一份）与仅主角
+    state_fields: list[LegendStateFieldIn] = []
+    only_fields: list[LegendStateFieldIn] = []
 
 
 class LegendActRequest(BaseModel):
@@ -2236,11 +2257,15 @@ async def persona_legend_create(http_request: Request, request: LegendCreateRequ
     """
     client_ip = _client_ip(http_request)
     npcs = [n.model_dump() for n in (request.npcs or [])]
+    raw_state_fields = [f.model_dump() for f in (request.state_fields or [])]
+    raw_only_fields = [f.model_dump() for f in (request.only_fields or [])]
 
     ok, why = validate_new_save(
         world=request.world,
         protagonist_name=request.protagonist_name,
         npcs=npcs,
+        state_fields=raw_state_fields,
+        only_fields=raw_only_fields,
     )
     if not ok:
         raise HTTPException(status_code=400, detail=why)
@@ -2260,6 +2285,10 @@ async def persona_legend_create(http_request: Request, request: LegendCreateRequ
     for n in npcs:
         if contains_sensitive(n.get("persona", "")) or contains_sensitive(n.get("role", "")):
             raise HTTPException(status_code=400, detail=f"配角「{n.get('name','')}」的设定包含不适宜的内容")
+    # 状态栏字段名与说明同样会进 prompt，一样要过
+    for f in raw_state_fields + raw_only_fields:
+        if contains_sensitive(str(f.get("name") or "")) or contains_sensitive(str(f.get("desc") or "")):
+            raise HTTPException(status_code=400, detail="状态栏词条里包含不适宜的内容")
 
     style = request.style if request.style in ("classic", "light", "dark") else "classic"
     save = LegendSave(
@@ -2275,7 +2304,11 @@ async def persona_legend_create(http_request: Request, request: LegendCreateRequ
         } for n in npcs if (n.get("name") or "").strip()],
         opening=(request.opening or "").strip(),
         style=style,
+        state_fields=normalize_fields(raw_state_fields)[:LEGEND_MAX_STATE_FIELDS],
+        only_fields=normalize_fields(raw_only_fields)[:LEGEND_MAX_ONLY_FIELDS],
     )
+    # 字段定义落定后把值初始化出来（含每个配角各一份）；之后模型只改值，不动定义
+    reset_state(save)
     save_legend(save)
     get_logger("persona.legend").info(
         "create ip=%s id=%s npcs=%d", client_ip, save.id, len(save.npcs))
@@ -2350,11 +2383,20 @@ async def persona_legend_act(http_request: Request, legend_id: str,
             "npcs": [n["name"] for n in save.npcs],
             "opening": is_opening,
         })
-        buf: list[str] = []
+        # ★状态块（<<<STATE … STATE>>>）在流式过程中就被摘掉，玩家看不到。
+        # 在流里摘而不是等流完再切：前端边收边渲染，晚切会让状态块在界面上闪一下。
+        sieve = LegendStatePatchFilter()
+        parts: list[str] = []
         try:
             async for token in legend_stream_turn(save, None if is_opening else action):
-                buf.append(token)
-                yield _legend_event({"type": "token", "content": token})
+                visible = sieve.feed(token)
+                if visible:
+                    parts.append(visible)
+                    yield _legend_event({"type": "token", "content": visible})
+            rest = sieve.finish()
+            if rest:
+                parts.append(rest)
+                yield _legend_event({"type": "token", "content": rest})
         except Exception as e:
             logger.warning("stream_failed id=%s: %s", legend_id, e)
             yield _legend_event({
@@ -2364,7 +2406,7 @@ async def persona_legend_act(http_request: Request, legend_id: str,
             yield _legend_event({"type": "end", "legend_id": legend_id})
             return
 
-        text = "".join(buf).strip()
+        text = sanitize_output("".join(parts).strip())
         if not text:
             yield _legend_event({
                 "type": "error",
@@ -2373,12 +2415,34 @@ async def persona_legend_act(http_request: Request, legend_id: str,
             yield _legend_event({"type": "end", "legend_id": legend_id})
             return
 
-        text = sanitize_output(text)
         ts = time.time()
         # 只有真的生成了才写历史：开局那次不算一轮（它没有玩家的行动）
         if not is_opening:
             save.turns.append({"role": "user", "content": action, "ts": ts})
         save.turns.append({"role": "narrator", "content": text, "ts": ts})
+
+        # 状态栏：正文带了块就用块（零额外开销）；没带就补一次极小的结构化抽取。
+        # 真链路实测模型不会每轮都吐块（跑三遍 1/3、3/3、1/3），不能靠 prompt 赌。
+        #
+        # ★这一步刻意放在 end 之前、而不是先 end 再补一个 state 事件：
+        # 那样前端会提前放开输入框，玩家在抽取还没落盘的窗口里发下一轮，
+        # 两轮各自 load→save 整份存档，后写的那份会把先写的状态覆盖掉。
+        # 代价是漏块的那一轮要多等约 6 秒（正文已经流式显示出来了，不影响阅读）。
+        changed: dict = {"state": {}, "only": {}}
+        source = ""
+        if save.has_state():
+            source = "block" if sieve.blocks else "extract"
+            try:
+                patch = sieve.patch()
+                if patch is None:
+                    patch = await legend_extract_state_patch(save, text)
+                if patch:
+                    changed = apply_state_patch(save, patch)
+                else:
+                    source = ""
+            except Exception as e:
+                logger.warning("state_patch_failed id=%s: %s", legend_id, e)
+                source = ""
         save_legend(save)
 
         yield _legend_event({
@@ -2387,6 +2451,11 @@ async def persona_legend_act(http_request: Request, legend_id: str,
             "turns": save.turn_count(),
             "chars": len(text),
             "elapsed_ms": int((time.time() - started) * 1000),
+            # 状态栏：整份当前值 + 这一轮真正改动的部分（前端据此刷新面板）
+            "state": save.state,
+            "only": save.only,
+            "changed": changed,
+            "state_source": source,   # block / extract / 空 —— 排查用
         })
 
     return StreamingResponse(event_stream(), media_type="text/event-stream",
@@ -2396,7 +2465,13 @@ async def persona_legend_act(http_request: Request, legend_id: str,
 @router.get("/persona/legends")
 async def persona_legend_list():
     """所有传奇存档的摘要（不含剧情全文），按最近更新倒序。"""
-    return {"legends": list_legends(), "max_npcs": LEGEND_MAX_NPCS}
+    return {
+        "legends": list_legends(),
+        "max_npcs": LEGEND_MAX_NPCS,
+        # 字段上限由服务端给，前端不写死——两边各写一份迟早会漂
+        "max_state_fields": LEGEND_MAX_STATE_FIELDS,
+        "max_only_fields": LEGEND_MAX_ONLY_FIELDS,
+    }
 
 
 @router.get("/persona/legend/{legend_id}")
@@ -2416,6 +2491,11 @@ async def persona_legend_get(legend_id: str):
         "style": save.style,
         "turns": save.turns,
         "turn_count": save.turn_count(),
+        # 状态栏：字段定义（作者定）与当前值（模型改）
+        "state_fields": save.state_fields,
+        "only_fields": save.only_fields,
+        "state": save.state,
+        "only": save.only,
         "created_at": save.created_at,
         "updated_at": save.updated_at,
     }

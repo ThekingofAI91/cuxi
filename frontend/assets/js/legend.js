@@ -12,20 +12,28 @@
 // 后端契约（src/api/routes.py 末尾「传奇」段）：
 //   POST /persona/legend/create      → {id, title, protagonist, npcs}
 //   POST /persona/legend/{id}/act   → SSE: start / token / end / error
-//   GET  /persona/legends           → {legends:[...], max_npcs}
-//   GET  /persona/legend/{id}       → 完整存档（续玩用）
+//   GET  /persona/legends           → {legends:[...], max_npcs, max_state_fields, max_only_fields}
+//   GET  /persona/legend/{id}       → 完整存档（续玩用，含 state_fields/only_fields/state/only）
 //   DELETE /persona/legend/{id}     → 删档
+//
+// 状态栏（作者定字段，AI 每轮更新）：
+//   state_fields / state —— 通用，**在场每个人物各有一份**
+//   only_fields  / only  —— 仅主角
+//   每轮 end 事件带回最新的 state/only 与这一轮的 changed，前端据此刷新面板。
 // ============================================================
 
 const lgState = {
   view: 'lobby',        // lobby | setup | game
   saves: [],            // 存档摘要列表
   maxNpcs: 4,
+  maxStateFields: 8,    // 服务端下发的上限，前端不写死
+  maxOnlyFields: 6,
   style: 'classic',
   save: null,           // 当前局的完整存档
   loading: false,       // 正在生成（禁用输入）
   streamText: '',       // 本轮流式累积的叙述
   _streamEl: null,      // 正在流式渲染的容器
+  changed: null,        // 这一轮真正变化的状态值（用来高亮）
 };
 
 // 叙事风格的中文名（提交给后端的是 key）
@@ -70,6 +78,9 @@ async function loadLegendSaves() {
       lgState.maxNpcs = d.max_npcs;
       if (lgMaxNpcEl) lgMaxNpcEl.textContent = String(d.max_npcs);
     }
+    // 状态栏字段上限也由服务端给（两边各写一份迟早会漂）
+    if (d.max_state_fields) lgState.maxStateFields = d.max_state_fields;
+    if (d.max_only_fields) lgState.maxOnlyFields = d.max_only_fields;
   } catch (e) {
     lgState.saves = [];
   }
@@ -137,10 +148,86 @@ function openLegendSetup() {
   lgOpening.value = '';
   lgNpcs.innerHTML = '';
   _lgAddNpcRow();   // 默认给一个配角位，省得用户找不到入口
+  _lgClearFields();
   _lgSetStyle('classic');
   if (lgStatus) lgStatus.textContent = '';
   _lgShowStage('setup');
   lgWorld.focus();
+}
+
+// ---------- 状态栏字段（作者定义） ----------
+
+function _lgClearFields() {
+  if (lgStateFieldList) lgStateFieldList.innerHTML = '';
+  if (lgOnlyFieldList) lgOnlyFieldList.innerHTML = '';
+}
+
+// 字段名的合法形态，与后端 legend_store._FIELD_NAME_RE 对齐。
+// 名字会成为 AI 输出 JSON 里的 key，带空格/引号会把补丁解析带歪。
+const LG_FIELD_NAME_BAD = /[\s"'`:{}\[\],，、]/;
+
+function _lgAddFieldRow(container, max, seed) {
+  if (!container) return;
+  if (container.querySelectorAll('.lg-sfield-row').length >= max) {
+    toast(`最多 ${max} 条（状态栏是给一眼扫的，太多就没人看了）`);
+    return;
+  }
+  const row = document.createElement('div');
+  row.className = 'lg-sfield-row';
+  row.innerHTML = `
+    <div class="lg-sfield-grid">
+      <input class="lg-input lg-sfield-name" type="text" maxlength="12"
+        placeholder="名称（如：好感度）" />
+      <select class="lg-input lg-sfield-kind">
+        <option value="number">数值</option>
+        <option value="tag">词条</option>
+      </select>
+      <input class="lg-input lg-sfield-init" type="text" maxlength="24" placeholder="初值" />
+    </div>
+    <button class="lg-npc-del" type="button">移除此词条</button>`;
+
+  const nameEl = row.querySelector('.lg-sfield-name');
+  const kindEl = row.querySelector('.lg-sfield-kind');
+  const initEl = row.querySelector('.lg-sfield-init');
+
+  // 类型决定初值长什么样：数值给 0，词条留空（提示一个例子）
+  const syncInit = () => {
+    const isNum = kindEl.value === 'number';
+    initEl.placeholder = isNum ? '初值（如：0）' : '初值（如：中立）';
+    if (!initEl.value) initEl.value = isNum ? '0' : '';
+  };
+  kindEl.addEventListener('change', syncInit);
+
+  if (seed) {
+    nameEl.value = seed.name || '';
+    kindEl.value = seed.kind || 'number';
+    initEl.value = (seed.init === undefined || seed.init === null) ? '' : String(seed.init);
+    syncInit();
+  } else {
+    syncInit();
+  }
+  row.querySelector('.lg-npc-del').addEventListener('click', () => row.remove());
+  container.appendChild(row);
+}
+
+function _lgCollectFields(container) {
+  if (!container) return [];
+  return Array.from(container.querySelectorAll('.lg-sfield-row')).map((row) => {
+    const kind = row.querySelector('.lg-sfield-kind').value;
+    const raw = (row.querySelector('.lg-sfield-init').value || '').trim();
+    let init;
+    if (kind === 'number') {
+      const n = Number(raw);
+      init = (raw === '' || !Number.isFinite(n)) ? 0 : n;
+    } else {
+      init = raw;
+    }
+    return {
+      name: (row.querySelector('.lg-sfield-name').value || '').trim(),
+      kind,
+      init,
+    };
+  }).filter((f) => f.name);
 }
 
 function _lgSetStyle(style) {
@@ -183,6 +270,8 @@ async function createLegend() {
   const world = (lgWorld.value || '').trim();
   const heroName = (lgHeroName.value || '').trim();
   const npcs = _lgCollectNpcs();
+  const stateFields = _lgCollectFields(lgStateFieldList);
+  const onlyFields = _lgCollectFields(lgOnlyFieldList);
 
   // 前端先做一遍明显错误的提示（后端的校验才是权威，这里只为省一次往返）
   if (!world) { toast('请填写世界观设定'); lgWorld.focus(); return; }
@@ -191,6 +280,12 @@ async function createLegend() {
   if (npcs.some((n) => n.name === heroName)) { toast('配角名字不能与主角相同'); return; }
   const names = npcs.map((n) => n.name);
   if (new Set(names).size !== names.length) { toast('配角名字有重复'); return; }
+  const badField = stateFields.concat(onlyFields).find((f) => LG_FIELD_NAME_BAD.test(f.name));
+  if (badField) { toast(`词条名「${badField.name}」不能带空格或标点`); return; }
+  for (const [label, list] of [['通用词条', stateFields], ['主角词条', onlyFields]]) {
+    const fs = list.map((f) => f.name);
+    if (new Set(fs).size !== fs.length) { toast(`${label}里有重名`); return; }
+  }
 
   lgCreateBtn.disabled = true;
   if (lgStatus) lgStatus.textContent = '正在开篇……';
@@ -205,6 +300,8 @@ async function createLegend() {
         npcs,
         opening: (lgOpening.value || '').trim(),
         style: lgState.style,
+        state_fields: stateFields,
+        only_fields: onlyFields,
       }),
     });
     const d = await r.json().catch(() => ({}));
@@ -264,6 +361,78 @@ function _lgEnterGame() {
   }
   _lgSetBusy(false);
   if (lgAction) lgAction.value = '';
+  lgState.changed = null;      // 换局/续玩时不残留上一局的高亮
+  _lgRenderStateBar();
+}
+
+// ---------- 状态栏渲染 ----------
+
+// 在场人物：主角在前，其后是各配角（与后端 character_names_of 同一口径）
+function _lgCharacterNames(s) {
+  const out = [];
+  const push = (n) => {
+    const t = String(n || '').trim();
+    if (t && out.indexOf(t) < 0) out.push(t);
+  };
+  push(s && s.protagonist_name);
+  ((s && s.npcs) || []).forEach((n) => push(n && n.name));
+  return out;
+}
+
+// 取一个字段的显示值；值缺失时回落到定义里的初值（与后端 _value_of 同一口径）
+function _lgFieldValue(values, field) {
+  const v = values ? values[field.name] : undefined;
+  if (v === undefined || v === null) {
+    return (field.init === undefined || field.init === null) ? '' : String(field.init);
+  }
+  if (field.kind === 'number') {
+    const n = Number(v);
+    return Number.isFinite(n) ? String(n) : String(v);
+  }
+  return String(v);
+}
+
+function _lgRenderStateBar() {
+  if (!lgStateBar) return;
+  const s = lgState.save;
+  const common = (s && s.state_fields) || [];
+  const only = (s && s.only_fields) || [];
+  if (!s || (!common.length && !only.length)) {
+    lgStateBar.hidden = true;
+    lgStateBar.innerHTML = '';
+    return;
+  }
+  const changed = lgState.changed || { state: {}, only: {} };
+  const hitState = (who, name) => !!(changed.state && changed.state[who]
+    && changed.state[who][name] !== undefined);
+  const hitOnly = (name) => !!(changed.only && changed.only[name] !== undefined);
+
+  const rows = [];
+  if (common.length) {
+    const chars = _lgCharacterNames(s).map((who) => {
+      const vals = (s.state || {})[who] || {};
+      const items = common.map((f) => {
+        const cls = hitState(who, f.name) ? ' is-changed' : '';
+        return `<span class="lg-sb-item${cls}">${escapeHtml(f.name)}` +
+               `<b>${escapeHtml(_lgFieldValue(vals, f))}</b></span>`;
+      }).join('');
+      const heroCls = who === s.protagonist_name ? ' is-hero' : '';
+      return `<span class="lg-sb-char"><span class="lg-sb-name${heroCls}">` +
+             `${escapeHtml(who)}</span>${items}</span>`;
+    }).join('');
+    rows.push(`<div class="lg-sb-row"><span class="lg-sb-label">人物</span>` +
+              `<span class="lg-sb-chars">${chars}</span></div>`);
+  }
+  if (only.length) {
+    const items = only.map((f) => {
+      const cls = hitOnly(f.name) ? ' is-changed' : '';
+      return `<span class="lg-sb-item${cls}">${escapeHtml(f.name)}` +
+             `<b>${escapeHtml(_lgFieldValue(s.only, f))}</b></span>`;
+    }).join('');
+    rows.push(`<div class="lg-sb-row"><span class="lg-sb-label">主角</span>${items}</div>`);
+  }
+  lgStateBar.innerHTML = rows.join('');
+  lgStateBar.hidden = false;
 }
 
 function _lgRenderHistory() {
@@ -405,6 +574,11 @@ function _lgHandleEvent(data, holder) {
     if (data.legend_id && lgState.save && lgState.save.id === data.legend_id) {
       // 后端已落盘，本地同步轮数以保持场景栏与列表一致
       lgState.save.turn_count = data.turns || lgState.save.turn_count;
+      // 状态栏：后端带回整份最新值 + 这一轮真正改过的部分
+      if (data.state) lgState.save.state = data.state;
+      if (data.only) lgState.save.only = data.only;
+      lgState.changed = data.changed || null;
+      _lgRenderStateBar();
     }
     return;
   }
@@ -440,6 +614,14 @@ if (lgBackBtn) {
 }
 if (lgNewBtn) lgNewBtn.addEventListener('click', openLegendSetup);
 if (lgAddNpcBtn) lgAddNpcBtn.addEventListener('click', _lgAddNpcRow);
+if (lgAddStateFieldBtn) {
+  lgAddStateFieldBtn.addEventListener('click',
+    () => _lgAddFieldRow(lgStateFieldList, lgState.maxStateFields));
+}
+if (lgAddOnlyFieldBtn) {
+  lgAddOnlyFieldBtn.addEventListener('click',
+    () => _lgAddFieldRow(lgOnlyFieldList, lgState.maxOnlyFields));
+}
 if (lgCreateBtn) lgCreateBtn.addEventListener('click', createLegend);
 if (lgSetupCancelBtn) {
   lgSetupCancelBtn.addEventListener('click', () => {
