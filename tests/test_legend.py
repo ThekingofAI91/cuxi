@@ -204,6 +204,18 @@ def test_system_prompt_states_no_retrieval():
     assert "不标注任何来源" in p
 
 
+def test_system_prompt_states_three_way_text_contract():
+    """★三类内容的文面契约（说话 / 神情与动作 / 环境与背景）。
+
+    前端 legend.js 的 _lgRenderNarration 按同一份契约着色（对话行 / 行内全角括号 /
+    其余正文），所以这三句必须真的在 prompt 里；改一边就要改两边。
+    """
+    p = lg.build_system_prompt(_new_save())
+    assert "**配角名**：台词内容" in p     # ① 人物说的话：独立成行
+    assert "全角括号" in p                 # ② 人物的神情与动作：行内括号
+    assert "不加任何标记" in p             # ③ 环境、气氛、背景交代：默认正文
+
+
 def test_system_prompt_handles_no_npcs():
     save = _new_save(npcs=[])
     p = lg.build_system_prompt(save)

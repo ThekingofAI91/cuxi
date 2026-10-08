@@ -2868,15 +2868,29 @@ html.setup-open, html.setup-open body { overflow: hidden; }
   display: flex; flex-direction: column; gap: 16px;
 }
 .lg-narration {
-  font-size: 15px; line-height: 2.05; color: #26241F;
+  font-size: 15px; line-height: 2.05; color: #33302A;
   font-family: "Noto Serif SC", "Songti SC", "SimSun", serif;
 }
+/* 一、环境与背景叙述：默认正文，柔墨。量最大，所以压一档对比，别抢戏。 */
 .lg-para { margin: 0 0 12px; }
 .lg-para:last-child { margin-bottom: 0; }
-.lg-dialogue { margin: 0 0 12px; padding-left: 2px; }
+
+/* 二、人物的神情与动作：赭褐 + 略小一档。既区别于环境，也不与台词的浓墨抢。 */
+.lg-act { color: #7C6446; font-size: 0.95em; }
+
+/* 三、人物说的话：独立成行 + 左侧细线，对话块一眼可辨；台词本体用浓墨。 */
+.lg-dialogue {
+  margin: 0 0 12px; padding: 1px 0 1px 12px;
+  border-left: 2px solid #DCD3C0;
+}
+.lg-dialogue:last-child { margin-bottom: 0; }
 .lg-speaker { color: #6b4fa0; font-weight: 600; margin-right: 6px; }
 .lg-speaker::after { content: "："; color: #B9B2A4; }
-.lg-line { color: #161616; }
+.lg-line { color: #14120F; }
+
+/* 行内引号里的台词本体：与对话行同色系 */
+.lg-quote { color: #14120F; }
+
 .lg-typing { color: #B9B2A4; }
 .lg-error { color: #c0562e; font-size: 13.5px; }
 

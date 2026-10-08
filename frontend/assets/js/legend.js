@@ -455,31 +455,49 @@ function _lgAppendAction(text) {
   _lgScroll();
 }
 
-// 叙述渲染：把 `**名字**：台词` 的行单独高亮，其余按段落输出。
-// 这个格式是 framework/legend.py 的 system prompt 里约定死的，改一边要改两边。
+// 行内切分：把一段正文里的「神情/动作」与「引号里的台词」各切成一个 span，
+// 其余原样。三类内容分开着色，判据见 _lgRenderNarration 顶部说明。
+function _lgInline(raw) {
+  const s = String(raw || '');
+  // 只匹配**成对闭合**的片段：不闭合就原样输出（宁可少着色，也不要吃掉正文）。
+  // 引号要同时认全角与半角：真链路里模型多用半角 "…"（不是 “…”）。
+  const re = /（[^（）]*）|「[^「」]*」|“[^“”]*”|"[^"]*"|‘[^‘’]*’/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = re.exec(s)) !== null) {
+    if (m.index > last) out += escapeHtml(s.slice(last, m.index));
+    const seg = m[0];
+    const cls = seg.charAt(0) === '（' ? 'lg-act' : 'lg-quote';
+    out += `<span class="${cls}">${escapeHtml(seg.slice(1, -1))}</span>`;
+    last = m.index + seg.length;
+  }
+  out += escapeHtml(s.slice(last));
+  return out;
+}
+
+// 叙述渲染：一轮叙述按三类内容分开着色。
+// 契约写在 framework/legend.py 的 system prompt 里，改一边要改两边：
+//   人物说的话      `**名字**：台词` 独立成行（另有行内引号）
+//   人物神情与动作  行内全角括号（…）
+//   环境与背景      其余正文，不加标记
+//
+// ★一行 = 一个段落。以前是把连续几行 join('') 合成一个 <p>，那会把模型写的
+//   「\n\n」段间隔吃掉、几段黏成一段（真存档里每段都是一行），所以改成逐行成段。
 function _lgRenderNarration(text) {
   const lines = String(text || '').split(/\n+/);
   let html = '';
-  let para = [];
-  const flushPara = () => {
-    if (para.length) {
-      html += `<p class="lg-para">${escapeHtml(para.join(''))}</p>`;
-      para = [];
-    }
-  };
   lines.forEach((raw) => {
     const line = raw.trim();
-    if (!line) { flushPara(); return; }
-    const m = line.match(/^\*\*(.+?)\*\*\s*[：:]\s*(.*)$/);
+    if (!line) return;
+    const m = line.match(/^\*\*(.+?)\*\*\s*[：:]\s*([\s\S]*)$/);
     if (m) {
-      flushPara();
       html += `<div class="lg-dialogue"><span class="lg-speaker">${escapeHtml(m[1])}</span>` +
-              `<span class="lg-line">${escapeHtml(m[2])}</span></div>`;
+              `<span class="lg-line">${_lgInline(m[2])}</span></div>`;
     } else {
-      para.push(line);
+      html += `<p class="lg-para">${_lgInline(line)}</p>`;
     }
   });
-  flushPara();
   return html || `<p class="lg-para">${escapeHtml(text || '')}</p>`;
 }
 
