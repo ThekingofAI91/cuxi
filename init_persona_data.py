@@ -323,7 +323,8 @@ def _sniff_mojibake(elements: list) -> float:
 
 def build_chunks(character, files: list[Path], allow_ocr: bool = False,
                  use_vision: bool = False,
-                 vision_only: bool = False) -> tuple[list, dict, list[tuple[str, int]]]:
+                 vision_only: bool = False,
+                 vision_file: str = "") -> tuple[list, dict, list[tuple[str, int]]]:
     """把语料文件解析分块。返回 (chunks, 统计, [(需要 OCR 的文件, 页数)])
 
     vision_only=True 时只跑多模态转录（落缓存），跳过常规解析与后续入库。
@@ -354,6 +355,15 @@ def build_chunks(character, files: list[Path], allow_ocr: bool = False,
             need, why = needs_vision(f)
             if need:
                 vision_targets.append((f, why))
+        # --vision-file：只转录文件名里含该串的目标。
+        # 用途：把「一本一条」的长任务拆成多条**并发进程**。
+        # 为什么并发安全：--vision-only 在取 Chroma client 之前就早返回（见下），
+        # 各进程只写自己的缓存目录，互不冲突。
+        if vision_file:
+            matched = [(f, w) for f, w in vision_targets if vision_file in f.name]
+            print(f"  --vision-file={vision_file!r} → 命中 {len(matched)} 本"
+                  f"（本次共 {len(vision_targets)} 本多模态目标）")
+            vision_targets = matched
         if vision_targets:
             total_pages = 0
             print(f"  多模态转录目标 {len(vision_targets)} 个:")
@@ -450,7 +460,8 @@ def _client():
 
 
 def load_character_data(character_id: str, dry_run: bool = False, allow_ocr: bool = False,
-                        use_vision: bool = False, vision_only: bool = False) -> None:
+                        use_vision: bool = False, vision_only: bool = False,
+                        vision_file: str = "") -> None:
     """加载指定角色的数据到 ChromaDB"""
 
     character = persona_chat_config.characters.get(character_id)
@@ -504,7 +515,7 @@ def load_character_data(character_id: str, dry_run: bool = False, allow_ocr: boo
     print(f"\n  解析 + 分块中...")
     all_chunks, stats, needs_ocr = build_chunks(
         character, files, allow_ocr=allow_ocr, use_vision=use_vision,
-        vision_only=vision_only)
+        vision_only=vision_only, vision_file=vision_file)
     v_stats = stats.get("vision")
     print(f"  完成: 常规成功 {stats['ok']} / 失败 {stats['failed']}"
           + (f" / 多模态成功 {v_stats['vision_files']} 本" if v_stats else "")
@@ -670,6 +681,11 @@ def main():
                          "先跑这个（纯网络 IO，随时可断可断可续），"
                          "转录齐了再跑一次完整入库，那时全部命中缓存。"
                          "本开关下绝不触碰 collection")
+    ap.add_argument("--vision-file", default="",
+                    help="只转录**文件名里含该串**的多模态目标（配合 --vision-only）。"
+                         "用途是把「一本一条」的长任务拆成多条并发进程："
+                         "--vision-only 不建 Chroma client、各进程只写自己的缓存目录，"
+                         "所以同时跑多个进程互不冲突，墙钟由最长的那本决定")
     ap.add_argument("--retag-source-type", action="store_true",
                     help="只按现有 source 重算 source_type，不重算向量")
     args = ap.parse_args()
@@ -707,7 +723,8 @@ def main():
     for character_id in targets:
         load_character_data(character_id, dry_run=args.dry_run,
                             allow_ocr=not args.no_ocr, use_vision=args.vision,
-                            vision_only=args.vision_only)
+                            vision_only=args.vision_only,
+                            vision_file=args.vision_file)
 
     print(f"\n{'=' * 72}")
     if args.dry_run:
