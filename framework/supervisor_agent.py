@@ -637,9 +637,12 @@ async def run_supervisor_agent(
 
         if not answer:
             # 上游持续空响应：绝不回退"无资料直答"——那会丢掉本轮全部检索资料，
-            # 给出看似有据、实则凭空的回答，比如实报错更糟。此刻尚未推过任何 token，
-            # 直接抛是安全的。
-            raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG)
+            # 给出看似有据、实则凭空的回答，比如实报错更糟（凭空回答会被写进会话
+            # 历史、污染后续轮次，而报错是干净的：不落库、不写缓存、可重试）。
+            # 抛错时 answer 为空 → 必然一个字都没推给用户，是安全的。
+            raise LLMEmptyResponseError(
+                _EMPTY_UPSTREAM_MSG, docs=sink.get("docs") or []
+            )
 
         route_history.append("supervisor")
         if used_tool:
@@ -657,7 +660,10 @@ async def run_supervisor_agent(
         raise
     except Exception as e:
         # 工具化失败不能拖垮回答：sink 里的资料是这一轮已经花掉的检索成本，
-        # 异常时不能丢——带着它抛出去，routes 层按错误处理，但资料可用于排查。
+        # 挂到异常上带出去（routes 层会落一条日志），否则 sink 随栈销毁、
+        # 这批资料连排查都用不上。用户侧仍只看到 error 事件，不推资料内容。
         print(f"[Supervisor Agent] 编排失败: {e}")
         route_history.append("supervisor")
-        raise LLMEmptyResponseError(_EMPTY_UPSTREAM_MSG) from e
+        raise LLMEmptyResponseError(
+            _EMPTY_UPSTREAM_MSG, docs=sink.get("docs") or []
+        ) from e

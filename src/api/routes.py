@@ -1757,6 +1757,16 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
 
         except Exception as e:
             logger.exception("query_error ip=%s char=%s", client_ip, character_id)
+            # LLMEmptyResponseError 会把本轮已花掉的检索结果挂在自己身上带出来
+            # （sink 是 supervisor 的局部变量，不挂就随栈销毁）。这里落一条日志，
+            # 让"资料可用于排查"真的成立——用户侧仍然只收到 error 事件。
+            _carried = getattr(e, "docs", None) or []
+            if _carried:
+                logger.warning(
+                    "query_error 带出本轮检索 %d 条，来源=%s",
+                    len(_carried),
+                    [(d.metadata or {}).get("source", "?") for d in _carried[:3]],
+                )
             try:
                 get_monitor().record(
                     request_id=rid,

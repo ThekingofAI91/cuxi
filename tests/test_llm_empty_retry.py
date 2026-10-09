@@ -187,3 +187,80 @@ def test_supervisor_agent_fails_on_whitespace_only_output(monkeypatch):
     _patch_silent_llm(monkeypatch, payload="   \n\n")
     with pytest.raises(LLMEmptyResponseError):
         asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
+
+
+# ============================================================
+# 失败时带出本轮已花掉的检索资料（供排查，不推给用户）
+# ============================================================
+
+class ToolCallingThenSilentLLM:
+    """第 1 轮请求一次 search_library（让资料进入 sink），之后整轮沉默。
+
+    用来逼出"空手但有资料"这条路径——它才是兜底重生成 + 抛错的分支。
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def bind_tools(self, tools):
+        return self
+
+    def astream(self, messages):
+        idx = self.calls
+        self.calls += 1
+
+        async def _gen():
+            if idx == 0:
+                yield SimpleNamespace(
+                    content="",
+                    tool_call_chunks=[{
+                        "index": 0,
+                        "name": "search_library",
+                        "args": '{"query": "格物致知"}',
+                        "id": "call_1",
+                    }],
+                )
+
+        return _gen()
+
+
+async def _empty_direct(*args, **kwargs):
+    """兜底重生成同样空 → 模拟上游持续空响应。"""
+    return ""
+
+
+def test_failure_carries_retrieved_docs_for_troubleshooting(monkeypatch):
+    """空手但有资料：抛错时必须把 sink 里的资料挂到异常上带出来。
+
+    否则 sink 随栈销毁，异常里只剩一句 message——「资料可用于排查」
+    就成了一纸空承诺（注释与代码不一致，2026-10-08 修正）。
+    """
+    from langchain_core.documents import Document
+
+    docs = [
+        Document(page_content="格物致知者，致吾心之良知于事事物物也。",
+                 metadata={"source": "传习录.pdf", "heading": "答顾东桥书"}),
+        Document(page_content="心外无物，心外无理。",
+                 metadata={"source": "王阳明全集.pdf", "heading": "与王纯甫书"}),
+    ]
+
+    async def _fake_retrieve(query, history=None, light_retrieval=False,
+                             skip_retrieval=False):
+        return docs, False, ""
+
+    monkeypatch.setattr(sup_agent, "get_chat_llm", lambda **kw: ToolCallingThenSilentLLM())
+    monkeypatch.setattr(sup_agent, "retrieve_documents", _fake_retrieve)
+    monkeypatch.setattr(rt, "_generate_direct_response", _empty_direct)
+
+    with pytest.raises(LLMEmptyResponseError) as ei:
+        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
+
+    assert len(ei.value.docs) == 2
+    assert ei.value.docs[0].metadata["source"] == "传习录.pdf"
+
+
+def test_empty_response_error_defaults_to_no_docs():
+    """不带 docs 构造（旧调用点/直接 raise）仍可用，docs 为空列表而非 None。"""
+    err = LLMEmptyResponseError("上游空了")
+    assert err.docs == []
+    assert "上游空了" in str(err)
