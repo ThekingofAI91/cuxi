@@ -25,7 +25,15 @@ output/
 项目日记归档/
 GUIDE.md
 DEPLOY.md
-docs/
+docs/*
+# 例外：README 要引用的截图随仓库走，只白名单这几个文件。
+# 注意 docs/images/setup-*.png 曾在开源清洗时按「露出服务器信息」清出全部历史，别再放回来。
+!docs/images/
+docs/images/*
+!docs/images/home.png
+!docs/images/chat-rigorous.png
+!docs/images/chat-casual.png
+!docs/images/roundtable.png
 scripts/warmup/
 
 # ============================================================

@@ -8,16 +8,9 @@
 
 ## 截图
 
-> 以下截图需自行准备并放入 `docs/images/`：
->
-> - `home.png` — 首页人物轮播
-> - `chat-rigorous.png` — 严谨区对话（荣格，带来源标注）
-> - `chat-casual.png` — 轻松区对话（峰哥，沉浸模式）
-> - `roundtable.png` — 圆桌辩论进行中
+![首页：选择一位对话者](docs/images/home.png)
 
-![首页](docs/images/home.png)
-
-![严谨对话](docs/images/chat-rigorous.png)
+![严谨区对话：荣格——正文带引用编号，展开「引用出处」可逐条查证来源](docs/images/chat-rigorous.png)
 
 ---
 
