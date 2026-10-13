@@ -45,7 +45,7 @@ _current_scene_config = contextvars.ContextVar("scene_config", default=None)
 # 上游连续空响应（首 token 超时 + 整次流空，重试全部耗尽）时的对外话术。
 # 不再回退到「无资料直答」：那会丢掉本轮检索到的全部资料，给出看似有据、
 # 实则凭空的回答，比如实报错更糟。routes.event_stream 会把它包成
-# type:'error' 事件推给前端（抛出时保证尚未向用户推送过任何 token）。
+# type error 事件推给前端（抛出时保证尚未向用户推送过任何 token）
 _EMPTY_UPSTREAM_MSG = "模型服务暂时没有返回内容，请稍后重试"
 
 # 对话历史存储：session_id -> [(user_query, assistant_answer), ...]
