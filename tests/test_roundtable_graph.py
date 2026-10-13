@@ -122,7 +122,7 @@ def _install(monkeypatch, st, *, quota=None, max_calls=None, summary_enabled=Tru
 def _no_retrieval(monkeypatch):
     """发言前不做真实检索：单测不碰 ChromaDB / Embedder。"""
 
-    async def _fake(collection_name, query, top_k=4):
+    async def _fake(collection_name, query):
         return ""
 
     monkeypatch.setattr(rt, "_retrieve_for_speaker", _fake)

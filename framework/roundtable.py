@@ -13,9 +13,10 @@
   显示"某某主动请缨"，而不是"主持人点名"——理由由主持人以该角色口吻概括（见 HOST_DIRECTIVE
   的"必须指出靶子"约束）。用户自己当主持人时（picker="user"），host 在决策点 `interrupt()`
   挂起、等前端回填，**用户全权负责**，系统不代他点将。
-- **speaker 是子智能体**：每位与会者都用一对一对话那套 supervisor 架构——自持检索工具、
-  只检索自己的语料库、逐 token 流式。所有与会者**共用同一个 speaker 节点**，靠状态里的
-  `pending_speaker` 区分身份；因此"子智能体之间没有边"是结构性成立的，不靠约定。
+- **speaker 是子智能体**：每位与会者开口前由**代码强制**跑一遍全管线强检索（与一对一
+  `retrieve_documents(strong=True)` 同一份实现），只查自己的语料库、不经模型自持的工具，
+  再逐 token 流式。所有与会者**共用同一个 speaker 节点**，靠状态里的 `pending_speaker`
+  区分身份；因此"子智能体之间没有边"是结构性成立的，不靠约定。
 - **开场轮是本场唯一的排班**（零 LLM）：先按名单各陈述一次亮明立场，之后才进主持人决策
   的交锋轮。去掉它会让首轮缺少对撞的靶子。
 - **收敛靠配额的数学，不靠提示词调参**：每人发言次数有上限，配额耗尽即自然散会；
@@ -72,10 +73,9 @@ except Exception:  # pragma: no cover
 
 from src.core.config import settings
 from src.core.llm import ainvoke_nonempty, astream_nonempty, get_chat_llm
-from framework.runtime import get_chroma_client
+from framework.supervisor_agent import retrieve_documents
 from scenes.persona_chat.config import persona_chat_config
 from scenes.persona_chat.prompt_builder import build_character_prompt
-from src.retrieval.embedder import get_embedder
 
 
 # 圆桌人数上限：人太多会摊薄每位的发言篇幅，削弱交锋感。
@@ -298,40 +298,30 @@ def _fallback_pick(ledger: dict, eligible: list[str]) -> str:
 
 
 # ============================================================
-# 检索：每位发言者只检索自己的知识库
+# 检索：每位发言者强制走强检索，只查自己的知识库
 # ============================================================
-async def _retrieve_for_speaker(collection_name: str, query: str, top_k: int = 4) -> str:
-    """
-    检索某发言者自己知识库中最相关的片段，作为其发言的参考资料。
+async def _retrieve_for_speaker(collection_name: str, query: str) -> str:
+    """检索某发言者**自己**的知识库，作为其发言的依据。
 
-    用项目统一 Embedder 把 query 向量化，再走 ChromaDB 的 query_embeddings，
-    保证与入库时（upload 路径用同一 Embedder）的向量空间一致。
+    与一对一不同，这里没有"模型自持的检索工具"——检索由**代码在发言前强制触发**，
+    而且固定走全管线强检索（与 `retrieve_documents(strong=True)` 同一份实现：
+    BM25 + 向量 + RRF 融合 + 重排，必要时并入知识图谱证据），只是把语料库换成这位
+    角色自己的 collection。好处有二：每位发言者引用的都是他自己的原著与传记；
+    且不会因为模型"临时决定不查"而空口发言。
     """
-    try:
-        client = get_chroma_client()
-        collection = client.get_or_create_collection(
-            name=collection_name, metadata={"hnsw:space": "cosine"}
-        )
-        embedder = get_embedder()
-        emb = embedder.embed_query(query)
-        res = collection.query(
-            query_embeddings=[emb],
-            n_results=top_k,
-            include=["documents", "metadatas"],
-        )
-        docs = (res.get("documents") or [[]])[0]
-        if not docs:
-            return ""
-        seen: set[str] = set()
-        parts: list[str] = []
-        for d in docs:
-            if d and d.strip() and d not in seen:
-                seen.add(d)
-                parts.append(d.strip())
-        return "\n\n".join(parts)
-    except Exception as e:
-        print(f"[Roundtable] 检索失败 col={collection_name}: {e}")
+    docs, _graph_used, _error = await retrieve_documents(
+        query, strong=True, collection_name=collection_name,
+    )
+    if not docs:
         return ""
+    seen: set[str] = set()
+    parts: list[str] = []
+    for d in docs:
+        text = (getattr(d, "page_content", "") or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+    return "\n\n".join(parts)
 
 
 def _format_debate_so_far(transcript: list[dict], exclude_id: str | None = None) -> str:
@@ -383,7 +373,7 @@ async def build_speaker_messages(
         if others:
             retrieval_query = f"{topic}\n\n其他与会者近期观点：\n{others[-700:]}"
 
-    context = await _retrieve_for_speaker(character.chroma_collection, retrieval_query, top_k=4)
+    context = await _retrieve_for_speaker(character.chroma_collection, retrieval_query)
     others_view = _format_debate_so_far(transcript, exclude_id=character.id)
 
     system_parts = [role_prompt, ROUNDTABLE_DEBATE_DIRECTIVE]
@@ -854,7 +844,7 @@ async def host_node(state: RoundtableState) -> dict:
 
 
 # ============================================================
-# 子智能体节点：speaker —— 一对一那套（自持检索、逐 token 流式）
+# 子智能体节点：speaker —— 代码强制强检索自己的语料库 + 逐 token 流式
 # ============================================================
 async def speaker_node(state: RoundtableState) -> dict:
     """让 `pending_speaker` 指定的角色发言，逐 token 推事件，并把这次发言记进台账。

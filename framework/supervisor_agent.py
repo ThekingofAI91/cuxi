@@ -138,12 +138,17 @@ async def retrieve_documents(
     query: str,
     history: list[tuple[str, str]] | None = None,
     strong: bool = True,
+    collection_name: str | None = None,
 ) -> tuple[list, bool, str]:
     """执行高级混合检索，返回 (检索到的文档, 是否并入了知识图谱证据, 错误信息)。
 
     检索力度就一个字：strong。True → 全管线；False → 轻量 top-3。
     "这轮不检索"不由本函数的参数表达——那正是"调用方根本不调 search_library
     这个工具"本身（省掉一整次 LLM 往返，比传开关进来再返回空更划算）。
+
+    collection_name 缺省时取当前场景的语料库（一对一、HTTP 评测路径即如此）；
+    圆桌的发言者各有自己的语料库，由代码强制传入——两者共用同一条强检索管线，
+    差别只在"查哪个库、由谁决定触发"（一对一由模型决定，圆桌由代码决定）。
 
     异常一律在内部消化（返回空结果 + 错误串），不向上抛：
     检索失败不该炸掉整条回答链路，调用方按"没查到"继续走即可。
@@ -152,10 +157,11 @@ async def retrieve_documents(
     light_retrieval = not strong
 
     try:
-        # ---- 1. 获取场景对应的 collection（与 HTTP 层一致）----
+        # ---- 1. 定位语料库：优先用调用方指定的，否则取当前场景 ----
         from framework.runtime import get_scene_config, get_chroma_client
         config = get_scene_config()
-        collection_name = getattr(config, 'chroma_collection', 'persona_jung') if config else 'persona_jung'
+        if not collection_name:
+            collection_name = getattr(config, 'chroma_collection', 'persona_jung') if config else 'persona_jung'
 
         client = get_chroma_client()
         collection = client.get_or_create_collection(
