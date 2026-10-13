@@ -137,26 +137,19 @@ def build_history_aware_query(query: str, recent: list[tuple[str, str]]) -> str:
 async def retrieve_documents(
     query: str,
     history: list[tuple[str, str]] | None = None,
-    light_retrieval: bool = False,
-    skip_retrieval: bool = False,
+    strong: bool = True,
 ) -> tuple[list, bool, str]:
     """执行高级混合检索，返回 (检索到的文档, 是否并入了知识图谱证据, 错误信息)。
 
-    由本文件的 search_library 工具按需触发，检索力度由工具入参 strong 映射到
-    本函数的 light_retrieval：strong=True → 全管线；strong=False → 轻量 top-3。
+    检索力度就一个字：strong。True → 全管线；False → 轻量 top-3。
+    "这轮不检索"不由本函数的参数表达——那正是"调用方根本不调 search_library
+    这个工具"本身（省掉一整次 LLM 往返，比传开关进来再返回空更划算）。
 
     异常一律在内部消化（返回空结果 + 错误串），不向上抛：
     检索失败不该炸掉整条回答链路，调用方按"没查到"继续走即可。
     """
     history = history or []
-
-    # ---- 0. 零检索开关 ----
-    # 实测：轻量检索（top_k=3，无改写/无重排/无图谱）中位仅 23ms，
-    # 对 8-15s 的回答完全可忽略，故默认保留检索以贴合角色背景资料。
-    # 只有把开关置 False（追求极致首字、且角色卡足够完备）时才走这条零检索路径。
-    if skip_retrieval:
-        print("[Retrieval] 零检索（已关闭轻量检索开关），跳过向量库与重排")
-        return [], False, ""
+    light_retrieval = not strong
 
     try:
         # ---- 1. 获取场景对应的 collection（与 HTTP 层一致）----
@@ -327,8 +320,7 @@ def build_search_tool(
         docs, graph_used, error = await retrieve_documents(
             query,
             history=history or [],
-            light_retrieval=not strong,
-            skip_retrieval=False,
+            strong=strong,
         )
         sink["docs"] = list(sink.get("docs") or []) + docs
         sink["graph_used"] = bool(sink.get("graph_used")) or graph_used

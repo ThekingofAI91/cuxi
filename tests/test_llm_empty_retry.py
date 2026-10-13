@@ -244,8 +244,7 @@ def test_failure_carries_retrieved_docs_for_troubleshooting(monkeypatch):
                  metadata={"source": "王阳明全集.pdf", "heading": "与王纯甫书"}),
     ]
 
-    async def _fake_retrieve(query, history=None, light_retrieval=False,
-                             skip_retrieval=False):
+    async def _fake_retrieve(query, history=None, strong=True):
         return docs, False, ""
 
     monkeypatch.setattr(sup_agent, "get_chat_llm", lambda **kw: ToolCallingThenSilentLLM())

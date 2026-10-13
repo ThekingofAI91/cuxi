@@ -48,9 +48,9 @@ class AgentState(TypedDict):
 
     # ---- 分区与检索策略 ----
     zone: Optional[str]                   # "education" | "entertainment"
-    light_retrieval: Optional[bool]       # 轻量召回：跳过改写/重排/图谱，仅原始问题 top-3
-    skip_retrieval: Optional[bool]        # 酒馆式零检索：角色卡构件齐全时完全不查向量库
     graph_used: Optional[bool]            # 本轮是否触发了知识图谱增强
+    # 检索力度不在这里——它由 search_library 工具的入参 strong 在运行时决定，
+    # 全程随工具调用走，不需要在 state 里再存一份。
 
     # ---- 用户长期记忆 ----
     user_memory: Optional[str]            # 已渲染的记忆条目块（空串/None = 无记忆，不注入）

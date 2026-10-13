@@ -117,10 +117,10 @@ def _patch_llm(monkeypatch, llm):
     return llm
 
 
-def _patch_retrieval(monkeypatch, docs=None, light_capture=None, boom=False):
-    async def fake_retrieve(query, history=None, light_retrieval=False, skip_retrieval=False):
-        if light_capture is not None:
-            light_capture["light"] = light_retrieval
+def _patch_retrieval(monkeypatch, docs=None, strong_capture=None, boom=False):
+    async def fake_retrieve(query, history=None, strong=True):
+        if strong_capture is not None:
+            strong_capture["strong"] = strong
         if boom:
             raise RuntimeError("检索后端炸了")
         return list(docs or []), False, ""
@@ -158,9 +158,9 @@ def test_finalize_drops_calls_without_name_and_survives_bad_json():
 # ============================================================
 
 def test_strong_true_runs_full_pipeline_with_citation_rule(monkeypatch):
-    """strong=true → light_retrieval=False；工具返回值带【引用标注】规则"""
+    """strong=true → 全管线；工具返回值带【引用标注】规则"""
     cap: dict = {}
-    _patch_retrieval(monkeypatch, FAKE_DOCS, light_capture=cap)
+    _patch_retrieval(monkeypatch, FAKE_DOCS, strong_capture=cap)
     llm = _patch_llm(monkeypatch, ScriptedLLM([
         _search_round('{"query": "格物致知", "strong": true}'),
         [_text("格物致知的关键在于向内求。")],
@@ -168,7 +168,7 @@ def test_strong_true_runs_full_pipeline_with_citation_rule(monkeypatch):
 
     out = asyncio.run(sa.run_supervisor_agent(_base_state()))
 
-    assert cap["light"] is False
+    assert cap["strong"] is True
     assert out["final_answer"] == "格物致知的关键在于向内求。"
     assert len(out["retrieved_docs"]) == 2
     assert out["route_history"] == ["supervisor", "retrieval_agent"]
@@ -179,9 +179,9 @@ def test_strong_true_runs_full_pipeline_with_citation_rule(monkeypatch):
 
 
 def test_strong_false_runs_light_pipeline_with_memory_wording(monkeypatch):
-    """strong=false → light_retrieval=True；工具返回值走"你记得的事"话术、不带来源"""
+    """strong=false → 轻量档；工具返回值走"你记得的事"话术、不带来源"""
     cap: dict = {}
-    _patch_retrieval(monkeypatch, FAKE_DOCS, light_capture=cap)
+    _patch_retrieval(monkeypatch, FAKE_DOCS, strong_capture=cap)
     llm = _patch_llm(monkeypatch, ScriptedLLM([
         _search_round('{"query": "近况", "strong": false}'),
         [_text("最近还好。")],
@@ -191,7 +191,7 @@ def test_strong_false_runs_light_pipeline_with_memory_wording(monkeypatch):
         _base_state(zone="entertainment", character_role_prompt="你是峰哥。")
     ))
 
-    assert cap["light"] is True
+    assert cap["strong"] is False
     tool_msgs = [m for m in llm.seen_messages[-1] if isinstance(m, ToolMessage)]
     assert tool_msgs and tool_msgs[0].content.startswith("【你记得的事】")
     assert "王阳明大传.pdf" not in tool_msgs[0].content  # 不能暴露来源痕迹
@@ -201,14 +201,14 @@ def test_strong_false_runs_light_pipeline_with_memory_wording(monkeypatch):
 def test_strong_defaults_to_true_when_model_omits_it(monkeypatch):
     """模型漏填 strong → 按强检索处理（宁可多花，不可不可溯源）"""
     cap: dict = {}
-    _patch_retrieval(monkeypatch, FAKE_DOCS, light_capture=cap)
+    _patch_retrieval(monkeypatch, FAKE_DOCS, strong_capture=cap)
     _patch_llm(monkeypatch, ScriptedLLM([
         _search_round('{"query": "格物致知"}'),
         [_text("回答")],
     ]))
 
     asyncio.run(sa.run_supervisor_agent(_base_state()))
-    assert cap["light"] is False
+    assert cap["strong"] is True
 
 
 @pytest.mark.parametrize("zone, hint", [

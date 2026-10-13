@@ -114,14 +114,13 @@ class TestAgentNodes:
         assert isinstance(error, str)
 
     @pytest.mark.asyncio
-    async def test_retrieve_documents_skip_retrieval(self):
-        """skip_retrieval=True 时零检索、零错误，直接返回空（不碰向量库）"""
-        docs, graph_used, error = await retrieve_documents(
-            "测试检索", skip_retrieval=True
-        )
-        assert docs == []
-        assert graph_used is False
-        assert error == ""
+    async def test_retrieve_documents_light_tier_returns_triple(self):
+        """strong=False 走轻量档，契约仍是 (docs, graph_used, error)"""
+        set_scene_config(persona_chat_config)
+        docs, graph_used, error = await retrieve_documents("测试检索", strong=False)
+        assert isinstance(docs, list)
+        assert isinstance(graph_used, bool)
+        assert isinstance(error, str)
 
     @pytest.mark.asyncio
     async def test_analysis_agent(self):

@@ -1519,10 +1519,10 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     character, query=request.query, scan_text=_scan_text
                 )
 
-                # 检索力度不再由 API 层预判分区（旧的 light_retrieval / skip_retrieval
-                # 两个 state 字段已随分区路由一起废弃）：改由 supervisor_agent 的
+                # 检索力度不由 API 层预判分区：改由 supervisor_agent 的
                 # search_library 工具入参 strong 在运行时决定——模型按请求性质选
-                # 强检索（全管线 15 条，可溯源）或轻量（top-3 软背景，娱乐区默认）。
+                # 强检索（全管线 8 条，可溯源）或轻量（top-3 软背景，娱乐区默认）；
+                # 完全不检索就表现为"模型不调这个工具"，没有单独的开关参数。
                 _is_ent = character.zone == "entertainment"
                 # 娱乐区但无示例对话/世界书：只能靠背景检索撑住，日志留痕便于发现"弱角色卡"
                 if _is_ent and not has_tavern_components(character):

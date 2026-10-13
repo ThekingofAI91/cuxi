@@ -168,7 +168,7 @@ class Settings(BaseSettings):
 
     # 检索力度不再按角色分区走两条路，而是由检索工具 search_library 的 strong
     # 参数在运行时决定（framework/supervisor_agent.py）：
-    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + 精排 + 知识图谱，15 条带来源
+    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + 精排 + 知识图谱，8 条带来源
     #   strong=False → 轻量检索：仅向量+BM25 召回 top-3，作为软背景、不带来源
     # 模型按请求性质自选；工具描述里带本区倾向提示，所以合并路由不会把娱乐区
     # 拖进全管线（教育区偏 true，娱乐区偏 false）。已无 parse 期的分区判据函数。
