@@ -63,7 +63,9 @@ def get_judge_llm() -> ChatOpenAI:
     在中转限额紧张时火上浇油——重试统一交给 _judge 的长间隔策略"""
     return get_chat_llm(
         temperature=0.1,  # 低温度，评判更稳定
-        max_tokens=1500,
+        # 2026-10-09：1500 会截断长答案的判官 JSON（四维+幻觉清单+理由），
+        # 表现为"判官输出无法解析"的系统性失败（两轮各 35/25 题）——实测 4000 稳定
+        max_tokens=4000,
         max_retries=0,
     )
 
