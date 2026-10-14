@@ -113,7 +113,7 @@ flowchart TD
 | 20 并发成功率 | **100%** | 16 核 CPU，全部成功无超时 |
 | 20 并发延迟 | ~21-109s | CPU 精排是主要瓶颈 |
 | 单请求基线 | ~20-30s | 含完整检索 + 生成 |
-| 测试覆盖 | **350 个用例** | 编排、检索、状态隔离、异常处理 |
+| 测试覆盖 | **353 个用例** | 编排、检索、状态隔离、异常处理 |
 
 **并发优化**：`APP_WORKERS=2~4`（进程级并行，每 worker 独立加载模型约 2.5GB 内存）；限流/答案缓存是进程内的，多 worker 时各算各的。
 
@@ -210,7 +210,7 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 | 重排序 | BAAI/bge-reranker-base（Cross-Encoder；可经 `RERANK_MODEL` 换成 v2-m3） |
 | 前端 | 原生 HTML/CSS/JS 按功能分模块（零构建，静态文件直接服务） |
 | 持久化 | SQLite（会话 / 账号 / 用量统计）+ ChromaDB（向量库） |
-| 评估 | 自建 110 题 LLM-as-Judge 四维（主口径）+ RAGAS 三维全量对照 + pytest（350 个用例） |
+| 评估 | 自建 110 题 LLM-as-Judge 四维（主口径）+ RAGAS 三维全量对照 + pytest（353 个用例） |
 
 ---
 

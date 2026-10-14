@@ -384,8 +384,8 @@ async def advanced_retrieval(
     1. 并行生成查询变体 + HyDE 假设文档
     2. 对每个查询（原始 + 变体 + HyDE）分别做向量检索
     3. 对原始 + 变体查询做 BM25 关键词检索（精确命中专有名词）
-    4. 全部路结果用 RRF 合并，取 top_k*2 候选
-    5. Cross-Encoder 对候选做重排序，返回 top-K
+    4. 全部路结果用 RRF 合并，取 top_k 条候选
+    5. Cross-Encoder 对前 rerank_candidates 条精排，其余保持 RRF 顺序，最终返回 top_k 条
 
     Args:
         question: 原始问题
@@ -606,7 +606,7 @@ async def advanced_retrieval(
         )
 
     # ---- Step 5: Cross-Encoder 重排序（只精排 RRF 前 N 条，其余按 RRF 顺序兜底）----
-    # 重组后块为完整段落（~1000 字符），若对全部候选（默认 15 条 = top_k）都做 CPU 精排会显著拖慢单请求；
+    # 重组后块为完整段落（~1000 字符），若对全部候选（默认 8 条 = top_k）都做 CPU 精排会显著拖慢单请求；
     # 只精排 rerank_candidates（默认 5）对，剩余候选保持 RRF 顺序拼接，质量损失小、耗时减半。
     rerank_n = settings.rerank_candidates
     head = candidate_docs[:rerank_n]
