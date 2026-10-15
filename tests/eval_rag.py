@@ -250,6 +250,22 @@ async def get_system_answer(question: str, scene: str = "persona", character: st
 # ============================================================
 # 主评估流程
 # ============================================================
+def _save_progress(results: list) -> None:
+    """中途落盘：每题完成即写。
+
+    110 题连跑要 1.5-3 小时，中途被中断（手动停 / 崩溃 / 断电）不应丢掉
+    已完成的题。只保证 results 可被断点续跑读取，summary 留到结尾统一写。
+    """
+    path = Path(__file__).parent / "eval_results.json"
+    try:
+        path.write_text(
+            json.dumps({"results": results}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"     [落盘失败] {e}")
+
+
 async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: float = 0.0):
     """运行完整评估"""
     print("=" * 60)
@@ -345,6 +361,11 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
                 "eval_seconds": eval_elapsed,
             }
         })
+
+        # 每题落盘：中途中断不丢已完成的结果（见 _save_progress）
+        _save_progress(results)
+        done_n = len([r for r in results if r.get("evaluation")])
+        print(f"     [进度] 已落盘 {done_n} 题 → tests/eval_results.json")
 
         # 题间节流：每题 5 次 LLM 调用（1 生成 + 4 评判），12 题连打会触发
         # 中转服务的 rpm/tpm 配额（429），整轮报废。需要时用 --pace-sec 控制节奏
