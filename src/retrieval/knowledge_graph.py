@@ -189,6 +189,7 @@ def _fallback_extract_llm(primary_llm):
             model=settings.llm_fallback_model,
             temperature=0.2,
             max_tokens=getattr(primary_llm, "max_tokens", None) or 1200,
+            reasoning_effort="none",
         )
     return _FALLBACK_EXTRACT_LLM
 
@@ -329,7 +330,9 @@ async def build_knowledge_graph(
     from src.core.llm import get_chat_llm
 
     if llm is None:
-        llm = get_chat_llm(temperature=0.2, max_tokens=1200)
+        # 结构化抽取必须关思考（同 legend.py:615 / 判官）：推理模型的 reasoning_content
+        # 会把 max_tokens=1200 的输出预算吃掉 → 大量空响应/截断，实测空响应重试连发
+        llm = get_chat_llm(temperature=0.2, max_tokens=1200, reasoning_effort="none")
 
     batch_size = batch_size or settings.graph_build_batch
     max_chunks = max_chunks or settings.graph_build_max_chunks
