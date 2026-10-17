@@ -824,7 +824,48 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             num_variants=2,
         )
 
-        print(f"[Eval Query] 高级检索到 {len(retrieved_docs)} 条相关文档")
+        # ---- 1.5 知识图谱增强（与主链路 retrieve_documents 同口径）----
+        # 此前评估端点直接调 advanced_retrieval，完全绕过主链路的图谱门——
+        # 荣格图谱建成后的首轮"图谱增强版评测"跑了几题才发现测的还是无图谱基线。
+        # 这里复刻 supervisor_agent 的三信号触发 + 证据文档并入（评估无轻量通道，省略 not light_retrieval）
+        graph_used = False
+        if settings.graph_rag_enabled and graph_exists(collection.name):
+            try:
+                from src.retrieval.knowledge_graph import (
+                    retrieve_graph_context,
+                    should_trigger_graph_retrieval,
+                )
+                from src.retrieval.advanced_search import _get_doc_id
+
+                trigger, reason = should_trigger_graph_retrieval(
+                    request.query, retrieved_docs, collection.name,
+                )
+                if trigger:
+                    graph_used = True
+                    g_ctx, g_docs = await retrieve_graph_context(
+                        request.query, collection, llm=retrieval_llm,
+                    )
+                    if g_docs:
+                        existing = {_get_doc_id(d.page_content) for d in retrieved_docs}
+                        added_docs = []
+                        for d in g_docs:
+                            did = _get_doc_id(d.page_content)
+                            if did not in existing:
+                                retrieved_docs.append(d)
+                                existing.add(did)
+                                added_docs.append(d)
+                        if added_docs:
+                            # 证据文档与主链路一样进生成上下文，也要进 judge 可见的 contexts
+                            contexts.extend(d.page_content for d in added_docs)
+                            print(f"[Eval Query] 触发知识图谱增强（{reason}），并入 {len(added_docs)} 条证据")
+                    else:
+                        print(f"[Eval Query] 图谱已触发（{reason}）但无命中")
+                else:
+                    print(f"[Eval Query] 文本检索质量达标，跳过知识图谱（{reason}）")
+            except Exception as ge:
+                print(f"[Eval Query] 知识图谱检索失败，跳过: {ge}")
+
+        print(f"[Eval Query] 高级检索到 {len(retrieved_docs)} 条相关文档（图谱{'已用' if graph_used else '未用'}）")
 
         # ---- 2. 分析 ----
         from framework.analysis_agent import analysis_agent
