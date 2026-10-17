@@ -67,6 +67,9 @@ def get_judge_llm() -> ChatOpenAI:
         # 表现为"判官输出无法解析"的系统性失败（两轮各 35/25 题）——实测 4000 稳定
         max_tokens=4000,
         max_retries=0,
+        # 推理模型的 reasoning_content 会吃输出预算导致 JSON 截断（同 knowledge_graph/
+        # legend 口径），结构化判官必须关思考
+        reasoning_effort="none",
     )
 
 
@@ -129,12 +132,28 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 - 算漏：独立的新观点、新事实、新论断（如"人脉的本质是价值交换"）未在回答中出现任何等价表述
 - 锚点：9-10 独立要点全部覆盖（例证类缺失不算漏） | 7-8 缺 1-2 个独立要点 | 4-6 缺 3 个及以上独立要点，或核心要点缺失 | 0-3 绝大多数要点未覆盖
 
+### 5. 口吻一致性 voice_consistency（0-10）
+评「这个回答像不像语料里的那个人在说话」。风格参照 = 上下文语料中人物的**第一人称原话
+与论述方式**（用词习惯、比喻偏好、立论方式、立场），以及人物的时代与身份设定。
+与忠实度的分工：忠实度管「说的事实有没有依据」，本维管「说话的方式像不像本人」——
+同一句话可以既忠实又不像本人，两维独立打分。
+- 不参与评分：舞台指令与动作描写本身（如 *荣格轻轻叩了叩桌面*）、开场白/收尾客套、
+  角色语气词——这些是演出形式，其余四维已豁免
+- 算跳出角色（计入 out_of_character）：①现代咨询师/AI 助手腔（如"我们可以这样思考"
+  "建议您""希望对你有帮助"）；②人物时代或身份不可能出现的概念与工具；③通用助手式
+  表达（列要点模板腔、"首先其次最后"的教程腔）；④立场与语料中人物的公开立场相反
+- 锚点：9-10 语感、用词与比喻方式与语料原话如出一手，第一人称经验表述与语料记载一致，
+  挑不出跳角色之处 | 7-8 口吻与立场总体一致、专业内容转述准确，但语气偏平、缺少人物
+  的标志性表达方式 | 4-6 有 1-2 处跳出角色（AI 腔/现代腔/立场漂移），人物感时有时无 |
+  0-3 通篇 AI 助手腔，人物只剩名字
+
 ## 输出格式（严格 JSON，不要输出 JSON 以外的任何文字）
 {{
     "faithfulness": {{"score": 0-10整数, "reason": "实质论断核查结论（风格不参与）", "unsupported_claims": ["无依据论断，没有则空列表"]}},
     "relevancy": {{"score": 0-10整数, "reason": "简短理由"}},
     "context_precision": {{"score": 0-10整数, "reason": "简短理由"}},
-    "key_points_coverage": {{"score": 0-10整数, "reason": "简短理由", "covered_points": [], "missed_points": []}}
+    "key_points_coverage": {{"score": 0-10整数, "reason": "简短理由", "covered_points": [], "missed_points": []}},
+    "voice_consistency": {{"score": 0-10整数, "reason": "口吻一致性简评", "out_of_character": ["跳出角色的表述，没有则空列表"]}}
 }}
 """
 
@@ -213,11 +232,13 @@ async def evaluate_single(
         return norm_score(sd.get("score")) if sd and "score" in sd else None
 
     f, r, c, k = sub("faithfulness"), sub("relevancy"), sub("context_precision"), sub("key_points_coverage")
+    v = sub("voice_consistency")
     return {
         "faithfulness": metric(f),
         "relevancy": metric(r),
         "context_precision": metric(c),
         "key_points_coverage": metric(k),
+        "voice_consistency": metric(v),
         "details": {
             "faithfulness_reason": f.get("reason", "判官输出无法解析"),
             "faithfulness_unsupported_claims": f.get("unsupported_claims", []),
@@ -230,6 +251,9 @@ async def evaluate_single(
             "covered_points": k.get("covered_points", []),
             "missed_points": k.get("missed_points", []),
             "key_points_parse": "ok" if k else "failed",
+            "voice_reason": v.get("reason", "判官输出无法解析"),
+            "voice_out_of_character": v.get("out_of_character", []),
+            "voice_parse": "ok" if v else "failed",
         },
     }
 
@@ -367,7 +391,8 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         print(f"     评分: 忠实度={eval_result['faithfulness']}, "
               f"相关性={eval_result['relevancy']}, "
               f"上下文={eval_result['context_precision']}, "
-              f"要点={eval_result['key_points_coverage']}")
+              f"要点={eval_result['key_points_coverage']}, "
+              f"口吻={eval_result['voice_consistency']}")
 
         results.append({
             "question": question,
@@ -388,7 +413,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         done_n = len([r for r in results if r.get("evaluation")])
         print(f"     [进度] 已落盘 {done_n} 题 → tests/eval_results.json")
 
-        # 题间节流：每题 5 次 LLM 调用（1 生成 + 4 评判），12 题连打会触发
+        # 题间节流：每题 2 次 LLM 调用（1 生成 + 1 判官五维合一），连打会触发
         # 中转服务的 rpm/tpm 配额（429），整轮报废。需要时用 --pace-sec 控制节奏
         if pace_sec > 0:
             await asyncio.sleep(pace_sec)
@@ -404,12 +429,13 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         print("没有有效的评估结果")
         return
 
-    METRICS = ["faithfulness", "relevancy", "context_precision", "key_points_coverage"]
+    METRICS = ["faithfulness", "relevancy", "context_precision", "key_points_coverage", "voice_consistency"]
     METRIC_NAMES = {
         "faithfulness": "忠实度 (Faithfulness)",
         "relevancy": "回答相关性 (Relevancy)",
         "context_precision": "上下文精确度 (Context)",
         "key_points_coverage": "要点覆盖率 (Key Points)",
+        "voice_consistency": "口吻一致性 (Voice)",
     }
 
     def avg_of(metric: str) -> tuple[Optional[float], int]:
