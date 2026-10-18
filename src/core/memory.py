@@ -54,7 +54,7 @@ _TOPICAL_TOP_K = 3   # 每次注入的主题记忆条数上限
 _TOPICAL_MIN_SIM = 0.55
 _REPLACE_SIM = 0.85  # 同 kind 近似视为同一条 → 更新
 
-# 提取任务引用集：防止后台任务被 GC（与 advanced_search._bg_rewrite_tasks 同模式）
+# 提取任务引用集：防止后台任务被 GC（事件循环只持弱引用）
 _bg_extract_tasks: set = set()
 
 

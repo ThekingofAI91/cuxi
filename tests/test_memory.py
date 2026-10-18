@@ -33,7 +33,7 @@ class _FakeLLM:
 
 
 def _fake_embed(texts):
-    """确定性伪向量：文本哈希做种子（跨进程稳定，同 rewrite 测试模式）"""
+    """确定性伪向量：文本哈希做种子，跨进程稳定，不依赖真 embed 模型"""
     out = []
     for t in texts:
         seed = int.from_bytes(hashlib.sha256(t.encode("utf-8")).digest()[:4], "big")
