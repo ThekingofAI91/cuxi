@@ -128,28 +128,11 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 50
     rerank_top_k: int = 5
     bm25_weight: float = 0.5
-    # 短问题（字符数 <= 该值）跳过 Multi-Query + HyDE 改写：省 1 次串行 LLM 往返，
-    # 直接以原始查询做向量 + BM25 检索，显著降低首字延迟；长/复杂问题仍走完整改写。
-    # 原为 15，放宽到 30：实测改写的收益集中在长难问题（需要换角度召回），
-    # 30 字以内的中短问题用原始查询 + BM25 已足够，不值得为它多等 4-8 秒。
-    skip_rewrite_max_chars: int = 30
-    # 首字为改写预留的等待上限（秒）。
-    # 严格意义上"改写与首字并行"做不到——召回必须全部就绪才能起生成。
-    # 务实做法：首字最多为改写等这么多秒，超时就放弃改写、直接用原始查询检索；
-    # 改写任务不取消，继续在后台跑完并写入缓存，下次问相似问题即可零等待命中。
-    rewrite_deadline_sec: float = 2.0
-    # 检索改写（Multi-Query + HyDE）单次调用的超时上限（秒）。
-    # 实测（deepseek-v4-flash，走第三方中转）：成功 3.5-6.7s，但约 20% 概率
-    # 触发重试/超时，实测最坏 24.8s —— 整轮首字延迟就是这么被拖垮的。
-    # 超时即降级为"只用原始查询检索"（召回略降但不卡死），绝不让用户干等。
-    rewrite_timeout_sec: float = 10.0
 
-    # 检索查询改写（Multi-Query + HyDE，一次 LLM 调用）总开关，默认关闭。
-    # 实测（2026-08-29）：改写真实延迟 3.5s+，超过等待预算（rewrite_deadline_sec=2s）
-    # 后被放弃——即每个新问题都白等 2s 且改写从未生效；而忠实度基线 8.8 恰是在
-    # "改写无效"状态下测得的，关闭不损失基线质量。重复问题靠语义缓存秒回。
-    # 打开场景：语料召回明显不足、且愿意为变体检索多付最长 2s 时再开。
-    rewrite_enabled: bool = False
+    # 【已删除 2026-10-18】检索查询改写（Multi-Query + HyDE）及配套的
+    # skip_rewrite_max_chars / rewrite_deadline_sec / rewrite_timeout_sec / rewrite_enabled
+    # 四项配置已随功能整体移除。三轮 A/B（成功率 0%/23%/93%）证明其对质量零贡献且多付 ~3s 延迟。
+
 
     # 【已废弃 2026-09-30】娱乐区"是否保留轻量检索"这个分区开关已取消：
     # 现在由模型通过 search_library 的 strong 参数自行选择力度，API 层不再预判分区。

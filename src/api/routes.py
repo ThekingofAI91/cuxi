@@ -789,9 +789,8 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         from langchain_core.documents import Document
         from src.retrieval.embedder import get_embedder
         from src.retrieval.advanced_search import advanced_retrieval
-        from src.core.llm import get_chat_llm
 
-        # ---- 1. 高级检索：多查询 + HyDE 组合 ----
+        # ---- 1. 高级检索：向量 + BM25 混合召回 ----
         embedder = get_embedder()
 
         client = get_chroma_client()
@@ -802,26 +801,11 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             metadata={"hnsw:space": "cosine"},
         )
 
-        # 初始化 LLM（用于生成查询变体和 HyDE 文档；
-        # max_tokens 已合并为一次调用，256 足够容纳短变体 + 3-5 句假设答案）
-        retrieval_llm = get_chat_llm(
-            temperature=0.3,
-            max_tokens=256,
-        )
-
-        # 改写开关与主链路（retrieve_documents）保持同一配置口径——此前这里硬编码
-        # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
-        use_rewrite = settings.rewrite_enabled
-
         # 执行高级检索（条数与主链路 retrieve_documents 保持一致：8 条完整段落）
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
-            llm=retrieval_llm,
             top_k=8,
-            use_multi_query=use_rewrite,
-            use_hyde=use_rewrite,
-            num_variants=2,
         )
 
         # ---- 1.5 知识图谱增强（与主链路 retrieve_documents 同口径）----
@@ -843,7 +827,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                 if trigger:
                     graph_used = True
                     g_ctx, g_docs = await retrieve_graph_context(
-                        request.query, collection, llm=retrieval_llm,
+                        request.query, collection,
                     )
                     if g_docs:
                         existing = {_get_doc_id(d.page_content) for d in retrieved_docs}
