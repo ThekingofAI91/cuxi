@@ -7,7 +7,7 @@ advanced_search.py — 高级检索策略
 3. BM25（关键词检索）：精确命中专有名词（如《红书》、积极想象等）
 4. Cross-Encoder 重排序：对 RRF 合并后的候选做深度语义精排
 
-多路结果通过 RRF 合并，再经重排序输出 top-K。
+多路结果通过 RRF 合并（每类一票 + 类间权重），再经重排序输出 top-K。
 
 性能优化（优化十七）：向量检索多路并行、BM25 仅查询原问题、重排序截断输入。
 """
@@ -365,6 +365,60 @@ async def _rewrite_with_budget(question: str, llm: ChatOpenAI, num_variants: int
 # 高级检索引擎
 # ============================================================
 
+def fuse_by_class(
+    class_boards: list[tuple[str, list[str]]],
+    doc_metadata: dict[str, dict],
+    class_weights: dict[str, float],
+    rrf_k: int = 60,
+    use_source_weight: bool = True,
+) -> dict[str, float]:
+    """RRF 融合：每类一票 + 类间权重。
+
+    「一类」= 一种召回通道（vector / bm25）。同一通道下可以有多条榜（原问、查询变体、
+    HyDE），它们只是同一通道的多次取样，不该各记一票——否则打开改写就等于偷偷改动
+    融合权重：旧实现把榜拍平累加，改写生效时向量榜 1→4、BM25 榜 1→3，向量:BM25 的
+    票数比从 1:1 变成 4:3，语义路被凭空放大。
+
+    本函数分两步：
+      1) 类内合票：同一 doc 在一类里出现多次，只保留它在该类里的最好名次；
+      2) 类间加权：每类这一票乘类权重，再按 RRF 公式累加。
+
+    只吃名次、不吃原始分数：余弦距离与 BM25 分数不同量纲，直接相加没有意义。
+
+    Args:
+        class_boards: [(类名, 该榜的 ranked doc_ids)]，类名 ∈ {"vector", "bm25"}
+        doc_metadata: doc_id -> metadata（用于取 source 做来源加权）
+        class_weights: 类名 -> 类权重
+        rrf_k: RRF 平滑常数
+        use_source_weight: 是否按语料来源类型加权
+
+    Returns:
+        doc_id -> RRF 分数（未排序）
+    """
+    from src.retrieval.source_profile import get_source_weight
+
+    # 类内合票：class -> {doc_id: 该类内最好名次}
+    best_rank_by_class: dict[str, dict[str, int]] = {}
+    for class_name, ranked_ids in class_boards:
+        ranks = best_rank_by_class.setdefault(class_name, {})
+        for rank, doc_id in enumerate(ranked_ids):
+            prev = ranks.get(doc_id)
+            if prev is None or rank < prev:
+                ranks[doc_id] = rank
+
+    # 类间加权
+    scores: dict[str, float] = {}
+    for class_name, ranks in best_rank_by_class.items():
+        class_weight = class_weights.get(class_name, 1.0)
+        for doc_id, rank in ranks.items():
+            weight = class_weight
+            if use_source_weight:
+                source = (doc_metadata.get(doc_id) or {}).get("source", "")
+                weight *= get_source_weight(source)
+            scores[doc_id] = scores.get(doc_id, 0.0) + weight / (rrf_k + rank + 1)
+    return scores
+
+
 async def advanced_retrieval(
     question: str,
     collection,
@@ -384,7 +438,7 @@ async def advanced_retrieval(
     1. 并行生成查询变体 + HyDE 假设文档
     2. 对每个查询（原始 + 变体 + HyDE）分别做向量检索
     3. 对原始 + 变体查询做 BM25 关键词检索（精确命中专有名词）
-    4. 全部路结果用 RRF 合并，取 top_k 条候选
+    4. 各路结果按「每类一票 + 类间权重」做 RRF 合并，取 top_k 条候选
     5. Cross-Encoder 对前 rerank_candidates 条精排，其余保持 RRF 顺序，最终返回 top_k 条
 
     Args:
@@ -483,7 +537,9 @@ async def advanced_retrieval(
         return ranked_groups
 
     doc_candidates: dict[str, dict] = {}   # doc_id -> {text, metadata, distance}
-    query_results_list: list[list[str]] = []  # 每路的 ranked doc_ids（供 RRF）
+    # 每路一条榜：(所属召回类, 该榜的 ranked doc_ids)。类只有 vector / bm25 两种，
+    # 同一类下可以有多条榜（原问、查询变体、HyDE）——融合时类内取最好名次合成一票。
+    class_boards: list[tuple[str, list[str]]] = []
 
     # 阶段耗时埋点（延迟瀑布；无请求上下文时 stage_mark 自动忽略）
     from src.core.logger import stage_mark
@@ -506,7 +562,7 @@ async def advanced_retrieval(
     bm25_index = None
 
     try:
-        query_results_list.extend(await vec_task)
+        class_boards.extend(("vector", ids) for ids in await vec_task)
     except Exception:
         # 向量路失败时取消仍在跑的 BM25 任务，避免"异常从未被读取"告警
         if bm25_task is not None and not bm25_task.done():
@@ -516,7 +572,7 @@ async def advanced_retrieval(
     if bm25_task is not None:
         try:
             bm25_index, first_groups = await bm25_task
-            query_results_list.extend(first_groups)
+            class_boards.extend(("bm25", ids) for ids in first_groups)
         except Exception as e:
             print(f"[Advanced Retrieval] BM25 检索失败，跳过: {e}")
 
@@ -543,39 +599,35 @@ async def advanced_retrieval(
 
         # 第二轮：变体 + HyDE 的向量检索
         try:
-            query_results_list.extend(await _vector_pass(extra_queries))
+            class_boards.extend(("vector", ids) for ids in await _vector_pass(extra_queries))
         except Exception as e:
             print(f"[Advanced Retrieval] 变体向量检索失败，跳过: {e}")
 
         # 第二轮：变体的 BM25 检索（HyDE 是长文档，不进 BM25；与旧实现一致）
         if bm25_index is not None and query_variants:
             try:
-                query_results_list.extend(await _bm25_pass(query_variants, bm25_index))
+                class_boards.extend(("bm25", ids) for ids in await _bm25_pass(query_variants, bm25_index))
             except Exception as e:
                 print(f"[Advanced Retrieval] 变体 BM25 检索失败，跳过: {e}")
 
     stage_mark("retrieval_ms", (time.perf_counter() - _retrieval_t0) * 1000)
 
-    # ---- Step 3: RRF 合并（按语料来源类型加权）----
+    # ---- Step 3: RRF 合并（每类一票 + 类间权重）----
     rrf_k = 60
-    doc_rrf_scores: dict[str, float] = {}
-
+    class_weights = {
+        "vector": settings.rrf_vector_weight,
+        "bm25": settings.rrf_bm25_weight,
+    }
     # 来源加权：oral（口述/讲座/回忆录）优先召回学说话方式，
     # original（原著）支撑观点，anchor（core_ideas）锚定关键事实，
     # secondary（二手解读）强降权防止第三者评价冒充名人原话。
-    from src.retrieval.source_profile import classify_source, get_source_weight
-
-    for ranked_ids in query_results_list:
-        for rank, doc_id in enumerate(ranked_ids):
-            if doc_id not in doc_rrf_scores:
-                doc_rrf_scores[doc_id] = 0.0
-            if use_source_weight:
-                meta = doc_candidates[doc_id].get("metadata") or {}
-                source = meta.get("source", "")
-                weight = get_source_weight(source)
-            else:
-                weight = 1.0
-            doc_rrf_scores[doc_id] += weight / (rrf_k + rank + 1)
+    doc_rrf_scores = fuse_by_class(
+        class_boards,
+        {doc_id: cand.get("metadata") or {} for doc_id, cand in doc_candidates.items()},
+        class_weights,
+        rrf_k=rrf_k,
+        use_source_weight=use_source_weight,
+    )
 
     # 按 RRF 分数排序
     sorted_doc_ids = sorted(
@@ -589,6 +641,8 @@ async def advanced_retrieval(
     # 候选数与最终 top_k 一致：RRF 前 top_k 已覆盖高相关文档，
     # 候选越少，CPU 重排（560M 参数）越快（20 对 → 15 对，约省 25% 推理时间）
     candidate_limit = top_k
+
+    from src.retrieval.source_profile import classify_source
 
     for doc_id in sorted_doc_ids[:candidate_limit]:
         candidate = doc_candidates[doc_id]

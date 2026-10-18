@@ -128,6 +128,12 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 50
     rerank_top_k: int = 5
 
+    # RRF 融合的类间权重：一类 = 一种召回通道（vector / bm25）。
+    # 类内多路榜（原问、变体、HyDE）只取最好名次合成一票，因此打开改写不会改变
+    # 两类之间的票数比；要调「语义 vs 关键词」的相对话语权就改这两个值。
+    rrf_vector_weight: float = 1.0
+    rrf_bm25_weight: float = 1.0
+
     # 检索查询改写（Multi-Query + HyDE，一次 LLM 调用）配置。
     # 说明：改写曾被整体删除（2026-10-18），因为它是「同一批名次里多塞几条榜」，
     # 会让向量路与 BM25 路的票数比从 1:1 悄悄变成 4:3；所以融合侧要改成

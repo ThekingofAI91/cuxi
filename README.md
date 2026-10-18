@@ -240,7 +240,7 @@ cp .env.example .env         # 填 LLM_API_KEY / LLM_BASE_URL / LLM_MODEL
 
 1. **查询增强（默认关闭）**：一次 LLM 调用同时生成查询变体（Multi-Query）与假设文档（HyDE）；`REWRITE_ENABLED=false` 时不启用，≤30 字符的短问题也直接跳过
 2. **双通道召回**：变体与原问一起做向量检索 + 原问 BM25 关键词检索（精确命中专有名词）
-3. **RRF 融合 + 来源加权**：`source_profile.py` 按文件名把语料分为 original/oral/anchor/artificial/secondary，RRF 累加时乘以权重（secondary 0.25 强降权）
+3. **RRF 融合（每类一票 + 类间权重）**：一类 = 一种召回通道，类内多条榜只取该文档的最好名次合成一票（改写开不开都不改变向量:BM25 的票数比），类间按 `RRF_VECTOR_WEIGHT` / `RRF_BM25_WEIGHT` 加权；`source_profile.py` 再按语料来源类型缩放（secondary 0.25 强降权）。融合只吃名次、不吃原始分数——余弦距离与 BM25 分数不同量纲
 4. **Cross-Encoder 重排**：bge-reranker 对候选深度精排，取 top-K
 5. **知识图谱增强（按需）**：三信号触发（召回不足 top-3 / top rrf<0.03 / 命中实体未被文本覆盖）时，实体对齐 → 两跳 BFS 子图 → 证据文档并入检索结果
 
