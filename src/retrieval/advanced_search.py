@@ -1,16 +1,15 @@
 """
 advanced_search.py — 高级检索策略
 
-检索增强：
-1. BM25（关键词检索）：精确命中专有名词（如《红书》、积极想象等）
-2. Cross-Encoder 重排序：对 RRF 合并后的候选做深度语义精排
+实现多种检索增强：
+1. Multi-Query（多查询检索）：LLM 生成多个查询变体，分别检索后合并
+2. HyDE（假设文档嵌入）：LLM 先生成假设答案，用答案向量辅助检索
+3. BM25（关键词检索）：精确命中专有名词（如《红书》、积极想象等）
+4. Cross-Encoder 重排序：对 RRF 合并后的候选做深度语义精排
 
-向量与 BM25 两路结果通过 RRF 合并，再经重排序输出 top-K。
+多路结果通过 RRF 合并，再经重排序输出 top-K。
 
-性能优化（优化十七）：向量与 BM25 并行、BM25 仅查询原问题、重排序截断输入。
-
-注：Multi-Query / HyDE 查询改写已于 2026-10-18 整体删除（三轮 A/B 实测：
-成功率 0%→23%→93% 三档变化下四维分数全在噪声层，且回答耗时 +3s，属结构性冗余）。
+性能优化（优化十七）：向量检索多路并行、BM25 仅查询原问题、重排序截断输入。
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from pathlib import Path
 from typing import Optional
 
 from langchain_core.documents import Document
+from langchain_openai import ChatOpenAI
 
 from src.core.config import settings
 
@@ -191,6 +191,176 @@ def _get_doc_id(text: str) -> str:
 
 
 # ============================================================
+# 查询变体生成（Multi-Query）+ HyDE 合并调用
+# ============================================================
+# 性能优化：Multi-Query 与 HyDE 原本是两次独立 LLM 调用（串行等待两次 API 往返），
+# 合并为一次调用同时产出变体与假设文档，省掉一半 LLM 延迟。
+
+_MERGE_QUERY_HYDE_PROMPT = """你是检索优化专家。给定下面的用户问题，请完成两项任务：
+
+任务1：生成 {num_variants} 个不同角度的检索查询。要求：
+- 每个查询从不同角度表达相同的信息需求
+- 使用不同的关键词和表述方式
+- 保持查询简洁（不超过15个字）
+- 适合用于向量检索系统
+
+任务2：写一段3-5句话的简短参考答案，尽量使用专业术语和关键概念
+（这段文字将用于检索相关文档）。
+
+原始问题：{question}
+
+输出格式（严格按此格式）：
+【查询】
+查询1
+查询2
+【假设答案】
+假设答案内容"""
+
+
+async def generate_query_variants_and_hyde(
+    question: str,
+    llm: ChatOpenAI,
+    num_variants: int = 2,
+) -> tuple[list[str], str]:
+    """
+    一次 LLM 调用同时生成查询变体 + HyDE 假设文档
+
+    Returns:
+        (查询变体列表, HyDE 假设文档)；失败时返回 ([], "")
+    """
+    prompt = _MERGE_QUERY_HYDE_PROMPT.format(
+        question=question,
+        num_variants=num_variants,
+    )
+
+    try:
+        # 超时保护：中转服务抖动时改写实测可达 24.8s（约 20% 概率白等）。
+        # 超过上限就放弃改写、退回原始查询检索——宁可召回略差，也不让用户干等。
+        _timeout = getattr(settings, "rewrite_timeout_sec", 10.0) or 10.0
+        response = await asyncio.wait_for(
+            llm.ainvoke([("user", prompt)]),
+            timeout=_timeout,
+        )
+        content = response.content.strip()
+
+        variants: list[str] = []
+        hyde_doc: str = ""
+        q_marker = "【查询】"
+        a_marker = "【假设答案】"
+
+        if q_marker in content and a_marker in content:
+            q_part = content.split(q_marker)[1].split(a_marker)[0]
+            variants = [line.strip() for line in q_part.split("\n") if line.strip()]
+            hyde_doc = content.split(a_marker)[1].strip()
+        else:
+            # 格式解析失败：降级为把每行当查询，HyDE 留空
+            variants = [line.strip() for line in content.split("\n") if line.strip()]
+
+        return variants[:num_variants], hyde_doc
+    except asyncio.TimeoutError:
+        print(f"[Multi-Query+HyDE] 超过 {getattr(settings, 'rewrite_timeout_sec', 10.0)}s 未返回，降级为原始查询检索")
+        return [], ""
+    except Exception as e:
+        print(f"[Multi-Query+HyDE] 生成失败: {e}")
+        return [], ""
+
+
+# ============================================================
+# 改写结果缓存 + 首字等待预算
+# ============================================================
+# 背景：改写是 1 次 LLM 往返，实测平均 8.8s、失败时 24.8s，是首字延迟的头号元凶。
+# 但改写结果对问题语义高度敏感，不能无脑复用，故用 embedding 做"近似问题"命中：
+# 命中即零等待复用，未命中才付费。embed 一次仅约 15ms，相对 8.8s 可以忽略。
+
+_rewrite_cache: list[dict] = []          # [{"vec", "variants", "hyde"}]
+_REWRITE_CACHE_MAX = 200                 # 上限，超出按 FIFO 淘汰
+_REWRITE_CACHE_MIN_SIM = 0.88            # 余弦相似度门槛：低于此值视为不同问题
+_bg_rewrite_tasks: set = set()           # 持有后台任务引用，防止被 GC
+
+
+def _norm_vec(text: str):
+    """把文本编码成单位向量（同步，调用方负责放线程）"""
+    from src.retrieval.embedder import get_embedder
+    import numpy as np
+    v = np.asarray(get_embedder().embed_query(text), dtype=np.float32)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else v
+
+
+async def _rewrite_cache_lookup(question: str):
+    """语义缓存查找；命中返回 (variants, hyde, sim)，否则返回 None"""
+    if not _rewrite_cache:
+        return None  # 缓存为空时不做 embed，避免为首次查询付模型加载成本
+    try:
+        import numpy as np
+        vec = await asyncio.to_thread(_norm_vec, question)
+        sims = [float(np.dot(vec, it["vec"])) for it in _rewrite_cache]
+        best = max(range(len(sims)), key=lambda i: sims[i])
+        if sims[best] >= _REWRITE_CACHE_MIN_SIM:
+            it = _rewrite_cache[best]
+            return it["variants"], it["hyde"], sims[best]
+    except Exception as e:
+        print(f"[改写缓存] 查询失败（忽略）: {e}")
+    return None
+
+
+async def _rewrite_cache_store(question: str, variants: list[str], hyde: str) -> None:
+    if not variants and not hyde:
+        return
+    try:
+        vec = await asyncio.to_thread(_norm_vec, question)
+        _rewrite_cache.append({"vec": vec, "variants": variants, "hyde": hyde})
+        while len(_rewrite_cache) > _REWRITE_CACHE_MAX:
+            _rewrite_cache.pop(0)
+    except Exception as e:
+        print(f"[改写缓存] 写入失败（忽略）: {e}")
+
+
+def _on_background_rewrite_done(question: str, task) -> None:
+    """超时放弃后，后台改写跑完的结果补进缓存——这次白等了，下次就能零等待"""
+    _bg_rewrite_tasks.discard(task)
+    if task.cancelled():
+        return
+    try:
+        variants, hyde = task.result()
+    except Exception:
+        return
+    if variants or hyde:
+        asyncio.create_task(_rewrite_cache_store(question, variants, hyde))
+
+
+async def _rewrite_with_budget(question: str, llm: ChatOpenAI, num_variants: int):
+    """
+    带缓存与等待预算的改写。
+
+    1) 缓存命中 → 零等待复用（省掉整次 LLM 往返）
+    2) 未命中 → 最多等 rewrite_deadline_sec 秒
+       - 按时返回 → 用改写结果，并写入缓存
+       - 超时    → 放弃改写（先用原始查询检索，保住首字延迟），
+                   但任务不取消，后台跑完后补进缓存
+    """
+    cached = await _rewrite_cache_lookup(question)
+    if cached is not None:
+        variants, hyde, sim = cached
+        print(f"[Advanced Retrieval] 改写缓存命中（相似度 {sim:.3f}），跳过 LLM 调用")
+        return variants, hyde
+
+    deadline = getattr(settings, "rewrite_deadline_sec", 2.0) or 2.0
+    task = asyncio.create_task(
+        generate_query_variants_and_hyde(question, llm, num_variants)
+    )
+    try:
+        # shield：超时只取消外层等待，不取消改写任务本身
+        variants, hyde = await asyncio.wait_for(asyncio.shield(task), timeout=deadline)
+        await _rewrite_cache_store(question, variants, hyde)
+        return variants, hyde
+    except asyncio.TimeoutError:
+        _bg_rewrite_tasks.add(task)
+        task.add_done_callback(lambda t: _on_background_rewrite_done(question, t))
+        print(f"[Advanced Retrieval] 改写超过 {deadline}s，改用原始查询检索（后台继续补全缓存）")
+        return [], ""
+
+
 # ============================================================
 # 高级检索引擎
 # ============================================================
@@ -198,25 +368,35 @@ def _get_doc_id(text: str) -> str:
 async def advanced_retrieval(
     question: str,
     collection,
+    llm: ChatOpenAI,
     top_k: int = 15,
+    use_multi_query: bool = True,
+    use_hyde: bool = True,
     use_bm25: bool = True,
     use_rerank: bool = True,
+    num_variants: int = 2,
     use_source_weight: bool = True,
 ) -> tuple[list[Document], list[str]]:
     """
-    高级检索：向量 + BM25 混合召回，RRF 合并后 Cross-Encoder 精排
+    高级检索：Multi-Query + HyDE + BM25 + Cross-Encoder 重排序
 
     流程：
-    1. 原始查询并行跑向量检索与 BM25 关键词检索（精确命中专有名词）
-    2. 两路结果用 RRF 合并，取 top_k 条候选
-    3. Cross-Encoder 对前 rerank_candidates 条精排，其余保持 RRF 顺序，最终返回 top_k 条
+    1. 并行生成查询变体 + HyDE 假设文档
+    2. 对每个查询（原始 + 变体 + HyDE）分别做向量检索
+    3. 对原始 + 变体查询做 BM25 关键词检索（精确命中专有名词）
+    4. 全部路结果用 RRF 合并，取 top_k 条候选
+    5. Cross-Encoder 对前 rerank_candidates 条精排，其余保持 RRF 顺序，最终返回 top_k 条
 
     Args:
         question: 原始问题
         collection: ChromaDB collection
+        llm: LLM 实例
         top_k: 最终返回数量
+        use_multi_query: 是否使用多查询
+        use_hyde: 是否使用 HyDE
         use_bm25: 是否使用 BM25 关键词检索
         use_rerank: 是否使用 Cross-Encoder 重排序
+        num_variants: 查询变体数量
         use_source_weight: 是否按语料来源类型加权（original/oral/anchor 优先，
             secondary 二手解读强降权，避免第三者评价冒充名人原话）
 
@@ -227,6 +407,24 @@ async def advanced_retrieval(
 
     embedder = get_embedder()
 
+    # ============================================================
+    # 改写与"原始查询检索"重叠执行（教育区延迟优化）
+    # ============================================================
+    # 旧流程串行：先等改写 LLM（预算 2s）→ 再做向量/BM25。
+    # 但改写只服务"变体 + HyDE"这几路查询，原始查询的向量 + BM25 根本不依赖它——
+    # 完全可以并行。新流程：
+    #   1) 改写任务直接 create_task 发车（不 await，不在此等待）
+    #   2) 立即对原始查询跑向量 + BM25（与改写 LLM 重叠）
+    #   3) 原始路跑完后再收改写结果（_rewrite_with_budget 的等待预算从任务启动起算，
+    #      原始路通常几百 ms~2s，届时改写多半已就绪 → 实际额外等待趋近 0）
+    #   4) 有变体/HyDE 再补第二轮向量 + BM25，与原始路结果一起 RRF 合并
+    # 检索语义与旧实现完全一致（同样的查询集合、同样的合并方式），只是时序重叠。
+    if use_multi_query or use_hyde:
+        rewrite_task = asyncio.create_task(
+            _rewrite_with_budget(question, llm, num_variants)
+        )
+    else:
+        rewrite_task = None
 
     fetch_k = top_k * 2  # 多取一些用于合并
 
@@ -305,6 +503,7 @@ async def advanced_retrieval(
         return bm25_ready[1], await _bm25_pass([question], bm25_ready[1])
 
     bm25_task = asyncio.create_task(_bm25_first_pass()) if use_bm25 else None
+    bm25_index = None
 
     try:
         query_results_list.extend(await vec_task)
@@ -316,12 +515,45 @@ async def advanced_retrieval(
 
     if bm25_task is not None:
         try:
-            _index, first_groups = await bm25_task
+            bm25_index, first_groups = await bm25_task
             query_results_list.extend(first_groups)
         except Exception as e:
             print(f"[Advanced Retrieval] BM25 检索失败，跳过: {e}")
 
-    # ---- 收两路结果（向量 + BM25 均只跑原始查询）----
+    # ---- 收改写结果（预算从任务启动时已开始计算，此处通常只需极短等待）----
+    if rewrite_task is not None:
+        try:
+            query_variants, hyde_doc = await rewrite_task
+        except Exception as e:
+            print(f"[Advanced Retrieval] 改写任务异常，退化为仅原始查询: {e}")
+            query_variants, hyde_doc = [], ""
+    else:
+        query_variants, hyde_doc = [], ""
+
+    # 构建第二路查询列表（变体 + HyDE）
+    extra_queries: list[str] = []
+    extra_queries.extend(query_variants)
+    if hyde_doc:
+        extra_queries.append(hyde_doc)
+
+    if extra_queries:
+        print(f"[Advanced Retrieval] 改写补充 {len(extra_queries)} 路查询:")
+        for q in extra_queries:
+            print(f"  [改写] {q[:60]}...")
+
+        # 第二轮：变体 + HyDE 的向量检索
+        try:
+            query_results_list.extend(await _vector_pass(extra_queries))
+        except Exception as e:
+            print(f"[Advanced Retrieval] 变体向量检索失败，跳过: {e}")
+
+        # 第二轮：变体的 BM25 检索（HyDE 是长文档，不进 BM25；与旧实现一致）
+        if bm25_index is not None and query_variants:
+            try:
+                query_results_list.extend(await _bm25_pass(query_variants, bm25_index))
+            except Exception as e:
+                print(f"[Advanced Retrieval] 变体 BM25 检索失败，跳过: {e}")
+
     stage_mark("retrieval_ms", (time.perf_counter() - _retrieval_t0) * 1000)
 
     # ---- Step 3: RRF 合并（按语料来源类型加权）----
