@@ -127,7 +127,6 @@ class Settings(BaseSettings):
     chunk_overlap: int = 100
     retrieval_top_k: int = 50
     rerank_top_k: int = 5
-    bm25_weight: float = 0.5
 
     # 【已删除 2026-10-18】检索查询改写（Multi-Query + HyDE）及配套的
     # skip_rewrite_max_chars / rewrite_deadline_sec / rewrite_timeout_sec / rewrite_enabled
