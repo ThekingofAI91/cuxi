@@ -658,13 +658,14 @@ def should_trigger_graph_retrieval(
     """
     决定是否调用知识图谱，只做「概念覆盖缺口」这一件事的守门。
 
-    返回 (是否触发, 原因)。触发条件（任一成立即触发）：
-    1) 文本召回数量不足（< graph_trigger_min_docs）→ 退化兜底，正常注入 5 条时不会走到；
-    2) 查询命中图谱实体，但该实体未被文本结果覆盖 → 文本漏掉了关键概念关联。
+    判据只有一条：查询命中的图谱实体，没有被文本检索结果覆盖。
 
-    注意：这里没有「相关性偏弱」这条信号。RRF 分数的大小主要由来源权重决定
-    （同一篇文档单类得分 oral 约 0.0246、anchor 约 0.0328），用一个固定阈值去切它
-    切的是来源类型而不是相关性，实测只能独立多触发 3/98 题，已删除。
+    历史上还有两条阈值信号，都已删除（2026-10-19）：
+      · 「top rrf_score < 0.03」—— RRF 分数的大小主要由来源权重决定（同一篇文档
+        单类得分 oral 约 0.0246、anchor 约 0.0328），固定阈值切的是来源类型而不是
+        相关性，实测只能独立多触发 1/98 题，还把触发原因记成「相关性偏弱」；
+      · 「文本召回条数 < 3」—— 注入固定 5 条，正常路径永远走不到，是死兜底。
+    删完实测触发 85/98（86.7%），100% 来自实体覆盖缺口。
 
     图谱总开关关闭或未构建时直接不触发（静默降级）。
     """
@@ -673,14 +674,7 @@ def should_trigger_graph_retrieval(
     if not graph_exists(collection_name):
         return False, "图谱未构建"
 
-    # 信号 1：召回数量不足
-    if len(retrieved_docs) < settings.graph_trigger_min_docs:
-        return True, f"文本召回不足（{len(retrieved_docs)} 条 < 阈值 {settings.graph_trigger_min_docs}）"
-
-    # 信号 2（top rrf 相关性偏弱）已删除：RRF 分数由来源权重主导，固定阈值切不准
-    # 相关性，详见函数 docstring。
-
-    # 信号 3：实体覆盖缺口（图谱里有该实体，但文本结果未提及）
+    # 实体覆盖缺口：图谱里有该实体，但文本结果未提及
     graph = load_graph(collection_name)
     if graph:
         matched = _match_query_entities(query, graph, n=settings.graph_top_entities)
@@ -694,4 +688,4 @@ def should_trigger_graph_retrieval(
             if uncovered:
                 return True, f"图谱实体未被文本覆盖：{uncovered[:3]}"
 
-    return False, "文本检索质量达标"
+    return False, "查询命中的图谱实体已被文本覆盖"

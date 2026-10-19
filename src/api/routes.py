@@ -2214,6 +2214,17 @@ async def persona_upload_document(
         chunks = chunker.chunk(elements, source=filename)
         print(f"[Persona Upload] 文档分块完成: {len(chunks)} 个块")
 
+        # 非正文块过滤（书名页/版权页/目录/碎片），必须在向量化之前，
+        # 否则 embedding 对应的是过滤前的文本。见 src/retrieval/corpus_filter.py
+        from src.retrieval.corpus_filter import clean_chunks
+        before = len(chunks)
+        chunks, dropped = clean_chunks(chunks)
+        if dropped:
+            print(f"[Persona Upload] 非正文块过滤: 丢弃 {before - len(chunks)} 块 {dict(dropped)}")
+        if not chunks:
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="文档里没有可入库的正文（只有书名页/版权页/目录）")
+
         embedder = get_embedder()
         vectors, metadatas = embedder.embed_documents_with_metadata(chunks)
 

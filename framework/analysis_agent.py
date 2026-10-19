@@ -262,6 +262,27 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
         }
 
 
+_SENTENCE_ENDS = "。！？!?…；;"
+
+
+def _clip_at_sentence(text: str, limit: int) -> str:
+    """按句末边界截断到 limit 以内；找不到像样的句末才硬切。
+
+    为什么不在 limit 处直接切：chunk 是**按句边界**切出来的，硬砍等于把 chunker
+    刚做好的边界再破坏一次，模型读到的是半句（"上帝也并不"）。实测 [:1000] 硬切
+    把 wangyangming 的块尾完整率从 44.2% 打到 5.3%、adler 从 59.7% 打到 46.5%。
+    句末回退太靠前（不足窗口一半）时说明这段本来就没有句读，硬切损失更小。
+    """
+    if limit <= 0 or len(text) <= limit:
+        return text
+    window = text[:limit]
+    cut = max(window.rfind(ch) for ch in _SENTENCE_ENDS)
+    cut = max(cut, window.rfind("\n"))
+    if cut < limit * 0.5:
+        return window
+    return window[: cut + 1].rstrip()
+
+
 def _build_context(docs: list) -> str:
     """
     构建 LLM 上下文。
@@ -271,7 +292,7 @@ def _build_context(docs: list) -> str:
       图谱证据 → [G1]..[Gn]，头标「推断｜非原文」，是三元组归纳出来的关系，
                 不是人物逐字原话。
     旧实现把两者混编成 1..33，模型看到 `[31] 来源: 荣格自传` 就当成原著引用了。
-    检索正文会注入得比分块短（见下方 1000 字说明），推断证据本身只有一句话，
+    正文块只在超过 `inject_doc_chars` 时才截，且截在句末；推断证据本身只有一句话，
     不截断——截了就没有信息了。
     """
     if not docs:
@@ -292,15 +313,14 @@ def _build_context(docs: list) -> str:
             content = (doc.page_content or "").strip()
         else:
             plain_i += 1
-            # 注入条数与每条截断是一对参数（2026-10-02 定，10-19 条数 8→5）：
-            #   5 条 × 1000 字完整段落 ≈ 5K 字。条数减少是为了把精排的候选池撑到 10 条
-            #   （池 > 注入，精排才真参与选人）。
-            #   （更早的全量注入实测：15 × 1000 ≈ 15K 字 → 单请求 40s+、高并发排队严重，
-            #   所以"完整段落"必须配"减条数"才吃得下。）
+            # 注入条数与单条上限是一对参数：5 条 × 1500 字 ≈ 7.5K 字封顶。
+            # 条数压到 5 是为了把精排候选池撑到 10 条（池 > 注入，精排才真参与选人）。
+            # 单条上限从 1000 提到 1500（10-19）：chunk 的实际长度是 1000~1499
+            # （max_size + overlap，再经 _merge_short_tail 合并），原来的 1000 会让
+            # 96% 的块在注入时被砍一刀，砍掉的正是尾巴上最新鲜的内容，而头部那 100 字
+            # overlap 反而留着——又花 token 又丢内容。1500 是保险丝，正常块不会被切。
             header = f"[{plain_i}] 原文｜来源: {source} | 章节: {heading or '未知章节'}"
-            # 实测全库 96.2% 的块长于 1000（中位 1155），这里必然会截掉一截，
-            # 属已知的尾段损失，不在本函数解决（要改就得动分块与注入预算）。
-            content = (doc.page_content or "")[:1000]
+            content = _clip_at_sentence(doc.page_content or "", settings.inject_doc_chars)
 
         context_parts.append(f"{header}\n{content}")
 

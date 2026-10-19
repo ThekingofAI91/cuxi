@@ -80,9 +80,24 @@ class TestHeaderContent:
         assert "非原文" in ctx
         assert "依据:" in ctx
 
-    def test_plain_truncated_at_1000(self):
+    def test_plain_not_truncated_under_limit(self):
+        """块的实际长度是 1000~1499（max_size + overlap + 短尾合并），
+        注入上限 1500 是保险丝——正常块不该被切到。"""
+        ctx = _build_context([_plain("字" * 1499)])
+        assert ctx.count("字") == 1499
+
+    def test_plain_cut_at_sentence_boundary(self):
+        """超上限时截在句末，不在半句处硬砍"""
+        text = "甲" * 800 + "。" + "乙" * 900 + "。" + "丙" * 300
+        ctx = _build_context([_plain(text)])
+        assert "丙" not in ctx              # 超出 1500 的部分丢掉
+        assert ctx.rstrip().endswith("。")   # 结尾是句号，不是半句
+        assert ctx.count("乙") == 0          # 第二句超窗口，整句不进
+
+    def test_plain_hard_cut_without_punctuation(self):
+        """整段没有句读时才硬切到上限"""
         ctx = _build_context([_plain("字" * 3000)])
-        assert ctx.count("字") == 1000
+        assert ctx.count("字") == 1500
 
     def test_infer_not_truncated(self):
         """推断证据来自 graph_evidence_chars=260 的短句，无需再截"""

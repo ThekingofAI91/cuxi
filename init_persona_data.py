@@ -46,6 +46,7 @@ from src.core.config import settings
 from src.corpus_dedup import KEEP_ONE_PER_BOOK, dedupe_cross_format
 from src.document_processing.parser import DocumentParser
 from src.retrieval.chunker import AdaptiveChunker
+from src.retrieval.corpus_filter import clean_chunks
 from src.retrieval.embedder import get_embedder
 from src.retrieval.source_profile import classify_source
 from scenes.persona_chat.config import persona_chat_config
@@ -520,6 +521,15 @@ def load_character_data(character_id: str, dry_run: bool = False, allow_ocr: boo
     print(f"  完成: 常规成功 {stats['ok']} / 失败 {stats['failed']}"
           + (f" / 多模态成功 {v_stats['vision_files']} 本" if v_stats else "")
           + f"，共 {len(all_chunks)} 块，解析耗时 {stats['secs']:.1f}s")
+
+    # 非正文块过滤：书名页 / 版权页 / 目录 / 短碎片。
+    # 必须放在向量化之前——清洗会改文本，先清洗再 embed 才能保证向量与文本一致。
+    before = len(all_chunks)
+    all_chunks, dropped = clean_chunks(all_chunks)
+    if dropped:
+        print(f"  非正文块过滤: 丢弃 {before - len(all_chunks)} 块 "
+              f"{dict(sorted(dropped.items(), key=lambda kv: -kv[1]))}"
+              f"（书名页/版权页/目录/碎片；见 src/retrieval/corpus_filter.py）")
     if v_stats:
         print(f"  多模态转录: {v_stats['vision_pages_ok']} 页成功 / "
               f"{v_stats['vision_pages_fail']} 页失败")

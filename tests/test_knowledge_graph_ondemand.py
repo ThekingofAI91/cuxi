@@ -17,7 +17,6 @@ import time
 import pytest
 from langchain_core.documents import Document
 
-from src.core.config import settings
 from src.retrieval import knowledge_graph as kg
 
 
@@ -146,7 +145,6 @@ class TestLoadGraphCache:
 
 class TestShouldTriggerGraphRetrieval:
     def _patch(self, monkeypatch, exists=True, graph=None):
-        monkeypatch.setattr(settings, "graph_trigger_min_docs", 3)
         monkeypatch.setattr(kg, "graph_exists", lambda name: exists)
         monkeypatch.setattr(
             kg, "load_graph", lambda name: graph if graph is not None else _make_graph()
@@ -159,13 +157,17 @@ class TestShouldTriggerGraphRetrieval:
         assert trigger is False
         assert "未构建" in reason
 
-    def test_few_docs_triggers(self, monkeypatch):
-        """文本召回不足（< 阈值）→ 触发"""
+    def test_few_docs_does_not_trigger(self, monkeypatch):
+        """回归守卫：召回条数少不再是触发理由（该信号因永远走不到已删除）
+
+        注入固定 5 条，`< 3 条` 这条路正常链路永远不会成立，属死兜底。
+        只要查询命中的实体已被文本覆盖，哪怕只召回 2 条也不触发。
+        """
         self._patch(monkeypatch)
         docs = [_doc("荣格提出了原型理论", 0.05), _doc("原型属于集体潜意识", 0.04)]
         trigger, reason = kg.should_trigger_graph_retrieval("原型", docs, "x")
-        assert trigger is True
-        assert "召回不足" in reason
+        assert trigger is False
+        assert "已被文本覆盖" in reason
 
     def test_low_top_score_does_not_trigger(self, monkeypatch):
         """回归守卫：RRF 分数低不再触发图谱（该信号因刻度失真已删除）
@@ -177,10 +179,10 @@ class TestShouldTriggerGraphRetrieval:
         docs = [_doc("荣格提出了原型理论", 0.005) for _ in range(5)]
         trigger, reason = kg.should_trigger_graph_retrieval("原型", docs, "x")
         assert trigger is False
-        assert "达标" in reason
+        assert "已被文本覆盖" in reason
 
     def test_entity_uncovered_triggers(self, monkeypatch):
-        """分数/条数达标，但查询命中的图谱实体未被文本覆盖 → 触发"""
+        """实体覆盖缺口：查询命中的图谱实体未被文本覆盖 → 触发"""
         self._patch(monkeypatch)
         docs = [_doc("荣格提出了原型理论", 0.2) for _ in range(5)]  # 缺「集体潜意识」
         trigger, reason = kg.should_trigger_graph_retrieval(
@@ -191,14 +193,14 @@ class TestShouldTriggerGraphRetrieval:
         assert "集体潜意识" in reason
 
     def test_quality_ok_skips(self, monkeypatch):
-        """文本覆盖全部命中实体且质量达标 → 不触发（纯文本检索）"""
+        """文本覆盖全部命中实体 → 不触发（纯文本检索）"""
         self._patch(monkeypatch)
         docs = [_doc("荣格提出了原型理论，原型属于集体潜意识", 0.2) for _ in range(5)]
         trigger, reason = kg.should_trigger_graph_retrieval(
             "原型和集体潜意识的关系", docs, "x"
         )
         assert trigger is False
-        assert "达标" in reason
+        assert "已被文本覆盖" in reason
 
 
 # ============================================================
