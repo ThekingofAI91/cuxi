@@ -26,7 +26,9 @@ output/
 GUIDE.md
 DEPLOY.md
 docs/*
-# 例外：README 要引用的截图随仓库走，只白名单这几个文件。
+# 例外 1：README 引用的工程笔记（只放技术推导与实测，不含个人信息）
+!docs/engineering-notes.md
+# 例外 2：README 要引用的截图随仓库走，只白名单这几个文件。
 # 注意 docs/images/setup-*.png 曾在开源清洗时按「露出服务器信息」清出全部历史，别再放回来。
 !docs/images/
 docs/images/*
