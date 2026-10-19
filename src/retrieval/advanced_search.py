@@ -438,8 +438,8 @@ async def advanced_retrieval(
     1. 并行生成查询变体 + HyDE 假设文档
     2. 对每个查询（原始 + 变体 + HyDE）分别做向量检索
     3. 对原始 + 变体查询做 BM25 关键词检索（精确命中专有名词）
-    4. 各路结果按「每类一票 + 类间权重」做 RRF 合并，取 top_k 条候选
-    5. Cross-Encoder 对前 rerank_candidates 条精排，其余保持 RRF 顺序，最终返回 top_k 条
+    4. 各路结果按「每类一票 + 类间权重」做 RRF 合并，取 rerank_pool_size 条进候选池
+    5. Cross-Encoder 对整个候选池精排（池子默认 10、注入默认 5），最终返回 top_k 条
 
     Args:
         question: 原始问题
@@ -480,7 +480,10 @@ async def advanced_retrieval(
     else:
         rewrite_task = None
 
-    fetch_k = top_k * 2  # 多取一些用于合并
+    # 候选池：精排要真正参与「选人」，池子就必须大于最终返回条数。
+    # 轻量档（use_rerank=False）不精排，池子就等于 top_k，行为与旧版一致。
+    pool_size = max(top_k, settings.rerank_pool_size) if use_rerank else top_k
+    fetch_k = max(top_k, pool_size) * 2  # 每路多取一些用于融合
 
     async def _vector_pass(queries: list[str]) -> list[list[str]]:
         """批量向量检索：一次批量 embed + 一次 ChromaDB 批量查询，返回每路 ranked doc_ids。"""
@@ -636,11 +639,9 @@ async def advanced_retrieval(
         reverse=True,
     )
 
-    # ---- Step 4: 构建候选（多取一些供重排序选择）----
+    # ---- Step 4: 构建候选池（要比最终返回条数多，精排才有「选人」的余地）----
     candidate_docs: list[Document] = []
-    # 候选数与最终 top_k 一致：RRF 前 top_k 已覆盖高相关文档，
-    # 候选越少，CPU 重排（560M 参数）越快（20 对 → 15 对，约省 25% 推理时间）
-    candidate_limit = top_k
+    candidate_limit = pool_size
 
     from src.retrieval.source_profile import classify_source
 
@@ -659,23 +660,26 @@ async def advanced_retrieval(
             )
         )
 
-    # ---- Step 5: Cross-Encoder 重排序（只精排 RRF 前 N 条，其余按 RRF 顺序兜底）----
-    # 重组后块为完整段落（~1000 字符），若对全部候选（默认 8 条 = top_k）都做 CPU 精排会显著拖慢单请求；
-    # 只精排 rerank_candidates（默认 5）对，剩余候选保持 RRF 顺序拼接，质量损失小、耗时减半。
-    rerank_n = settings.rerank_candidates
-    head = candidate_docs[:rerank_n]
-    tail = candidate_docs[rerank_n:]
-    if use_rerank and len(head) > 1:
+    # ---- Step 5: Cross-Encoder 精排整个候选池，再按 top_k 截断 ----
+    # 池子（rerank_pool_size，默认 10）> 注入条数（top_k，默认 5）是本步的前提：
+    # 只有池子更大，精排的排序才会实际决定「哪几条被留下」。若池子 == 注入条数，
+    # 精排就退化成纯排序器，改它等于白改（2026-10-18 的视野实验已证）。
+    # 代价：10 对 × 500 字 × 512 token ≈ 1.9s（int8，CPU 4 并发）。
+    if use_rerank and len(candidate_docs) > 1:
         try:
             from src.retrieval.reranker import rerank_documents
-            # CPU 推理（默认 5 对 × 256 token）需数秒，同步调用会阻塞事件循环，放线程池
+            # CPU 推理同步调用会阻塞事件循环，放线程池
             _rerank_t0 = time.perf_counter()
-            head = await asyncio.to_thread(rerank_documents, question, head, top_k=rerank_n)
+            candidate_docs = await asyncio.to_thread(
+                rerank_documents, question, candidate_docs, top_k=len(candidate_docs),
+            )
             stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
-            print(f"[Advanced Retrieval] Cross-Encoder 重排序完成（前 {len(head)} 条精排 + {len(tail)} 条 RRF 兜底）")
+            print(
+                f"[Advanced Retrieval] Cross-Encoder 精排 {len(candidate_docs)} 条"
+                f"（池 {candidate_limit} → 注入 {min(top_k, len(candidate_docs))}）"
+            )
         except Exception as e:
             print(f"[Advanced Retrieval] 重排序失败，保持 RRF 顺序: {e}")
-    candidate_docs = head + tail
 
     retrieved_docs = candidate_docs[:top_k]
     contexts = [doc.page_content for doc in retrieved_docs]

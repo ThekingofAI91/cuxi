@@ -813,12 +813,12 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
         use_rewrite = settings.rewrite_enabled
 
-        # 执行高级检索（条数与主链路 retrieve_documents 保持一致：8 条完整段落）
+        # 执行高级检索（条数与主链路 retrieve_documents 保持一致：注入 5 条完整段落）
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
             llm=retrieval_llm,
-            top_k=8,
+            top_k=5,
             use_multi_query=use_rewrite,
             use_hyde=use_rewrite,
             num_variants=2,
@@ -1562,7 +1562,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
 
                 # 检索力度不由 API 层预判分区：改由 supervisor_agent 的
                 # search_library 工具入参 strong 在运行时决定——模型按请求性质选
-                # 强检索（全管线 8 条，可溯源）或轻量（top-3 软背景，娱乐区默认）；
+                # 强检索（全管线 5 条，可溯源）或轻量（top-3 软背景，娱乐区默认）；
                 # 完全不检索就表现为"模型不调这个工具"，没有单独的开关参数。
                 _is_ent = character.zone == "entertainment"
                 # 娱乐区但无示例对话/世界书：只能靠背景检索撑住，日志留痕便于发现"弱角色卡"

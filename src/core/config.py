@@ -104,9 +104,12 @@ class Settings(BaseSettings):
     # 重排序与向量化并发上限（CPU 推理有界并行：全串行浪费多核，全放开会互相抢占）
     rerank_max_concurrent: int = 2
     embedding_max_concurrent: int = 4
-    # 精排候选数：RRF 前 N 条交给 Cross-Encoder（其余按 RRF 顺序兜底），
-    # 候选越多 CPU 越慢（15 对 ≈ 20s+），5 对 ≈ 3-4s，排序质量损失很小
-    rerank_candidates: int = 5
+    # 精排候选池：RRF 之后取多少条交给 Cross-Encoder，精排完再按调用方要的条数截断。
+    # 关键语义：这个值必须 **大于** 最终注入条数，精排才真正参与「选人」而不只是「排座」。
+    # 旧实现把候选池等同于注入条数（candidate_limit=top_k），精排只能改顺序、改不了集合，
+    # 2026-10-18 的视野实验因此完全测不出收益（110 题五维全在噪声层内）。
+    # 成本：每条约 190ms（500 字 / 512 token，int8，CPU），10 条 ≈ 1.9s。
+    rerank_pool_size: int = 10
     # 重排模型 int8 动态量化（只量化 encoder 层 Linear）：
     # 实测（bge-reranker-v2-m3，CPU 8 线程，真实语料）5 对 1925→1223ms（1.57x），
     # 排序一致度 0.8-0.98（翻转集中在分差毫厘之间的近并列对，不影响头部选择）。
@@ -167,7 +170,7 @@ class Settings(BaseSettings):
 
     # 检索力度不再按角色分区走两条路，而是由检索工具 search_library 的 strong
     # 参数在运行时决定（framework/supervisor_agent.py）：
-    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + 精排 + 知识图谱，8 条带来源
+    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + 精排（10 选 5）+ 知识图谱，5 条带来源
     #   strong=False → 轻量检索：仅向量+BM25 召回 top-3，作为软背景、不带来源
     # 模型按请求性质自选；工具描述里带本区倾向提示，所以合并路由不会把娱乐区
     # 拖进全管线（教育区偏 true，娱乐区偏 false）。已无 parse 期的分区判据函数。
