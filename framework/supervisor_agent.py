@@ -229,9 +229,12 @@ async def retrieve_documents(
         )
         print(f"[Retrieval] 高级检索召回 {len(retrieved_docs)} 条")
 
-        # ---- 3. 知识图谱 RAG 增强（GraphRAG，按需调用）----
-        # 默认只用文本检索；只有当文本检索质量不达标（召回不足 / top 相关性弱 /
-        # 关键实体未被文本覆盖）时才启动图谱增强，避免每轮都多跑一次子图扩展。
+        # ---- 3. 知识图谱 RAG 增强（GraphRAG）----
+        # 触发判据只有一条实质信号：查询命中的图谱实体没有被文本结果覆盖，
+        # 也就是文本检索漏掉了概念关联（另有召回条数退化兜底）。判据是语义的，
+        # 不看 RRF 分数——RRF 分数由来源权重主导，拿固定阈值切它切的是来源类型。
+        # 实测教育区提问几乎都命中已知实体，所以图谱实际上接近常开；
+        # 子图扩展耗时约 75ms（中位 19ms），相对 2.3s 的文本检索可忽略。
         # 图谱未构建或总开关关闭 → 静默降级，不影响原混合检索。
         graph_used = False
         if settings.graph_rag_enabled and graph_exists(collection.name) and not light_retrieval:
@@ -264,7 +267,7 @@ async def retrieve_documents(
                     else:
                         print(f"[Retrieval] 图谱已触发（{reason}）但无命中")
                 else:
-                    print(f"[Retrieval] 文本检索质量达标，跳过知识图谱（{reason}）")
+                    print(f"[Retrieval] 跳过知识图谱（{reason}）")
             except Exception as ge:
                 print(f"[Retrieval] 知识图谱检索失败，跳过: {ge}")
 
@@ -366,10 +369,14 @@ def render_docs_for_tool(docs: list, strong: bool = True) -> str:
         return f"【你记得的事】\n{body}" if body else ""
 
     body = _build_context(docs)
-    return f"""以下是检索到的原文片段，编号供正文引用标注使用。
+    return f"""以下是检索到的资料，两套编号不可混用。
 
-【引用标注】回答中的关键论断、概念解释、事实与数字，请在句末标注所依据资料的编号（如 [2]）；
-一个论断依据多条资料时可并列（如 [1][3]）；延伸推理部分不标注。编号与下方资料清单一一对应。
+【引用标注】
+- `[n]` = 原文片段（[1]..[N]）：关键论断、概念解释、事实与数字，在句末标注所依据的编号（如 [2]）；
+  一个论断依据多条可并列（如 [1][3]）；延伸推理部分不标注。
+- `[Gk]` = 知识图谱推断（[G1]..[Gk]）：是三元组归纳出的关系，不是人物原话。
+  用到它时必须写成「从……的关系可以推断」「由此脉络看」这类语气，禁止写成"某某说""原著写道"，
+  也不得用 [n] 的编号去指它。
 
 {body}"""
 

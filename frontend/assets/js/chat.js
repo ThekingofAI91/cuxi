@@ -516,14 +516,17 @@ function stripMetaSections(text) {
 function renderMarkdownLite(text, docMap) {
   if (!text) return '';
   let html = escapeHtml(text);
-  // 内联引用角标：正文 [n] → 悬浮显示来源著作与章节（docMap 由后端 result 事件携带，
-  // 编号与提示词里的资料清单一一对应；verifier 的"#### N."编号格式不匹配本规则，不受影响）
+  // 内联引用角标两套编号，docMap 由后端 result 事件携带、与提示词资料清单一一对应：
+  //   [n]  = 原文片段（检索到的真实段落）
+  //   [Gk] = 图谱推断（实体关系的推断句，不是原文字句）
+  // 两套分开渲染，避免推断角标混进原文序列（旧 bug：[31] 实际指向一条推断）。
   if (Array.isArray(docMap) && docMap.length) {
-    html = html.replace(/\[(\d{1,2})\]/g, (m, n) => {
-      const d = docMap.find(x => +x.n === +n);
+    html = html.replace(/\[(G?\d{1,2})\]/g, (m, tag) => {
+      const d = docMap.find(x => String(x.n) === tag);
       if (!d) return m;
-      const tip = [d.source, d.heading].filter(Boolean).join(' · ');
-      return `<sup class="cite-mark" title="${escapeHtml(tip)}">[${n}]</sup>`;
+      const isInfer = d.kind === 'infer';
+      const tip = [isInfer ? '推断（非原文）' : '', d.source, d.heading].filter(Boolean).join(' · ');
+      return `<sup class="cite-mark${isInfer ? ' is-infer' : ''}" title="${escapeHtml(tip)}">[${tag}]</sup>`;
     });
   }
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');

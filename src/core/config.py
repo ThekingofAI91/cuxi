@@ -301,11 +301,12 @@ class Settings(BaseSettings):
     graph_evidence_chars: int = 260     # 单条证据片段截断字符数
     graph_context_chars: int = 2200     # 图谱上下文总字符上限
 
-    # ---- 知识图谱「按需触发」阈值（默认只在文本检索不达标时才启动图谱增强）----
-    # 文本召回条数少于该值 → 触发；top rrf_score 低于该值 → 触发。
-    # 二者都不触发、且查询命中的图谱实体均已被文本结果覆盖 → 跳过图谱（纯文本检索）。
-    graph_trigger_min_docs: int = 3     # 文本召回不足阈值（条）
-    graph_trigger_score: float = 0.03   # 文本 top 相关性偏弱阈值（rrf_score）
+    # ---- 知识图谱「按需触发」阈值 ----
+    # 触发只有两条路：文本召回条数少于该值（退化兜底），或查询命中的图谱实体未被文本覆盖。
+    # 原先还有一条「top rrf_score < 0.03」，已删：RRF 分数由来源权重决定
+    # （oral 单类约 0.0246、anchor 约 0.0328），阈值跨不过去只是来源类型差异，
+    # 不是相关性差异，等于随机开关，实测只能独立多触发 3/98 题。
+    graph_trigger_min_docs: int = 3     # 文本召回不足阈值（条，退化兜底）
 
     def get_chroma_path(self) -> Path:
         """返回 ChromaDB 持久化路径"""

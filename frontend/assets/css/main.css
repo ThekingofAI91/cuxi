@@ -2222,6 +2222,12 @@ body[data-theme='original'] {
   opacity: 1;
   text-decoration: underline;
 }
+/* 图谱推断角标：[Gk] 不是原文字句，用琥珀色 + 虚线下划与原文角标区分 */
+.cite-mark.is-infer {
+  color: #a9762f;
+  border-bottom: 1px dashed currentColor;
+  opacity: 0.75;
+}
 
 /* ============================================================
    移动端深度优化 II

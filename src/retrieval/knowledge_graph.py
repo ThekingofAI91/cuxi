@@ -647,7 +647,7 @@ async def retrieve_graph_context(
 
 
 # ============================================================
-# 按需触发判断（文本检索质量不达标才启动图谱）
+# 触发判断（概念覆盖缺口才启动图谱）
 # ============================================================
 
 def should_trigger_graph_retrieval(
@@ -656,12 +656,15 @@ def should_trigger_graph_retrieval(
     collection_name: str,
 ) -> tuple[bool, str]:
     """
-    决定是否「按需」调用知识图谱：默认只用文本检索；仅当文本检索质量不达标时才启动图谱增强。
+    决定是否调用知识图谱，只做「概念覆盖缺口」这一件事的守门。
 
     返回 (是否触发, 原因)。触发条件（任一成立即触发）：
-    1) 文本召回数量不足（< graph_trigger_min_docs）→ 文本没找到足够材料；
-    2) 文本 top 相关性偏弱（rrf_score < graph_trigger_score）→ 最相关片段也很弱；
-    3) 查询命中图谱实体，但该实体未被文本结果覆盖 → 文本漏掉了关键概念关联。
+    1) 文本召回数量不足（< graph_trigger_min_docs）→ 退化兜底，正常注入 5 条时不会走到；
+    2) 查询命中图谱实体，但该实体未被文本结果覆盖 → 文本漏掉了关键概念关联。
+
+    注意：这里没有「相关性偏弱」这条信号。RRF 分数的大小主要由来源权重决定
+    （同一篇文档单类得分 oral 约 0.0246、anchor 约 0.0328），用一个固定阈值去切它
+    切的是来源类型而不是相关性，实测只能独立多触发 3/98 题，已删除。
 
     图谱总开关关闭或未构建时直接不触发（静默降级）。
     """
@@ -674,13 +677,8 @@ def should_trigger_graph_retrieval(
     if len(retrieved_docs) < settings.graph_trigger_min_docs:
         return True, f"文本召回不足（{len(retrieved_docs)} 条 < 阈值 {settings.graph_trigger_min_docs}）"
 
-    # 信号 2：top 相关性偏弱
-    top_score = max(
-        ((d.metadata or {}).get("rrf_score", 0.0) for d in retrieved_docs),
-        default=0.0,
-    )
-    if top_score < settings.graph_trigger_score:
-        return True, f"文本相关性偏弱（top rrf={top_score:.3f} < 阈值 {settings.graph_trigger_score}）"
+    # 信号 2（top rrf 相关性偏弱）已删除：RRF 分数由来源权重主导，固定阈值切不准
+    # 相关性，详见函数 docstring。
 
     # 信号 3：实体覆盖缺口（图谱里有该实体，但文本结果未提及）
     graph = load_graph(collection_name)

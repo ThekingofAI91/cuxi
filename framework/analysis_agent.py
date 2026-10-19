@@ -263,21 +263,46 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 
 
 def _build_context(docs: list) -> str:
-    """构建 LLM 上下文"""
+    """
+    构建 LLM 上下文。
+
+    ★两套编号必须分开（2026-10-19）：
+      正文块 → [1]..[N]，头标「原文」，正文里的 [n] 只能指这些；
+      图谱证据 → [G1]..[Gn]，头标「推断｜非原文」，是三元组归纳出来的关系，
+                不是人物逐字原话。
+    旧实现把两者混编成 1..33，模型看到 `[31] 来源: 荣格自传` 就当成原著引用了。
+    检索正文会注入得比分块短（见下方 1000 字说明），推断证据本身只有一句话，
+    不截断——截了就没有信息了。
+    """
     if not docs:
         return "（无参考资料）"
 
     context_parts = []
-    for i, doc in enumerate(docs, 1):
-        source = doc.metadata.get("source", "未知来源")
-        heading = doc.metadata.get("heading", "未知章节")
-        # 注入条数与每条截断是一对参数（2026-10-02 定，10-19 条数 8→5）：
-        #   5 条 × 1000 字完整段落 ≈ 5K 字。条数减少是为了把精排的候选池撑到 10 条
-        #   （池 > 注入，精排才真参与选人），每条仍保留完整语义段落不被拦腰截断。
-        #   （更早的全量注入实测：15 × 1000 ≈ 15K 字 → 单请求 40s+、高并发排队严重，
-        #   所以"完整段落"必须配"减条数"才吃得下。）
-        content = doc.page_content[:1000]  # 块本就按 1000 切，等于注入完整段落
-        context_parts.append(f"[{i}] 来源: {source} | 章节: {heading}\n{content}")
+    plain_i = 0   # 正文块序号
+    infer_i = 0   # 推断证据序号
+    for doc in docs:
+        meta = doc.metadata or {}
+        source = meta.get("source") or "未知来源"
+        heading = meta.get("heading") or ""
+
+        if meta.get("kg_inferred"):
+            infer_i += 1
+            basis = " · ".join(x for x in (source, heading) if x) or "图谱关系"
+            header = f"[G{infer_i}] 推断｜非原文，依据: {basis}"
+            content = (doc.page_content or "").strip()
+        else:
+            plain_i += 1
+            # 注入条数与每条截断是一对参数（2026-10-02 定，10-19 条数 8→5）：
+            #   5 条 × 1000 字完整段落 ≈ 5K 字。条数减少是为了把精排的候选池撑到 10 条
+            #   （池 > 注入，精排才真参与选人）。
+            #   （更早的全量注入实测：15 × 1000 ≈ 15K 字 → 单请求 40s+、高并发排队严重，
+            #   所以"完整段落"必须配"减条数"才吃得下。）
+            header = f"[{plain_i}] 原文｜来源: {source} | 章节: {heading or '未知章节'}"
+            # 实测全库 96.2% 的块长于 1000（中位 1155），这里必然会截掉一截，
+            # 属已知的尾段损失，不在本函数解决（要改就得动分块与注入预算）。
+            content = (doc.page_content or "")[:1000]
+
+        context_parts.append(f"{header}\n{content}")
 
     return "\n\n---\n\n".join(context_parts)
 

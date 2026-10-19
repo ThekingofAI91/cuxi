@@ -147,7 +147,6 @@ class TestLoadGraphCache:
 class TestShouldTriggerGraphRetrieval:
     def _patch(self, monkeypatch, exists=True, graph=None):
         monkeypatch.setattr(settings, "graph_trigger_min_docs", 3)
-        monkeypatch.setattr(settings, "graph_trigger_score", 0.03)
         monkeypatch.setattr(kg, "graph_exists", lambda name: exists)
         monkeypatch.setattr(
             kg, "load_graph", lambda name: graph if graph is not None else _make_graph()
@@ -168,13 +167,17 @@ class TestShouldTriggerGraphRetrieval:
         assert trigger is True
         assert "召回不足" in reason
 
-    def test_low_top_score_triggers(self, monkeypatch):
-        """top rrf_score 低于阈值 → 触发"""
+    def test_low_top_score_does_not_trigger(self, monkeypatch):
+        """回归守卫：RRF 分数低不再触发图谱（该信号因刻度失真已删除）
+
+        RRF 分数由来源权重主导（oral 单类约 0.0246 / anchor 约 0.0328），
+        拿固定阈值切它切的是来源类型而不是相关性，所以低分本身不是触发理由。
+        """
         self._patch(monkeypatch)
-        docs = [_doc("荣格提出了原型理论", 0.02) for _ in range(5)]
+        docs = [_doc("荣格提出了原型理论", 0.005) for _ in range(5)]
         trigger, reason = kg.should_trigger_graph_retrieval("原型", docs, "x")
-        assert trigger is True
-        assert "相关性偏弱" in reason
+        assert trigger is False
+        assert "达标" in reason
 
     def test_entity_uncovered_triggers(self, monkeypatch):
         """分数/条数达标，但查询命中的图谱实体未被文本覆盖 → 触发"""
