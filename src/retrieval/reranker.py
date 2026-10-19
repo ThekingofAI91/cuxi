@@ -27,6 +27,20 @@ _SCORE_CACHE: OrderedDict[tuple, float] = OrderedDict()
 _SCORE_CACHE_MAX = 2000
 _SCORE_CACHE_LOCK = threading.Lock()
 
+# 精排输入跨度（字符）与 token 上限。
+#
+# 2026-10-18 实测（output/_rerank_span_probe.py，98 题 × 8 候选 = 784 对，改写关）：
+#   200 字 / 256 token  vs  500 字 / 512 token
+#   → top-1 只一致 44.9%（44/98）、top-3 完全相同 24.5%、Spearman 0.636
+#   → ≥800 字的块平均 +0.123 logit，<300 字的块 -0.017
+#   即「只读开头」并不够：长块的段首多是过渡句，答案在中段。5 道题的 top1 从第
+#   6-8 名直接翻到第 1，全都是 1100-1223 字的长块。
+# 上限 512 是模型决定的：bge-reranker-base 的 max_position_embeddings=514，
+# 写超过 512 的 max_length 不会生效（实测 1024 与 512 的分数逐位相同）。
+# 成本：80ms/对 → 192ms/对；生产每请求 5 对，约 0.4s → 0.96s。
+MAX_PAIR_CHARS = 500
+MAX_PAIR_TOKENS = 512
+
 
 def _score_cache_get(key: tuple) -> Optional[float]:
     with _SCORE_CACHE_LOCK:
@@ -45,7 +59,7 @@ def _score_cache_put(key: tuple, score: float) -> None:
 
 
 def _pair_cache_key(query_head: str, doc: Document) -> tuple:
-    doc_fp = hashlib.md5((doc.page_content or "")[:200].encode("utf-8")).hexdigest()
+    doc_fp = hashlib.md5((doc.page_content or "")[:MAX_PAIR_CHARS].encode("utf-8")).hexdigest()
     return (query_head, doc_fp)
 
 
@@ -185,11 +199,11 @@ class Reranker:
             return self._rerank_fallback(query, candidates, top_k)
 
         # 构造 (query, document) 对
-        # 手动截断输入：实测 sentence-transformers 的 max_length 参数在部分版本/模型上
-        # 不生效（bge-reranker-v2-m3 上 1200 字符文本带/不带 max_length 耗时几乎一样），
-        # 长文本（重组后块 ~1000 字符）会导致 CPU 全量推理 60s+；截到 200 字符 ≈ 200 token，
-        # 排序主要依赖开头语义，精度损失可忽略，耗时回落到 3-5s。
-        max_pair_chars = 200
+        # 输入跨度见模块顶部的 MAX_PAIR_CHARS / MAX_PAIR_TOKENS：
+        # 曾写死 200 字符，理由是「排序主要依赖开头语义」——2026-10-18 实测推翻了它
+        # （200 vs 500 字 top1 只一致 44.9%）。500 字 / 512 token 已是 bge-reranker-base
+        # 的位置编码上限，再长无效；换 v2-m3 才有继续放宽的空间。
+        max_pair_chars = MAX_PAIR_CHARS
         query_head = query[:max_pair_chars]
 
         # 分数缓存：命中的对不进推理，只精排未命中的（重复问题可整批命中 → 零推理）
@@ -208,11 +222,13 @@ class Reranker:
             # 推理有界并行：信号量内同时最多 rerank_max_concurrent 个 CPU 推理，
             # 超出排队；比全串行吞吐高，比无界并发稳定
             with self._predict_sem:
-                # 限制输入长度：chunk 通常数百字，尾部对排序贡献小，
-                # 截断到 256 token 可显著加速 CPU 推理（512→256 约省一半时间）；
-                # 旧版 API 不支持则全量推理
+                # token 上限跟着输入跨度走（MAX_PAIR_TOKENS=512）：只放宽字符数、
+                # 不放宽 token 上限的话，500 字会被 256 token 悄悄截回 ~250 字，
+                # 等于白改。旧版 API 不支持 max_length 则全量推理。
                 try:
-                    scores = m.predict(pairs, show_progress_bar=False, max_length=256)
+                    scores = m.predict(
+                        pairs, show_progress_bar=False, max_length=MAX_PAIR_TOKENS,
+                    )
                 except TypeError:
                     scores = m.predict(pairs, show_progress_bar=False)
             for (idx, _p), score in zip(to_predict, scores):
