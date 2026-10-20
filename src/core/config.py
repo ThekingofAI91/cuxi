@@ -110,6 +110,13 @@ class Settings(BaseSettings):
     # 2026-10-18 的视野实验因此完全测不出收益（110 题五维全在噪声层内）。
     # 成本：每条约 190ms（500 字 / 512 token，int8，CPU），10 条 ≈ 1.9s。
     rerank_pool_size: int = 10
+    # 免精排直通条数（2026-10-20）：RRF 名次前 N 条不交给 Cross-Encoder，直接进上下文。
+    # 动机：RRF 与精排的选人交集实测只有 2.80/5（15 题），说明精排会把 RRF 的头部整体换掉，
+    # 而 RRF 第 1 名被换掉的题里，被换掉的往往正是原文出处（精排只看 query-段落对，
+    # 不看这段在其他榜上的名次一致性）。折中做法：头部信 RRF，尾部信精排。
+    # 调用方在 top_k 里给总注入条数，anchor_k 从里面划出前 N 条，剩下交给精排选。
+    # anchor_k=0 等价于旧行为（全池精排），脚本与 A/B 仍可用老口径。
+    rerank_anchor_k: int = 3
     # 重排模型 int8 动态量化（只量化 encoder 层 Linear）：
     # 实测（bge-reranker-v2-m3，CPU 8 线程，真实语料）5 对 1925→1223ms（1.57x），
     # 排序一致度 0.8-0.98（翻转集中在分差毫厘之间的近并列对，不影响头部选择）。
@@ -129,6 +136,8 @@ class Settings(BaseSettings):
     chunk_size: int = 1000
     chunk_overlap: int = 100
     retrieval_top_k: int = 50
+    # 精排函数的默认返回条数。主链路不依赖它：主链路显式传 top_k（总注入条数），
+    # 精排那一段拿的是「池子减掉 anchor 后剩下的尾部」，条数由池子推出来。
     rerank_top_k: int = 5
 
     # RRF 融合的类间权重：一类 = 一种召回通道（vector / bm25）。
@@ -170,7 +179,8 @@ class Settings(BaseSettings):
 
     # 检索力度不再按角色分区走两条路，而是由检索工具 search_library 的 strong
     # 参数在运行时决定（framework/supervisor_agent.py）：
-    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + 精排（10 选 5）+ 知识图谱，5 条带来源
+    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + RRF 前 3 直通 + 尾部精排选 3
+    #                  + 知识图谱，6 条带来源
     #   strong=False → 轻量检索：仅向量+BM25 召回 top-3，作为软背景、不带来源
     # 模型按请求性质自选；工具描述里带本区倾向提示，所以合并路由不会把娱乐区
     # 拖进全管线（教育区偏 true，娱乐区偏 false）。已无 parse 期的分区判据函数。
@@ -297,6 +307,13 @@ class Settings(BaseSettings):
     graph_build_max_chunks: int = 4000  # 单 collection 最多抽取多少 chunk（防爆 token，超大库截断）
     graph_hops: int = 2                  # 查询期子图扩展跳数
     graph_top_entities: int = 6         # 匹配上的种子实体最多扩展多少个
+    # 种子实体的最小字数（2026-10-20）：单字实体（「三」「心」「梦」「水」）在任何含该字
+    # 的问题里都拿满分 3.0（_match_query_entities 是纯子串匹配），必然挤进 top-6 种子，
+    # 再经 2 跳把邻边全拉出来，30 条上限一次打满。实测 15 题里图谱证据占条目 80.4%、
+    # 字符只占 10.1%，中位 28 字，一半是不到 30 字的碎片。
+    # 只拦「当种子」，不删实体本身：jung 图谱 77 个单字实体挂着 474 条关系（4.7%），
+    # 从别的正当种子经 BFS 走到它们时，那些关系仍然是有用的知识。
+    graph_min_seed_len: int = 2
     graph_max_edges: int = 30           # 子图返回的关系条数上限（控制上下文长度）
     graph_evidence_chars: int = 260     # 单条证据片段截断字符数
     graph_context_chars: int = 2200     # 图谱上下文总字符上限

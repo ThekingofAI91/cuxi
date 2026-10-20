@@ -67,7 +67,8 @@ def _docs(n: int = 8):
     ]
 
 
-def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None):
+def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None,
+         top_k=5, anchor_k=0):
     """跑一次 advanced_retrieval（全替身，不碰真模型与真向量库）"""
     docs = _docs(n_docs)
     collection = _FakeCollection(docs)
@@ -90,10 +91,11 @@ def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None):
                 question="测试问题",
                 collection=collection,
                 llm=None,
-                top_k=5,
+                top_k=top_k,
                 use_multi_query=rewrite is not None,
                 use_hyde=rewrite is not None,
                 use_rerank=use_rerank,
+                anchor_k=anchor_k,
                 trace_out=trace,
             )
 
@@ -243,6 +245,61 @@ class TestRerank:
         info = trace.rerank
         assert info["enabled"] is False
         assert all(d["rrf_rank"] == d["rerank_rank"] for d in info["docs"].values())
+
+
+class TestAnchorBypass:
+    """RRF 头部直通 + 尾部精排（2026-10-20 的策略）"""
+
+    def test_anchor_docs_ignore_rerank_order(self):
+        """直通段按 RRF 名次进，精排怎么排都改不了它们"""
+        def _reverse(q, ds, top_k=None):
+            return list(reversed(ds))
+
+        trace = RetrievalTrace()
+        docs, _ = _run(rerank_fn=_reverse, trace=trace, top_k=6, anchor_k=3)
+
+        info = trace.rerank
+        assert info["anchor_k"] == 3
+        assert info["select_k"] == 3
+        # 注入 6 条，其中前 3 条必须是 RRF 名次 0/1/2
+        injected = [d for d in info["docs"].values() if d["kept"]]
+        assert len(injected) == 6
+        heads = sorted(d["rrf_rank"] for d in injected)[:3]
+        assert heads == [0, 1, 2]
+        assert all(d["role"] == "anchor" for d in info["docs"].values() if d["rrf_rank"] < 3)
+
+    def test_tail_is_what_rerank_actually_ranks(self):
+        """精确契约：精排只应该看到池子减掉 anchor 之后的那几条"""
+        seen = {}
+
+        def _spy(q, ds, top_k=None):
+            seen["n"] = len(ds)
+            return list(ds)
+
+        trace = RetrievalTrace()
+        _run(n_docs=20, rerank_fn=_spy, trace=trace, top_k=6, anchor_k=3)
+
+        assert trace.rerank["pool_size"] == settings.rerank_pool_size
+        assert seen["n"] == settings.rerank_pool_size - 3
+        assert trace.rerank["tail_size"] == settings.rerank_pool_size - 3
+
+    def test_total_injection_is_top_k(self):
+        """anchor + 精排选 = 总注入条数，不多不少"""
+        trace = RetrievalTrace()
+        docs, _ = _run(n_docs=20, trace=trace, top_k=6, anchor_k=3)
+
+        assert len(docs) == 6
+        assert trace.rerank["anchor_k"] + trace.rerank["select_k"] == 6
+
+    def test_anchor_zero_keeps_legacy_behaviour(self):
+        """anchor_k=0 必须与旧口径完全一致：整池精排，交集照旧算"""
+        trace = RetrievalTrace()
+        _run(trace=trace, top_k=5, anchor_k=0)
+
+        info = trace.rerank
+        assert info["anchor_k"] == 0
+        assert info["tail_size"] == info["pool_size"]
+        assert info["topk_overlap"] == 5
 
 
 class _NamedCollection:

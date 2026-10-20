@@ -814,7 +814,8 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
         use_rewrite = settings.rewrite_enabled
 
-        # 执行高级检索（条数与主链路 retrieve_documents 保持一致：注入 5 条完整段落）
+        # 执行高级检索（条数与主链路 retrieve_documents 保持一致：
+        # RRF 前 3 直通 + 尾部 7 精排选 3 = 注入 6 条完整段落）
         # trace 只在评测端点启用：把每一路召回名次带出来，供离线脚本做
         # 「这个配置为什么没赚分」的归因；生产路径不传，采集分支全部跳过。
         trace = RetrievalTrace(question=request.query, character=character_id)
@@ -822,10 +823,11 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             question=request.query,
             collection=collection,
             llm=retrieval_llm,
-            top_k=5,
+            top_k=6,
             use_multi_query=use_rewrite,
             use_hyde=use_rewrite,
             num_variants=2,
+            anchor_k=settings.rerank_anchor_k,
             trace_out=trace,
         )
 

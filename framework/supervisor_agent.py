@@ -9,9 +9,9 @@ Supervisor Agent —— 一对一对话的唯一执行体。
     Workflow = 路径由代码预定义；Agent = LLM 运行时决定流程与工具调用。
 
 分档不再按分区走两条路，而是由工具的 strong 参数承担：
-    strong=True  → 强检索：改写 + 向量/BM25 混合召回 + Cross-Encoder 精排 +
-                   知识图谱增强，5 条完整段落（每条 ~1000 字不截断），
-                   带来源与章节，正文标 [n] 供前端渲染出处。
+    strong=True  → 强检索：改写 + 向量/BM25 混合召回 + RRF 头部直通 + 尾部精排 +
+                   知识图谱增强，6 条完整段落（RRF 前 3 直通 + 尾部精排选 3，
+                   每条 ~1000 字不截断），带来源与章节，正文标 [n] 供前端渲染出处。
     strong=False → 轻量检索：只做向量+BM25 召回 top-3，作为"模糊印象"，
                    不带来源标注——说出"根据《xxx》第三章"正是娱乐区要压掉的 AI 味。
     模型按请求性质自己选；工具描述里带本区的倾向提示（教育区偏 true，娱乐区偏 false），
@@ -58,7 +58,7 @@ StageCallback = Optional[Callable[[str], Awaitable[None]]]
 SEARCH_TOOL_DESCRIPTION = """查询这位人物相关的原著与背景资料库，返回可引用的原文片段。
 
 strong 怎么填：
-- true（强检索）：走完整检索管线，返回 5 条带来源与章节的完整段落（每条 ~1000 字），回答需要在句末标 [n]。
+- true（强检索）：走完整检索管线，返回 6 条带来源与章节的完整段落（每条 ~1000 字），回答需要在句末标 [n]。
   用在：得落到原话、具体事实、数字、年份、书名、人名上才站得住的问题。
 - false（轻量检索）：只做一轮向量+关键词召回 top-3，作为模糊印象返回，不标来源。
   用在：只是聊到某个话题、想要一点背景底色，不需要逐句可溯源。
@@ -184,11 +184,12 @@ async def retrieve_documents(
             max_tokens=256,
         )
 
-        # 注入条数与每条长度是一对：5 条 × ~1000 字完整段落 ≈ 5K 字，比旧口径
-        # （8 条 ≈ 8K 字）更短——省下来的 prefill 让给「精排从 10 条里选 5 条」
-        # 这道真正提高精确度的工序。条数与每条长度都要跟 HTTP 层
-        # /persona/eval_query 以及 SEARCH_TOOL_DESCRIPTION 的文案保持一致。
-        top_k = 5
+        # 注入条数与每条长度是一对：6 条 × ~1100 字完整段落 ≈ 6.6K 字。
+        # 2026-10-20 起不再是「整池精排后取 5」，而是「RRF 前 3 条直通 + 尾部 7 条精排选 3」
+        # （anchor_k），理由见 config.rerank_anchor_k 与 advanced_search.py Step 5。
+        # 条数与每条长度都要跟 HTTP 层 /persona/eval_query 以及
+        # SEARCH_TOOL_DESCRIPTION 的文案保持一致。
+        top_k = 6
 
         # 轻量检索（工具 strong=false）：跳过 Multi-Query+HyDE 改写、
         # 跳过 Cross-Encoder 重排、跳过知识图谱，仅用原始问题做向量+BM25 召回 top-3
@@ -226,6 +227,7 @@ async def retrieve_documents(
             use_hyde=use_rewrite,
             use_rerank=not light_retrieval,
             num_variants=2,
+            anchor_k=0 if light_retrieval else settings.rerank_anchor_k,
         )
         print(f"[Retrieval] 高级检索召回 {len(retrieved_docs)} 条")
 
@@ -297,7 +299,7 @@ class SearchQuery(BaseModel):
     )
     strong: bool = Field(
         default=True,
-        description="检索力度。true=强检索（全管线 5 条完整段落、带来源，正文需标 [n]）；"
+        description="检索力度。true=强检索（全管线 6 条完整段落、带来源，正文需标 [n]）；"
         "false=轻量检索（top-3 模糊印象、不标来源）。判断标准见工具说明。",
     )
 

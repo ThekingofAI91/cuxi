@@ -475,16 +475,21 @@ def _match_query_entities(query: str, graph: dict, n: int = 8) -> list[tuple[str
 
     评分：节点名整体作为子串命中查询=3.0；查询作为子串命中节点名=2.5；
     否则按词重叠比例（重叠词数 / 节点词数）给分。
+
+    单字节点名（「三」「心」「梦」「水」）直接不参与对齐：子串匹配下它们在任何含该字的
+    查询里都拿 3.0，比真正的长实体还靠前，挤进种子后 2 跳就能撞满 graph_max_edges。
+    只挡种子、不删实体——单字实体经别的种子 BFS 走到时仍会带出关系（见 config 注释）。
     """
     q_tokens = set(_tokenize(query))
     q_norm = _norm(query)
+    min_len = max(1, int(getattr(settings, "graph_min_seed_len", 1)))
     scored: list[tuple[str, float]] = []
     for key, info in graph.get("entities", {}).items():
         if not isinstance(info, dict):
             continue
         name = info.get("name", "")
         n_name = _norm(name)
-        if not n_name:
+        if not n_name or len(n_name) < min_len:
             continue
         score = 0.0
         if n_name and n_name in q_norm:

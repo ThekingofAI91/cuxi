@@ -85,14 +85,31 @@ class TestMatchQueryEntities:
         assert score == pytest.approx(1 / 3)
 
     def test_ordering_by_score(self):
-        """评分降序：原型（子串3.0）应排在词重叠（<3.0）之前"""
+        """评分降序：子串满分（3.0）排在「查询是节点名子串」（2.5）之前"""
         graph = _make_graph(entities={
-            "原型": {"name": "原型", "freq": 1},
-            "梦": {"name": "梦", "freq": 9},
+            "荣格": {"name": "荣格", "freq": 1},
+            "荣格心理学": {"name": "荣格心理学", "freq": 9},
         })
-        matched = kg._match_query_entities("原型和梦的关系", graph)
+        matched = kg._match_query_entities("荣格", graph)
         keys = [k for k, _ in matched]
-        assert keys.index("原型") < keys.index("梦")
+        assert keys == ["荣格", "荣格心理学"]
+
+    def test_single_char_entity_never_becomes_seed(self):
+        """单字实体不参与对齐：子串匹配下它会拿满分，2 跳就能撞满边上限"""
+        graph = _make_graph(entities={
+            "荣格": {"name": "荣格", "freq": 8},
+            "三": {"name": "三", "freq": 30},
+            "心": {"name": "心", "freq": 40},
+        })
+        keys = [k for k, _ in kg._match_query_entities("荣格把心灵分为哪三个层次", graph)]
+        assert "三" not in keys and "心" not in keys
+        assert "荣格" in keys
+
+    def test_min_seed_len_is_configurable(self, monkeypatch):
+        """把门槛降到 1 就退回旧行为（保证可回滚，也说明门槛只影响对齐）"""
+        monkeypatch.setattr(kg.settings, "graph_min_seed_len", 1)
+        graph = _make_graph(entities={"心": {"name": "心", "freq": 40}})
+        assert [k for k, _ in kg._match_query_entities("心灵是什么", graph)] == ["心"]
 
 
 # ============================================================

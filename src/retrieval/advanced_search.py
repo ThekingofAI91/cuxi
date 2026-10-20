@@ -440,6 +440,7 @@ async def advanced_retrieval(
     use_rerank: bool = True,
     num_variants: int = 2,
     use_source_weight: bool = True,
+    anchor_k: int = 0,
     trace_out: Optional[RetrievalTrace] = None,
 ) -> tuple[list[Document], list[str]]:
     """
@@ -450,7 +451,8 @@ async def advanced_retrieval(
     2. 对每个查询（原始 + 变体 + HyDE）分别做向量检索
     3. 对原始 + 变体查询做 BM25 关键词检索（精确命中专有名词）
     4. 各路结果按「每类一票 + 类间权重」做 RRF 合并，取 rerank_pool_size 条进候选池
-    5. Cross-Encoder 对整个候选池精排（池子默认 10、注入默认 5），最终返回 top_k 条
+    5. 候选池切成两段：前 anchor_k 条按 RRF 名次直通（不精排），其余交给 Cross-Encoder，
+       两段拼起来按 top_k 截断。anchor_k=0 时退化为旧行为（整池精排）
 
     Args:
         question: 原始问题
@@ -464,6 +466,9 @@ async def advanced_retrieval(
         num_variants: 查询变体数量
         use_source_weight: 是否按语料来源类型加权（original/oral/anchor 优先，
             secondary 二手解读强降权，避免第三者评价冒充名人原话）
+        anchor_k: RRF 名次前多少条免精排、直接进注入。0 = 旧行为（整池精排）。
+            与 top_k 的关系：top_k 是总注入条数，anchor_k 是其中「信 RRF」的那部分，
+            剩下 top_k - anchor_k 条从「池子里 anchor 之后的尾部」由精排选出。
         trace_out: 可选的轨迹容器（评测专用）。传了就往里写每一路召回的名次，
             不传则完全无采集开销
 
@@ -496,6 +501,9 @@ async def advanced_retrieval(
     # 候选池：精排要真正参与「选人」，池子就必须大于最终返回条数。
     # 轻量档（use_rerank=False）不精排，池子就等于 top_k，行为与旧版一致。
     pool_size = max(top_k, settings.rerank_pool_size) if use_rerank else top_k
+    # 直通条数：只在精排开启时有意义，且不能超过总注入条数（否则直通段自己就超编了）
+    anchor_n = min(max(0, anchor_k), top_k) if use_rerank else 0
+    select_n = max(0, top_k - anchor_n)
     fetch_k = max(top_k, pool_size) * 2  # 每路多取一些用于融合
 
     async def _vector_pass(queries: list[str]) -> list[list[str]]:
@@ -717,43 +725,63 @@ async def advanced_retrieval(
                 "source_type": meta.get("source_type") or classify_source(src),
             }
 
-    # ---- Step 5: Cross-Encoder 精排整个候选池，再按 top_k 截断 ----
-    # 池子（rerank_pool_size，默认 10）> 注入条数（top_k，默认 5）是本步的前提：
+    # ---- Step 5: 池子切两段 —— 头部直通、尾部精排，再拼起来按 top_k 截断 ----
+    # 池子（rerank_pool_size，默认 10）> 注入条数（top_k，默认 6）是本步的前提：
     # 只有池子更大，精排的排序才会实际决定「哪几条被留下」。若池子 == 注入条数，
     # 精排就退化成纯排序器，改它等于白改（2026-10-18 的视野实验已证）。
-    # 代价：10 对 × 500 字 × 512 token ≈ 1.9s（int8，CPU 4 并发）。
+    # 代价：尾部 7 对 × 500 字 × 512 token ≈ 1.3s（int8，CPU 4 并发）。
+    #
+    # 为什么要留 anchor（2026-10-20）：实测 15 题，RRF 前五与精排后前五的交集只有 2.80/5，
+    # 精排换人换得很凶；而它换掉的常常是 RRF 第 1 名——那种在向量榜和 BM25 榜同时靠前的块，
+    # 恰恰最可能是原文出处。Cross-Encoder 只读「问题 + 这一段」，看不到跨榜一致性，
+    # 单段读起来偏题的原文段落会被它压下去。所以头部信 RRF、尾部信精排：
+    # 前 anchor_n 条按 RRF 名次直通，剩余 select_n 条从尾部精排里选。
     # 精排前的 RRF 名次（精排会把 candidate_docs 整个重排，不先记下来就没法算「换了谁」）
     rrf_order = [_get_doc_id(d.page_content) for d in candidate_docs]
     rrf_rank_by_id = {doc_id: i for i, doc_id in enumerate(rrf_order)}
     reranked = False
+    anchor_docs = candidate_docs[:anchor_n]
+    tail_docs = candidate_docs[anchor_n:]
+    selected_from_tail: list[str] = []
 
-    if use_rerank and len(candidate_docs) > 1:
+    if use_rerank and len(tail_docs) > 1 and select_n > 0:
         try:
             from src.retrieval.reranker import rerank_documents
             # CPU 推理同步调用会阻塞事件循环，放线程池
             _rerank_t0 = time.perf_counter()
-            candidate_docs = await asyncio.to_thread(
-                rerank_documents, question, candidate_docs, top_k=len(candidate_docs),
+            tail_docs = await asyncio.to_thread(
+                rerank_documents, question, tail_docs, top_k=len(tail_docs),
             )
             reranked = True
             stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
+            selected_from_tail = [
+                _get_doc_id(d.page_content) for d in tail_docs[:select_n]
+            ]
             print(
-                f"[Advanced Retrieval] Cross-Encoder 精排 {len(candidate_docs)} 条"
-                f"（池 {candidate_limit} → 注入 {min(top_k, len(candidate_docs))}）"
+                f"[Advanced Retrieval] Cross-Encoder 精排尾部 {len(tail_docs)} 条"
+                f"（池 {candidate_limit}，直通 {len(anchor_docs)} + 精排选 {select_n}"
+                f" = 注入 {len(anchor_docs) + len(tail_docs[:select_n])}）"
             )
         except Exception as e:
             print(f"[Advanced Retrieval] 重排序失败，保持 RRF 顺序: {e}")
 
+    candidate_docs = anchor_docs + tail_docs
+
     # ---- 轨迹：精排到底换掉了谁 ----
-    # 只有「池 > 注入」时精排才真参与选人，所以这里同时给出池大小与前后 top_k 的交集：
-    # 交集 = top_k 说明精排只是重排了没换人；交集 < top_k 才说明它真把人换了。
+    # topk_overlap 现在天然 >= anchor_n（直通段按定义不动），所以更有用的是
+    # selected_from_tail：尾部那 7 条里，谁被精排选进来了。空列表 = 精排没选中任何人。
     if trace_out is not None:
         final_ids = [_get_doc_id(d.page_content) for d in candidate_docs]
+        anchor_ids = {_get_doc_id(d.page_content) for d in anchor_docs}
         trace_out.rerank = {
             "enabled": reranked,
             "pool_size": len(final_ids),
             "top_k": top_k,
+            "anchor_k": anchor_n,
+            "select_k": select_n,
+            "tail_size": len(tail_docs),
             "topk_overlap": len(set(rrf_order[:top_k]) & set(final_ids[:top_k])),
+            "selected_from_tail": selected_from_tail,
             "docs": {
                 doc_id: {
                     "rrf_rank": rrf_rank_by_id.get(doc_id),
@@ -762,6 +790,7 @@ async def advanced_retrieval(
                         float(candidate_docs[final_rank].metadata.get("rerank_score") or 0.0), 6
                     ),
                     "kept": final_rank < top_k,
+                    "role": "anchor" if doc_id in anchor_ids else "reranked",
                 }
                 for final_rank, doc_id in enumerate(final_ids)
             },
