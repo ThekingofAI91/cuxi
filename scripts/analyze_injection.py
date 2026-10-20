@@ -99,6 +99,12 @@ def per_question(res: dict, cmap: dict[str, str]) -> dict:
         "overlap": re_.get("topk_overlap"),
         "pool": re_.get("pool_size"),
         "top_k": re_.get("top_k"),
+        # 2026-10-20 起的两段式口径：前 anchor_k 条免精排，尾部选了 select_k 条
+        # 旧 JSON 没有这两个字段 → None，报告里自动退回「整池精排」的说法
+        "anchor_k": re_.get("anchor_k"),
+        "select_k": re_.get("select_k"),
+        "tail_n": re_.get("tail_size"),
+        "tail_picked": len(re_.get("selected_from_tail") or []) if re_.get("anchor_k") is not None else None,
         "graph_on": g.get("triggered"),
         "edges": g.get("edges"),
         "added": g.get("added"),
@@ -150,6 +156,12 @@ def report(title: str, rows: list[dict]) -> None:
         if ov:
             print(f"    top_k 交集 中位 {st.median(ov):.1f}  分布 {sorted(Counter(ov).items())}")
             print(f"    被换掉的平均条数 {st.median([(r['top_k'] or 5) - r['overlap'] for r in rows if r['overlap'] is not None]):.1f}")
+        anchored = [r for r in rows if r["anchor_k"] is not None]
+        if anchored:
+            print(f"    两段式：直通 {med(anchored, 'anchor_k')} 条（RRF 名次，免精排）"
+                  f" + 尾部 {med(anchored, 'tail_n')} 条里选 {med(anchored, 'select_k')} 条")
+            print(f"    尾部实际被选进 中位 {med(anchored, 'tail_picked')} 条"
+                  f"（空 = 精排没换任何人）")
 
         print("\n[4] 图谱触发")
         gt = [r for r in rows if r["graph_on"] is not None]
@@ -158,7 +170,7 @@ def report(title: str, rows: list[dict]) -> None:
         print(f"    edges 中位 {med(gt, 'edges')}   added 中位 {med(gt, 'added')}")
         sc = sum(r["single_char_seeds"] for r in gt)
         sn = sum(r["seed_n"] for r in gt)
-        print(f"    单字实体 {sc}/{sn} = {pct(sc, sn)}（词法对齐没设最小长度）")
+        print(f"    单字种子 {sc}/{sn} = {pct(sc, sn)}（>0 说明该轮还没上 graph_min_seed_len）")
 
     print("\n[5] 引用")
     cited = sum(1 for r in rows if r["cites"])
