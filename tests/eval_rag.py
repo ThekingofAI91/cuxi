@@ -283,12 +283,13 @@ async def get_system_answer(question: str, scene: str = "persona", character: st
         )
 
         if response.status_code != 200:
-            return {"answer": f"ERROR: HTTP {response.status_code}", "contexts": []}
+            return {"answer": f"ERROR: HTTP {response.status_code}", "contexts": [], "retrieval_trace": {}}
 
         data = response.json()
         return {
             "answer": data.get("answer", ""),
             "contexts": data.get("contexts", []),
+            "retrieval_trace": data.get("retrieval_trace", {}),
         }
 
 
@@ -401,6 +402,8 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             "ground_truth": item["ground_truth"],
             "key_points": key_points,
             "contexts": contexts,  # 保存检索上下文：支持事后用不同判规对同一批答案重评
+            # 过程记录（每路召回名次等）：判官不用，只给 scripts/analyze_injection.py 归因
+            "retrieval_trace": system_response.get("retrieval_trace", {}),
             "evaluation": eval_result,
             "timing": {
                 "answer_seconds": elapsed,

@@ -789,6 +789,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         from langchain_core.documents import Document
         from src.retrieval.embedder import get_embedder
         from src.retrieval.advanced_search import advanced_retrieval
+        from src.retrieval.trace import RetrievalTrace
         from src.core.llm import get_chat_llm
 
         # ---- 1. 高级检索：多查询 + HyDE 组合 ----
@@ -814,6 +815,9 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         use_rewrite = settings.rewrite_enabled
 
         # 执行高级检索（条数与主链路 retrieve_documents 保持一致：注入 5 条完整段落）
+        # trace 只在评测端点启用：把每一路召回名次带出来，供离线脚本做
+        # 「这个配置为什么没赚分」的归因；生产路径不传，采集分支全部跳过。
+        trace = RetrievalTrace(question=request.query, character=character_id)
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
@@ -822,6 +826,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             use_multi_query=use_rewrite,
             use_hyde=use_rewrite,
             num_variants=2,
+            trace_out=trace,
         )
 
         # ---- 1.5 知识图谱增强（与主链路 retrieve_documents 同口径）----
@@ -900,12 +905,14 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             "answer": answer,
             "contexts": contexts,  # 返回全部上下文，确保 judge 能完整评估
             "analysis": analysis[:500],
+            # 过程记录：判官看不到，只给离线归因脚本吃
+            "retrieval_trace": trace.to_dict(),
         }
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return {"answer": f"ERROR: {str(e)}", "contexts": [], "analysis": ""}
+        return {"answer": f"ERROR: {str(e)}", "contexts": [], "analysis": "", "retrieval_trace": {}}
 
 
 @router.get("/persona/characters")

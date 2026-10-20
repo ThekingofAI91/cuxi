@@ -26,6 +26,7 @@ from langchain_core.documents import Document
 from langchain_openai import ChatOpenAI
 
 from src.core.config import settings
+from src.retrieval.trace import RetrievalTrace
 
 
 # ============================================================
@@ -430,6 +431,7 @@ async def advanced_retrieval(
     use_rerank: bool = True,
     num_variants: int = 2,
     use_source_weight: bool = True,
+    trace_out: Optional[RetrievalTrace] = None,
 ) -> tuple[list[Document], list[str]]:
     """
     高级检索：Multi-Query + HyDE + BM25 + Cross-Encoder 重排序
@@ -453,6 +455,8 @@ async def advanced_retrieval(
         num_variants: 查询变体数量
         use_source_weight: 是否按语料来源类型加权（original/oral/anchor 优先，
             secondary 二手解读强降权，避免第三者评价冒充名人原话）
+        trace_out: 可选的轨迹容器（评测专用）。传了就往里写每一路召回的名次，
+            不传则完全无采集开销
 
     Returns:
         (retrieved_docs, all_contexts) 元组
@@ -544,6 +548,27 @@ async def advanced_retrieval(
     # 同一类下可以有多条榜（原问、查询变体、HyDE）——融合时类内取最好名次合成一票。
     class_boards: list[tuple[str, list[str]]] = []
 
+    if trace_out is not None and not trace_out.question:
+        trace_out.question = question
+
+    def _add_boards(class_name: str, routes: list[str], groups: list[list[str]]) -> None:
+        """登记一榜：同时进融合用的 class_boards 与轨迹用的 trace.boards。
+
+        route 说明这一榜由哪条查询产出（original / variant1 / variant2 / hyde）——
+        没有它就只能看到「向量类有 4 条榜」，看不出改写到底补了几路、补的那几路命中
+        和原问重不重合。两处一起写，避免融合与轨迹的名次来源分叉。
+        """
+        for i, ids in enumerate(groups):
+            route = routes[i] if i < len(routes) else f"query{i}"
+            class_boards.append((class_name, ids))
+            if trace_out is not None:
+                trace_out.boards.append({
+                    "class": class_name,
+                    "route": route,
+                    "hits": len(ids),
+                    "ids": list(ids),
+                })
+
     # 阶段耗时埋点（延迟瀑布；无请求上下文时 stage_mark 自动忽略）
     from src.core.logger import stage_mark
 
@@ -565,7 +590,7 @@ async def advanced_retrieval(
     bm25_index = None
 
     try:
-        class_boards.extend(("vector", ids) for ids in await vec_task)
+        _add_boards("vector", ["original"], await vec_task)
     except Exception:
         # 向量路失败时取消仍在跑的 BM25 任务，避免"异常从未被读取"告警
         if bm25_task is not None and not bm25_task.done():
@@ -575,7 +600,7 @@ async def advanced_retrieval(
     if bm25_task is not None:
         try:
             bm25_index, first_groups = await bm25_task
-            class_boards.extend(("bm25", ids) for ids in first_groups)
+            _add_boards("bm25", ["original"], first_groups)
         except Exception as e:
             print(f"[Advanced Retrieval] BM25 检索失败，跳过: {e}")
 
@@ -590,10 +615,12 @@ async def advanced_retrieval(
         query_variants, hyde_doc = [], ""
 
     # 构建第二路查询列表（变体 + HyDE）
-    extra_queries: list[str] = []
-    extra_queries.extend(query_variants)
+    variant_routes = [f"variant{i}" for i in range(1, len(query_variants) + 1)]
+    extra_queries: list[str] = list(query_variants)
+    extra_routes: list[str] = list(variant_routes)
     if hyde_doc:
         extra_queries.append(hyde_doc)
+        extra_routes.append("hyde")
 
     if extra_queries:
         print(f"[Advanced Retrieval] 改写补充 {len(extra_queries)} 路查询:")
@@ -602,14 +629,14 @@ async def advanced_retrieval(
 
         # 第二轮：变体 + HyDE 的向量检索
         try:
-            class_boards.extend(("vector", ids) for ids in await _vector_pass(extra_queries))
+            _add_boards("vector", extra_routes, await _vector_pass(extra_queries))
         except Exception as e:
             print(f"[Advanced Retrieval] 变体向量检索失败，跳过: {e}")
 
         # 第二轮：变体的 BM25 检索（HyDE 是长文档，不进 BM25；与旧实现一致）
         if bm25_index is not None and query_variants:
             try:
-                class_boards.extend(("bm25", ids) for ids in await _bm25_pass(query_variants, bm25_index))
+                _add_boards("bm25", variant_routes, await _bm25_pass(query_variants, bm25_index))
             except Exception as e:
                 print(f"[Advanced Retrieval] 变体 BM25 检索失败，跳过: {e}")
 
