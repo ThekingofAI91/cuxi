@@ -267,7 +267,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 _SENTENCE_ENDS = "。！？!?…；;"
 
 
-def _record_boundary(trace, doc, kind: str) -> None:
+def _record_boundary(trace, doc, kind: str, stitched: int = 0) -> None:
     """记录注入块的边界质量：多长、结尾是不是句末标点。
 
     原来这里叫 truncated，记的是「被砍掉多少字」。2026-10-20 去掉注入长度上限后
@@ -289,6 +289,8 @@ def _record_boundary(trace, doc, kind: str) -> None:
         "source": meta.get("source") or "",
         "chars": len(raw),
         "ends_at_sentence": bool(tail) and tail[-1] in _SENTENCE_ENDS,
+        # 注入时补上了多少字的续接句（0 = 没断句，或没有 cont_tail）
+        "stitched_chars": int(stitched),
     }
 
 
@@ -305,10 +307,18 @@ def _build_context(docs: list, trace=None) -> str:
     注入不设长度上限：块按 chunker 切出来的原样进 prompt，不再二次裁剪。
     推断证据本来就只有一句话，同样原样注入。
 
+    ★块尾续接（2026-10-20，方案 C）：分块按页装箱，页边界常落在句子中间，于是
+    有 16% 的荣格块以半句收尾（「…我们恐」）。模型读到半句会顺着补，补的可能不是原文。
+    这里在渲染时按 metadata 的 `cont_tail` 把下一块的第一句补上——离线回填脚本
+    `scripts/backfill_cont_tail.py` 用 chunk id 顺序 + 100 字重叠推出来的，
+    **只改 metadata，不重建库**。续接句属于同一个 [n]，不新开编号。
+
     trace 传了就记录每条块的长度与结尾是否为句末（评测归因用）。
     """
     if not docs:
         return "（无参考资料）"
+
+    from src.retrieval.stitch import with_continuation
 
     context_parts = []
     plain_i = 0   # 正文块序号
@@ -327,13 +337,14 @@ def _build_context(docs: list, trace=None) -> str:
                 _record_boundary(trace, doc, kind="infer")
         else:
             plain_i += 1
-            # 条数压到 5 是为了把精排候选池撑到 10 条（池 > 注入，精排才真参与选人）。
+            # 注入 6 条（anchor 3 直通 + 尾部精排 3），候选池 10 条——
+            # 池必须大于注入条数，精排才真参与"选人"而不是给全量重排。
             # 单条不设上限（10-20 删掉 inject_doc_chars=1500）：块按 chunker 切的
             # 原样整块进 prompt，注入的就是完整原文。
             header = f"[{plain_i}] 原文｜来源: {source} | 章节: {heading or '未知章节'}"
-            content = doc.page_content or ""
+            content, cont = with_continuation(doc.page_content or "", meta)
             if trace is not None:
-                _record_boundary(trace, doc, kind="source")
+                _record_boundary(trace, doc, kind="source", stitched=len(cont))
 
         context_parts.append(f"{header}\n{content}")
 

@@ -831,6 +831,14 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             trace_out=trace,
         )
 
+        # 与 _build_context 同口径：断句的块在注入时会被补上续接句，判官看到的
+        # contexts 必须是同一份文本，否则「上下文精确度」量的是模型没见过的版本。
+        from src.retrieval.stitch import with_continuation as _stitch
+        contexts = [
+            _stitch(d.page_content or "", d.metadata)[0]
+            for d in retrieved_docs
+        ]
+
         # ---- 1.5 知识图谱增强（与主链路 retrieve_documents 同口径）----
         # 此前评估端点直接调 advanced_retrieval，完全绕过主链路的图谱门——
         # 荣格图谱建成后的首轮"图谱增强版评测"跑了几题才发现测的还是无图谱基线。
