@@ -20,6 +20,7 @@ from src.retrieval import knowledge_graph as KG
 from src.retrieval.advanced_search import fuse_by_class
 from src.retrieval.trace import RetrievalTrace
 from src.core.config import settings
+from framework.analysis_agent import _build_context
 
 
 class _FakeEmbedder:
@@ -294,3 +295,53 @@ class TestGraphTrace:
 
         assert text == "" and docs == []
         assert trace["available"] is False
+
+
+class TestTruncated:
+    def test_short_block_is_not_clipped(self, monkeypatch):
+        """没超上限的块原样注入，不能虚报成被砍过"""
+        monkeypatch.setattr(settings, "inject_doc_chars", 100)
+        trace = RetrievalTrace()
+        doc = Document(page_content="短句子。", metadata={"source": "a.pdf"})
+
+        _build_context([doc], trace=trace)
+        info = trace.truncated[AS._get_doc_id(doc.page_content)]
+
+        assert info["clipped"] is False
+        assert info["orig_len"] == info["kept_len"] == len("短句子。")
+        assert info["kind"] == "source"
+
+    def test_long_block_clipped_at_sentence_boundary(self, monkeypatch):
+        """超上限的块要截在句末：kept_len 不超限，且末字是句末标点"""
+        monkeypatch.setattr(settings, "inject_doc_chars", 50)
+        text = "第一句话在这里。" * 10
+        trace = RetrievalTrace()
+        doc = Document(page_content=text, metadata={"source": "b.pdf"})
+
+        _build_context([doc], trace=trace)
+        info = trace.truncated[AS._get_doc_id(text)]
+
+        assert info["clipped"] is True
+        assert info["kept_len"] <= 50
+        assert info["at_sentence"] is True
+
+    def test_infer_evidence_never_clipped(self, monkeypatch):
+        """图谱证据只有一句话，不参与截断——标成被砍会误导「证据被削了」的判断"""
+        monkeypatch.setattr(settings, "inject_doc_chars", 10)
+        trace = RetrievalTrace()
+        doc = Document(
+            page_content="阿尼玛 —投射于→ 阴影",
+            metadata={"source": "荣格自传.pdf", "kg_inferred": True},
+        )
+
+        _build_context([doc], trace=trace)
+        info = trace.truncated[AS._get_doc_id(doc.page_content)]
+
+        assert info["kind"] == "infer"
+        assert info["clipped"] is False
+
+    def test_without_trace_context_still_builds(self):
+        """生产路径不传 trace：上下文照旧构建，不能因为采集分支炸掉"""
+        doc = Document(page_content="正文。" * 10, metadata={"source": "c.pdf"})
+        context = _build_context([doc])
+        assert "原文｜来源: c.pdf" in context

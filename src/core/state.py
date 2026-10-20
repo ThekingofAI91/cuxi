@@ -49,6 +49,9 @@ class AgentState(TypedDict):
     # ---- 分区与检索策略 ----
     zone: Optional[str]                   # "education" | "entertainment"
     graph_used: Optional[bool]            # 本轮是否触发了知识图谱增强
+    # 检索过程轨迹（RetrievalTrace）：只有评测端点会传，生产请求为 None。
+    # analysis_agent 用它记录注入时的截断情况，其余环节不读。
+    retrieval_trace: Optional[Any]
     # 检索力度不在这里——它由 search_library 工具的入参 strong 在运行时决定，
     # 全程随工具调用走，不需要在 state 里再存一份。
 

@@ -892,6 +892,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             "query": request.query,
             "session_id": "eval",
             "retrieved_docs": retrieved_docs,
+            "retrieval_trace": trace,
             "analysis": "",
             "code_result": "",
             "verification": "",

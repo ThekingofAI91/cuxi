@@ -45,6 +45,8 @@ class RetrievalTrace:
     rerank: dict = field(default_factory=dict)
     # {triggered, reason, available, matched, seeds, edges, evidence, added}
     graph: dict = field(default_factory=dict)
+    # doc_id -> {kind, source, orig_len, kept_len, clipped, at_sentence}
+    truncated: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

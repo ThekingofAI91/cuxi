@@ -40,6 +40,8 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
     character_role_prompt = state.get("character_role_prompt", "")
     stream_callback = state.get("stream_callback")
     zone = state.get("zone", "education")  # "education" | "entertainment"
+    # 检索轨迹（评测端点才会传）：用来记录注入时每条块被砍了多少
+    trace = state.get("retrieval_trace")
     print(f"\n[Analysis Agent] 正在分析: {query}")
     print(f"[Analysis Agent] 基于 {len(retrieved_docs)} 条检索结果")
     print(f"[Analysis Agent] 对话历史轮次: {len(history)}")
@@ -66,7 +68,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
                     except Exception as _ce:
                         print(f"[Analysis Agent] 上下文压缩失败（用原文）: {_ce}")
                 context = (_build_light_context(retrieved_docs)
-                           if zone == "entertainment" else _build_context(retrieved_docs))
+                           if zone == "entertainment" else _build_context(retrieved_docs, trace=trace))
             # 娱乐区：极短回答（~300 token / 约 200 字），像真人微信聊，不堆长篇
             _mt = 300 if zone == "entertainment" else None
             answer = await _generate_direct_response(
@@ -95,7 +97,7 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 
         # ---- 有检索结果：基于资料分析 ----
         if retrieved_docs:
-            context = _build_context(retrieved_docs)
+            context = _build_context(retrieved_docs, trace=trace)
 
             # 构建系统提示词，注入角色人设
             if character_role_prompt:
@@ -283,7 +285,28 @@ def _clip_at_sentence(text: str, limit: int) -> str:
     return window[: cut + 1].rstrip()
 
 
-def _build_context(docs: list) -> str:
+def _record_truncation(trace, doc, kept: str, kind: str) -> None:
+    """把「这条块注入时被砍了多少」记进轨迹。
+
+    doc_id 复用 advanced_search 的内容哈希，保证能和 fused/rerank 里的同一条对上——
+    换了别的 id 方案，这三个字段就join不起来了。
+    """
+    from src.retrieval.advanced_search import _get_doc_id
+
+    raw = doc.page_content or ""
+    meta = doc.metadata or {}
+    trace.truncated[_get_doc_id(raw)] = {
+        "kind": kind,
+        "source": meta.get("source") or "",
+        "orig_len": len(raw),
+        "kept_len": len(kept),
+        # 推断证据本身只有一句话，不截断；strip 掉空白不算「被砍」
+        "clipped": kind == "source" and len(kept) < len(raw),
+        "at_sentence": (not kept) or kept[-1] in _SENTENCE_ENDS or kept[-1] == "\n",
+    }
+
+
+def _build_context(docs: list, trace=None) -> str:
     """
     构建 LLM 上下文。
 
@@ -294,6 +317,8 @@ def _build_context(docs: list) -> str:
     旧实现把两者混编成 1..33，模型看到 `[31] 来源: 荣格自传` 就当成原著引用了。
     正文块只在超过 `inject_doc_chars` 时才截，且截在句末；推断证据本身只有一句话，
     不截断——截了就没有信息了。
+
+    trace 传了就把每条块的原始长度 / 保留长度 / 是否截在句末记进去（评测归因用）。
     """
     if not docs:
         return "（无参考资料）"
@@ -311,6 +336,8 @@ def _build_context(docs: list) -> str:
             basis = " · ".join(x for x in (source, heading) if x) or "图谱关系"
             header = f"[G{infer_i}] 推断｜非原文，依据: {basis}"
             content = (doc.page_content or "").strip()
+            if trace is not None:
+                _record_truncation(trace, doc, content, kind="infer")
         else:
             plain_i += 1
             # 注入条数与单条上限是一对参数：5 条 × 1500 字 ≈ 7.5K 字封顶。
@@ -321,6 +348,8 @@ def _build_context(docs: list) -> str:
             # overlap 反而留着——又花 token 又丢内容。1500 是保险丝，正常块不会被切。
             header = f"[{plain_i}] 原文｜来源: {source} | 章节: {heading or '未知章节'}"
             content = _clip_at_sentence(doc.page_content or "", settings.inject_doc_chars)
+            if trace is not None:
+                _record_truncation(trace, doc, content, kind="source")
 
         context_parts.append(f"{header}\n{content}")
 
