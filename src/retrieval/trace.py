@@ -41,6 +41,8 @@ class RetrievalTrace:
     boards: list[dict] = field(default_factory=list)
     # doc_id -> {rrf_rank, score, best_rank{类:名次}, contrib{类:分数}, source, source_type}
     fused: dict[str, dict] = field(default_factory=dict)
+    # {enabled, pool_size, top_k, topk_overlap, docs{doc_id: {rrf_rank, rerank_rank, rerank_score, kept}}}
+    rerank: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

@@ -65,10 +65,11 @@ def _docs(n: int = 8):
     ]
 
 
-def _run(rewrite=None, trace=None, n_docs=8):
+def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None):
     """跑一次 advanced_retrieval（全替身，不碰真模型与真向量库）"""
     docs = _docs(n_docs)
     collection = _FakeCollection(docs)
+    identity_rerank = lambda q, ds, top_k=None: list(ds)  # noqa: E731
 
     async def _fake_rewrite(question, llm, num_variants):
         return rewrite
@@ -79,7 +80,7 @@ def _run(rewrite=None, trace=None, n_docs=8):
             mp.setattr("src.retrieval.embedder.get_embedder", lambda: _FakeEmbedder())
             mp.setattr(
                 "src.retrieval.reranker.rerank_documents",
-                lambda q, ds, top_k=None: list(ds),
+                rerank_fn or identity_rerank,
             )
             if rewrite is not None:
                 mp.setattr(AS, "_rewrite_with_budget", _fake_rewrite)
@@ -90,6 +91,7 @@ def _run(rewrite=None, trace=None, n_docs=8):
                 top_k=5,
                 use_multi_query=rewrite is not None,
                 use_hyde=rewrite is not None,
+                use_rerank=use_rerank,
                 trace_out=trace,
             )
 
@@ -202,3 +204,40 @@ class TestFused:
         assert sorted(i["rrf_rank"] for i in trace.fused.values()) == list(
             range(settings.rerank_pool_size)
         )
+
+
+class TestRerank:
+    def test_identity_rerank_keeps_order(self):
+        """精排不换人时：前后名次一致、top_k 交集满、kept 数等于注入条数"""
+        trace = RetrievalTrace()
+        _run(trace=trace)
+
+        info = trace.rerank
+        assert info["enabled"] is True
+        assert info["topk_overlap"] == 5
+        assert sum(1 for d in info["docs"].values() if d["kept"]) == 5
+        assert all(d["rrf_rank"] == d["rerank_rank"] for d in info["docs"].values())
+
+    def test_reversing_rerank_shows_what_got_swapped(self):
+        """精排反序时：交集应显著小于 top_k，这才叫「真换了人」"""
+        def _reverse(q, ds, top_k=None):
+            return list(reversed(ds))
+
+        trace = RetrievalTrace()
+        _run(n_docs=8, rerank_fn=_reverse, trace=trace)
+
+        info = trace.rerank
+        assert info["pool_size"] == 8
+        assert info["topk_overlap"] < 5
+        # RRF 第 0 名被精排压到最后 → 不再进注入
+        first = min(info["docs"].values(), key=lambda d: d["rrf_rank"])
+        assert first["kept"] is False
+
+    def test_disabled_when_rerank_off(self):
+        """轻量档不精排：enabled=False，名次原样保留"""
+        trace = RetrievalTrace()
+        _run(use_rerank=False, trace=trace)
+
+        info = trace.rerank
+        assert info["enabled"] is False
+        assert all(d["rrf_rank"] == d["rerank_rank"] for d in info["docs"].values())

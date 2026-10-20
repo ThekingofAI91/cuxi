@@ -722,6 +722,11 @@ async def advanced_retrieval(
     # 只有池子更大，精排的排序才会实际决定「哪几条被留下」。若池子 == 注入条数，
     # 精排就退化成纯排序器，改它等于白改（2026-10-18 的视野实验已证）。
     # 代价：10 对 × 500 字 × 512 token ≈ 1.9s（int8，CPU 4 并发）。
+    # 精排前的 RRF 名次（精排会把 candidate_docs 整个重排，不先记下来就没法算「换了谁」）
+    rrf_order = [_get_doc_id(d.page_content) for d in candidate_docs]
+    rrf_rank_by_id = {doc_id: i for i, doc_id in enumerate(rrf_order)}
+    reranked = False
+
     if use_rerank and len(candidate_docs) > 1:
         try:
             from src.retrieval.reranker import rerank_documents
@@ -730,6 +735,7 @@ async def advanced_retrieval(
             candidate_docs = await asyncio.to_thread(
                 rerank_documents, question, candidate_docs, top_k=len(candidate_docs),
             )
+            reranked = True
             stage_mark("rerank_ms", (time.perf_counter() - _rerank_t0) * 1000)
             print(
                 f"[Advanced Retrieval] Cross-Encoder 精排 {len(candidate_docs)} 条"
@@ -737,6 +743,29 @@ async def advanced_retrieval(
             )
         except Exception as e:
             print(f"[Advanced Retrieval] 重排序失败，保持 RRF 顺序: {e}")
+
+    # ---- 轨迹：精排到底换掉了谁 ----
+    # 只有「池 > 注入」时精排才真参与选人，所以这里同时给出池大小与前后 top_k 的交集：
+    # 交集 = top_k 说明精排只是重排了没换人；交集 < top_k 才说明它真把人换了。
+    if trace_out is not None:
+        final_ids = [_get_doc_id(d.page_content) for d in candidate_docs]
+        trace_out.rerank = {
+            "enabled": reranked,
+            "pool_size": len(final_ids),
+            "top_k": top_k,
+            "topk_overlap": len(set(rrf_order[:top_k]) & set(final_ids[:top_k])),
+            "docs": {
+                doc_id: {
+                    "rrf_rank": rrf_rank_by_id.get(doc_id),
+                    "rerank_rank": final_rank,
+                    "rerank_score": round(
+                        float(candidate_docs[final_rank].metadata.get("rerank_score") or 0.0), 6
+                    ),
+                    "kept": final_rank < top_k,
+                }
+                for final_rank, doc_id in enumerate(final_ids)
+            },
+        }
 
     retrieved_docs = candidate_docs[:top_k]
     contexts = [doc.page_content for doc in retrieved_docs]
