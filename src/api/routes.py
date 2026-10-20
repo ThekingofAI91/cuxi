@@ -834,6 +834,12 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # 荣格图谱建成后的首轮"图谱增强版评测"跑了几题才发现测的还是无图谱基线。
         # 这里复刻 supervisor_agent 的三信号触发 + 证据文档并入（评估无轻量通道，省略 not light_retrieval）
         graph_used = False
+        # 图谱侧轨迹：即便没触发也要留结构（triggered=False + 原因），
+        # 「为什么这题没走图谱」和「走了图谱但没命中」是两种完全不同的失败。
+        graph_trace = {
+            "triggered": False, "reason": "", "available": False,
+            "matched": 0, "seeds": [], "edges": 0, "evidence": 0, "added": 0,
+        }
         if settings.graph_rag_enabled and graph_exists(collection.name):
             try:
                 from src.retrieval.knowledge_graph import (
@@ -845,10 +851,13 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                 trigger, reason = should_trigger_graph_retrieval(
                     request.query, retrieved_docs, collection.name,
                 )
+                graph_trace["triggered"] = trigger
+                graph_trace["reason"] = reason
                 if trigger:
                     graph_used = True
                     g_ctx, g_docs = await retrieve_graph_context(
                         request.query, collection, llm=retrieval_llm,
+                        trace_out=graph_trace,
                     )
                     if g_docs:
                         existing = {_get_doc_id(d.page_content) for d in retrieved_docs}
@@ -862,6 +871,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                         if added_docs:
                             # 证据文档与主链路一样进生成上下文，也要进 judge 可见的 contexts
                             contexts.extend(d.page_content for d in added_docs)
+                            graph_trace["added"] = len(added_docs)
                             print(f"[Eval Query] 触发知识图谱增强（{reason}），并入 {len(added_docs)} 条证据")
                     else:
                         print(f"[Eval Query] 图谱已触发（{reason}）但无命中")
@@ -869,6 +879,8 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                     print(f"[Eval Query] 文本检索质量达标，跳过知识图谱（{reason}）")
             except Exception as ge:
                 print(f"[Eval Query] 知识图谱检索失败，跳过: {ge}")
+
+        trace.graph = graph_trace
 
         print(f"[Eval Query] 高级检索到 {len(retrieved_docs)} 条相关文档（图谱{'已用' if graph_used else '未用'}）")
 

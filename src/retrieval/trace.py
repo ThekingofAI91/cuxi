@@ -43,6 +43,8 @@ class RetrievalTrace:
     fused: dict[str, dict] = field(default_factory=dict)
     # {enabled, pool_size, top_k, topk_overlap, docs{doc_id: {rrf_rank, rerank_rank, rerank_score, kept}}}
     rerank: dict = field(default_factory=dict)
+    # {triggered, reason, available, matched, seeds, edges, evidence, added}
+    graph: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

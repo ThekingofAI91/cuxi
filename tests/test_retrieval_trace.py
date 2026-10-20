@@ -16,6 +16,7 @@ import pytest
 from langchain_core.documents import Document
 
 from src.retrieval import advanced_search as AS
+from src.retrieval import knowledge_graph as KG
 from src.retrieval.advanced_search import fuse_by_class
 from src.retrieval.trace import RetrievalTrace
 from src.core.config import settings
@@ -241,3 +242,55 @@ class TestRerank:
         info = trace.rerank
         assert info["enabled"] is False
         assert all(d["rrf_rank"] == d["rerank_rank"] for d in info["docs"].values())
+
+
+class _NamedCollection:
+    def __init__(self, name="persona_test"):
+        self.name = name
+
+
+def _fake_graph():
+    return {
+        "entities": {
+            "阿尼玛": {"name": "阿尼玛", "freq": 5},
+            "阴影": {"name": "阴影", "freq": 3},
+        },
+        "relations": [
+            {
+                "h": "阿尼玛", "r": "投射于", "t": "阴影",
+                "e": "阿尼玛常以阴影的形式投射到他人身上",
+                "w": 2, "s": "荣格自传.pdf", "hd": "第六章",
+            },
+        ],
+    }
+
+
+class TestGraphTrace:
+    def test_records_seeds_edges_and_evidence(self, monkeypatch):
+        """触发后的图谱轨迹：种子实体名、关系条数、证据条数都要能对上"""
+        monkeypatch.setattr(KG, "load_graph", lambda name: _fake_graph())
+        monkeypatch.setattr(
+            KG, "_match_query_entities",
+            lambda q, g, n=5: [("阿尼玛", 1.0), ("阴影", 0.5)],
+        )
+        trace: dict = {}
+        asyncio.run(
+            KG.retrieve_graph_context("阿尼玛是什么", _NamedCollection(), trace_out=trace)
+        )
+
+        assert trace["available"] is True
+        assert trace["matched"] == 2
+        assert trace["seeds"] == ["阿尼玛", "阴影"]
+        assert trace["edges"] == 1
+        assert trace["evidence"] == 1
+
+    def test_marks_unavailable_without_graph_file(self, monkeypatch):
+        """没有图谱文件时也要写一条 available=False，别让下游把「没图」当成「没命中」"""
+        monkeypatch.setattr(KG, "load_graph", lambda name: {})
+        trace: dict = {}
+        text, docs = asyncio.run(
+            KG.retrieve_graph_context("随便问问", _NamedCollection(), trace_out=trace)
+        )
+
+        assert text == "" and docs == []
+        assert trace["available"] is False

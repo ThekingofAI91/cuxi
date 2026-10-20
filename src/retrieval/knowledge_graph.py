@@ -578,6 +578,7 @@ async def retrieve_graph_context(
     top_entities: Optional[int] = None,
     hops: Optional[int] = None,
     max_edges: Optional[int] = None,
+    trace_out: Optional[dict] = None,
 ) -> tuple[str, list[Document]]:
     """
     查询期知识图谱检索：对齐实体 → 子图扩展 → 渲染上下文 + 证据文档。
@@ -587,6 +588,7 @@ async def retrieve_graph_context(
         collection: ChromaDB collection（用于按名定位图谱文件）
         llm: ChatOpenAI（未传内部创建）
         top_entities / hops / max_edges: 覆盖默认配置
+        trace_out: 可选轨迹容器（评测专用），填 available/matched/seeds/edges/evidence
 
     Returns:
         (graph_context_text, graph_evidence_docs)
@@ -598,11 +600,15 @@ async def retrieve_graph_context(
     max_edges = max_edges or settings.graph_max_edges
 
     graph = load_graph(collection.name)
+    if trace_out is not None:
+        trace_out["available"] = bool(graph and graph.get("relations"))
     if not graph or not graph.get("relations"):
         return "", []
 
     # 1) 查询实体对齐（词法匹配，零 LLM 调用）
     matched = {k: s for k, s in _match_query_entities(query, graph, n=top_entities)}
+    if trace_out is not None:
+        trace_out["matched"] = len(matched)
     if not matched:
         return "", []
 
@@ -615,9 +621,13 @@ async def retrieve_graph_context(
     seed_keys = sorted(matched.keys(), key=lambda k: (matched[k], _entity_freq(k)), reverse=True)[:top_entities]
     print(f"[KnowledgeGraph] 命中种子实体 {len(seed_keys)} 个: "
           f"{[(entities.get(k) or {}).get('name', k) for k in seed_keys]}")
+    if trace_out is not None:
+        trace_out["seeds"] = [(entities.get(k) or {}).get("name", k) for k in seed_keys]
 
     # 2) 子图扩展
     edges = _bfs_subgraph(graph, seed_keys, hops, max_edges)
+    if trace_out is not None:
+        trace_out["edges"] = len(edges)
     if not edges:
         return "", []
 
@@ -643,6 +653,8 @@ async def retrieve_graph_context(
         ))
 
     print(f"[KnowledgeGraph] 子图返回 {len(edges)} 条关系 / {len(ev_docs)} 条证据")
+    if trace_out is not None:
+        trace_out["evidence"] = len(ev_docs)
     return context_text, ev_docs
 
 
