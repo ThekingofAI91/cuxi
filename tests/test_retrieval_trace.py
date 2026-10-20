@@ -16,7 +16,9 @@ import pytest
 from langchain_core.documents import Document
 
 from src.retrieval import advanced_search as AS
+from src.retrieval.advanced_search import fuse_by_class
 from src.retrieval.trace import RetrievalTrace
+from src.core.config import settings
 
 
 class _FakeEmbedder:
@@ -63,9 +65,9 @@ def _docs(n: int = 8):
     ]
 
 
-def _run(rewrite=None, trace=None):
+def _run(rewrite=None, trace=None, n_docs=8):
     """跑一次 advanced_retrieval（全替身，不碰真模型与真向量库）"""
-    docs = _docs()
+    docs = _docs(n_docs)
     collection = _FakeCollection(docs)
 
     async def _fake_rewrite(question, llm, num_variants):
@@ -148,3 +150,55 @@ class TestTraceIsPureBypass:
         assert payload["question"] == "q"
         assert payload["character"] == "jung"
         assert isinstance(payload["boards"], list) and payload["boards"]
+
+
+class TestFused:
+    def test_scores_match_fusion_recomputed_from_boards(self):
+        """fused 里的分数必须能用 boards 复算出来——两处口径一旦分叉，归因就失效"""
+        trace = RetrievalTrace()
+        _run(trace=trace)
+
+        boards = [(b["class"], b["ids"]) for b in trace.boards]
+        meta = {doc_id: {"source": info["source"]} for doc_id, info in trace.fused.items()}
+        recomputed = fuse_by_class(
+            boards, meta,
+            {"vector": settings.rrf_vector_weight, "bm25": settings.rrf_bm25_weight},
+            use_source_weight=True,
+        )
+
+        for doc_id, info in trace.fused.items():
+            assert info["score"] == pytest.approx(recomputed[doc_id], abs=1e-5)
+
+    def test_contrib_sums_to_score(self):
+        """contrib 是分数拆项，加回去必须等于原分（否则「谁捞的」对不上账）"""
+        trace = RetrievalTrace()
+        _run(trace=trace)
+
+        for doc_id, info in trace.fused.items():
+            assert sum(info["contrib"].values()) == pytest.approx(info["score"], abs=1e-5)
+
+    def test_best_rank_is_min_rank_within_class(self):
+        """best_rank 取类内最好名次：同一类多条榜时不能拿更差的那个"""
+        trace = RetrievalTrace()
+        _run(rewrite=(["变体一", "变体二"], "一段假设答案"), trace=trace)
+
+        expected: dict[str, dict] = {}
+        for board in trace.boards:
+            for rank, doc_id in enumerate(board["ids"]):
+                cls = board["class"]
+                prev = expected.setdefault(doc_id, {}).get(cls)
+                if prev is None or rank < prev:
+                    expected[doc_id][cls] = rank
+
+        for doc_id, info in trace.fused.items():
+            assert info["best_rank"] == expected[doc_id]
+
+    def test_only_pool_members_are_recorded(self):
+        """只记进候选池的：池子大小由 rerank_pool_size 决定，没进池的不记"""
+        trace = RetrievalTrace()
+        _run(n_docs=40, trace=trace)
+
+        assert len(trace.fused) == settings.rerank_pool_size
+        assert sorted(i["rrf_rank"] for i in trace.fused.values()) == list(
+            range(settings.rerank_pool_size)
+        )

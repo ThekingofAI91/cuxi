@@ -372,6 +372,7 @@ def fuse_by_class(
     class_weights: dict[str, float],
     rrf_k: int = 60,
     use_source_weight: bool = True,
+    detail: Optional[dict] = None,
 ) -> dict[str, float]:
     """RRF 融合：每类一票 + 类间权重。
 
@@ -392,6 +393,10 @@ def fuse_by_class(
         class_weights: 类名 -> 类权重
         rrf_k: RRF 平滑常数
         use_source_weight: 是否按语料来源类型加权
+        detail: 可选的结果明细容器（评测归因用）。传了就填两张表：
+            detail["best_rank"][doc_id][类名] = 该类里的最好名次
+            detail["contrib"][doc_id][类名] = 该类实际贡献的分数（已含类权重与来源权重）
+            两者相加即该 doc 的最终得分，用于回答「这条是向量捞的还是 BM25 捞的」
 
     Returns:
         doc_id -> RRF 分数（未排序）
@@ -416,7 +421,11 @@ def fuse_by_class(
             if use_source_weight:
                 source = (doc_metadata.get(doc_id) or {}).get("source", "")
                 weight *= get_source_weight(source)
-            scores[doc_id] = scores.get(doc_id, 0.0) + weight / (rrf_k + rank + 1)
+            contribution = weight / (rrf_k + rank + 1)
+            scores[doc_id] = scores.get(doc_id, 0.0) + contribution
+            if detail is not None:
+                detail.setdefault("best_rank", {}).setdefault(doc_id, {})[class_name] = rank
+                detail.setdefault("contrib", {}).setdefault(doc_id, {})[class_name] = contribution
     return scores
 
 
@@ -651,12 +660,14 @@ async def advanced_retrieval(
     # 来源加权：oral（口述/讲座/回忆录）优先召回学说话方式，
     # original（原著）支撑观点，anchor（core_ideas）锚定关键事实，
     # secondary（二手解读）强降权防止第三者评价冒充名人原话。
+    fusion_detail: dict = {}
     doc_rrf_scores = fuse_by_class(
         class_boards,
         {doc_id: cand.get("metadata") or {} for doc_id, cand in doc_candidates.items()},
         class_weights,
         rrf_k=rrf_k,
         use_source_weight=use_source_weight,
+        detail=fusion_detail if trace_out is not None else None,
     )
 
     # 按 RRF 分数排序
@@ -686,6 +697,25 @@ async def advanced_retrieval(
                 metadata=metadata,
             )
         )
+
+    # ---- 轨迹：候选池里每条是怎么进来的（哪类捞的、各贡献多少分）----
+    # 只记进池的 candidate_limit 条：没进池的不会影响回答，记了只是噪音。
+    # contrib 之和 == score，所以「这条靠向量还是靠 BM25」可以逐条对账。
+    if trace_out is not None:
+        for rrf_rank, doc_id in enumerate(sorted_doc_ids[:candidate_limit]):
+            meta = doc_candidates[doc_id]["metadata"] or {}
+            src = meta.get("source", "")
+            trace_out.fused[doc_id] = {
+                "rrf_rank": rrf_rank,
+                "score": round(doc_rrf_scores[doc_id], 6),
+                "best_rank": fusion_detail.get("best_rank", {}).get(doc_id, {}),
+                "contrib": {
+                    cls: round(v, 6)
+                    for cls, v in fusion_detail.get("contrib", {}).get(doc_id, {}).items()
+                },
+                "source": src,
+                "source_type": meta.get("source_type") or classify_source(src),
+            }
 
     # ---- Step 5: Cross-Encoder 精排整个候选池，再按 top_k 截断 ----
     # 池子（rerank_pool_size，默认 10）> 注入条数（top_k，默认 5）是本步的前提：

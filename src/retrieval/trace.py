@@ -39,6 +39,8 @@ class RetrievalTrace:
     question: str = ""
     character: str = ""
     boards: list[dict] = field(default_factory=list)
+    # doc_id -> {rrf_rank, score, best_rank{类:名次}, contrib{类:分数}, source, source_type}
+    fused: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
