@@ -297,37 +297,41 @@ class TestGraphTrace:
         assert trace["available"] is False
 
 
-class TestTruncated:
-    def test_short_block_is_not_clipped(self, monkeypatch):
-        """没超上限的块原样注入，不能虚报成被砍过"""
-        monkeypatch.setattr(settings, "inject_doc_chars", 100)
+class TestBoundary:
+    def test_long_block_is_injected_in_full(self):
+        """去掉注入上限的核心契约：3000 字的块必须一字不少地进上下文"""
+        text = "这是一段很长的正文。" * 300
+        assert len(text) == 3000
+
+        context = _build_context([Document(page_content=text, metadata={"source": "d.pdf"})])
+
+        assert text in context
+        assert context.count("这是一段很长的正文。") == 300
+
+    def test_records_length_and_sentence_end(self):
+        """块长度按原文记，结尾是句末标点就标 True"""
+        text = "完整的一句话。"
         trace = RetrievalTrace()
-        doc = Document(page_content="短句子。", metadata={"source": "a.pdf"})
 
-        _build_context([doc], trace=trace)
-        info = trace.truncated[AS._get_doc_id(doc.page_content)]
+        _build_context([Document(page_content=text, metadata={"source": "e.pdf"})], trace=trace)
+        info = trace.boundary[AS._get_doc_id(text)]
 
-        assert info["clipped"] is False
-        assert info["orig_len"] == info["kept_len"] == len("短句子。")
+        assert info["chars"] == len(text)
+        assert info["ends_at_sentence"] is True
         assert info["kind"] == "source"
 
-    def test_long_block_clipped_at_sentence_boundary(self, monkeypatch):
-        """超上限的块要截在句末：kept_len 不超限，且末字是句末标点"""
-        monkeypatch.setattr(settings, "inject_doc_chars", 50)
-        text = "第一句话在这里。" * 10
+    def test_block_ending_mid_sentence_is_flagged(self):
+        """断在句中的块要能认出来——这是分块/OCR 的问题，不是注入的问题"""
+        text = "这段话没有写完就断了"
         trace = RetrievalTrace()
-        doc = Document(page_content=text, metadata={"source": "b.pdf"})
 
-        _build_context([doc], trace=trace)
-        info = trace.truncated[AS._get_doc_id(text)]
+        _build_context([Document(page_content=text, metadata={"source": "f.pdf"})], trace=trace)
+        info = trace.boundary[AS._get_doc_id(text)]
 
-        assert info["clipped"] is True
-        assert info["kept_len"] <= 50
-        assert info["at_sentence"] is True
+        assert info["ends_at_sentence"] is False
 
-    def test_infer_evidence_never_clipped(self, monkeypatch):
-        """图谱证据只有一句话，不参与截断——标成被砍会误导「证据被削了」的判断"""
-        monkeypatch.setattr(settings, "inject_doc_chars", 10)
+    def test_infer_evidence_marked(self):
+        """图谱证据标 kind=infer，与正文块区分开"""
         trace = RetrievalTrace()
         doc = Document(
             page_content="阿尼玛 —投射于→ 阴影",
@@ -335,10 +339,9 @@ class TestTruncated:
         )
 
         _build_context([doc], trace=trace)
-        info = trace.truncated[AS._get_doc_id(doc.page_content)]
+        info = trace.boundary[AS._get_doc_id(doc.page_content)]
 
         assert info["kind"] == "infer"
-        assert info["clipped"] is False
 
     def test_without_trace_context_still_builds(self):
         """生产路径不传 trace：上下文照旧构建，不能因为采集分支炸掉"""

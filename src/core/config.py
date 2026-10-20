@@ -309,11 +309,11 @@ class Settings(BaseSettings):
     #   「文本召回条数 < 3」—— 注入固定 5 条，正常路径永远走不到，是死兜底。
     # 实测删除后触发率 85/98（86.7%），100% 来自实体覆盖缺口。
 
-    # ---- 注入预算 ----
-    # 单条资料进 prompt 的字符上限。块本身长度由 chunker 决定：max_size=chunk_size(1000)
-    # 加上 100 字 overlap，再经 _merge_short_tail 最多到 max+min-1=1499。所以这里的
-    # 上限只是保险丝，正常块不该被切到——切就必须找句末，不能硬砍成半句。
-    inject_doc_chars: int = 1500
+    # 注入长度不设上限（2026-10-20 删除 inject_doc_chars=1500）：
+    # 块长度由 chunker 决定（max_size=chunk_size + overlap，短尾合并最多到 max+min-1），
+    # 注入时整块进 prompt，不再二次裁剪。此前那道「单条上限」是照旧口径 [:1000] 的
+    # 延续，实测全库 5700 个块里只有 5 个超过 1500，限制本身空转，却留下一条
+    # 「注入的还不是原文全文」的疑点。
 
     def get_chroma_path(self) -> Path:
         """返回 ChromaDB 持久化路径"""

@@ -33,7 +33,7 @@ class RetrievalTrace:
       fused   —— RRF 融合后的分数与类内名次（为什么是它进候选池）
       rerank  —— 精排换入换出（池 > 注入 时，精排到底改了什么）
       graph   —— 图谱是否触发、命中哪些实体、扩出多少关系
-      truncated —— 注入时被截断的块（原始长 / 保留长 / 是否截在句末）
+      boundary —— 注入块的长度与结尾是否为句末（分块质量，不是注入裁剪）
     """
 
     question: str = ""
@@ -45,8 +45,8 @@ class RetrievalTrace:
     rerank: dict = field(default_factory=dict)
     # {triggered, reason, available, matched, seeds, edges, evidence, added}
     graph: dict = field(default_factory=dict)
-    # doc_id -> {kind, source, orig_len, kept_len, clipped, at_sentence}
-    truncated: dict[str, dict] = field(default_factory=dict)
+    # doc_id -> {kind, source, chars, ends_at_sentence}
+    boundary: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)

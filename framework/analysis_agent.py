@@ -267,42 +267,28 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 _SENTENCE_ENDS = "。！？!?…；;"
 
 
-def _clip_at_sentence(text: str, limit: int) -> str:
-    """按句末边界截断到 limit 以内；找不到像样的句末才硬切。
+def _record_boundary(trace, doc, kind: str) -> None:
+    """记录注入块的边界质量：多长、结尾是不是句末标点。
 
-    为什么不在 limit 处直接切：chunk 是**按句边界**切出来的，硬砍等于把 chunker
-    刚做好的边界再破坏一次，模型读到的是半句（"上帝也并不"）。实测 [:1000] 硬切
-    把 wangyangming 的块尾完整率从 44.2% 打到 5.3%、adler 从 59.7% 打到 46.5%。
-    句末回退太靠前（不足窗口一半）时说明这段本来就没有句读，硬切损失更小。
-    """
-    if limit <= 0 or len(text) <= limit:
-        return text
-    window = text[:limit]
-    cut = max(window.rfind(ch) for ch in _SENTENCE_ENDS)
-    cut = max(cut, window.rfind("\n"))
-    if cut < limit * 0.5:
-        return window
-    return window[: cut + 1].rstrip()
+    原来这里叫 truncated，记的是「被砍掉多少字」。2026-10-20 去掉注入长度上限后
+    不再有任何裁剪，字段随之改为记录块本身的边界质量——块是 chunker 切的，它断在
+    句中就说明上游（OCR → parser → chunker）把段落边界认错了，跟注入没关系。
 
+    荣格语料只有 18.3% 的块以句末标点结尾，这是接下来要修的问题；逐题留痕是为了
+    改了 parser 之后能拿同一批题对比，而不是靠整体分猜。
 
-def _record_truncation(trace, doc, kept: str, kind: str) -> None:
-    """把「这条块注入时被砍了多少」记进轨迹。
-
-    doc_id 复用 advanced_search 的内容哈希，保证能和 fused/rerank 里的同一条对上——
-    换了别的 id 方案，这三个字段就join不起来了。
+    doc_id 复用 advanced_search 的内容哈希，保证能和 fused/rerank 里的同一条对上。
     """
     from src.retrieval.advanced_search import _get_doc_id
 
     raw = doc.page_content or ""
     meta = doc.metadata or {}
-    trace.truncated[_get_doc_id(raw)] = {
+    tail = raw.rstrip()
+    trace.boundary[_get_doc_id(raw)] = {
         "kind": kind,
         "source": meta.get("source") or "",
-        "orig_len": len(raw),
-        "kept_len": len(kept),
-        # 推断证据本身只有一句话，不截断；strip 掉空白不算「被砍」
-        "clipped": kind == "source" and len(kept) < len(raw),
-        "at_sentence": (not kept) or kept[-1] in _SENTENCE_ENDS or kept[-1] == "\n",
+        "chars": len(raw),
+        "ends_at_sentence": bool(tail) and tail[-1] in _SENTENCE_ENDS,
     }
 
 
@@ -315,10 +301,11 @@ def _build_context(docs: list, trace=None) -> str:
       图谱证据 → [G1]..[Gn]，头标「推断｜非原文」，是三元组归纳出来的关系，
                 不是人物逐字原话。
     旧实现把两者混编成 1..33，模型看到 `[31] 来源: 荣格自传` 就当成原著引用了。
-    正文块只在超过 `inject_doc_chars` 时才截，且截在句末；推断证据本身只有一句话，
-    不截断——截了就没有信息了。
 
-    trace 传了就把每条块的原始长度 / 保留长度 / 是否截在句末记进去（评测归因用）。
+    注入不设长度上限：块按 chunker 切出来的原样进 prompt，不再二次裁剪。
+    推断证据本来就只有一句话，同样原样注入。
+
+    trace 传了就记录每条块的长度与结尾是否为句末（评测归因用）。
     """
     if not docs:
         return "（无参考资料）"
@@ -337,19 +324,16 @@ def _build_context(docs: list, trace=None) -> str:
             header = f"[G{infer_i}] 推断｜非原文，依据: {basis}"
             content = (doc.page_content or "").strip()
             if trace is not None:
-                _record_truncation(trace, doc, content, kind="infer")
+                _record_boundary(trace, doc, kind="infer")
         else:
             plain_i += 1
-            # 注入条数与单条上限是一对参数：5 条 × 1500 字 ≈ 7.5K 字封顶。
             # 条数压到 5 是为了把精排候选池撑到 10 条（池 > 注入，精排才真参与选人）。
-            # 单条上限从 1000 提到 1500（10-19）：chunk 的实际长度是 1000~1499
-            # （max_size + overlap，再经 _merge_short_tail 合并），原来的 1000 会让
-            # 96% 的块在注入时被砍一刀，砍掉的正是尾巴上最新鲜的内容，而头部那 100 字
-            # overlap 反而留着——又花 token 又丢内容。1500 是保险丝，正常块不会被切。
+            # 单条不设上限（10-20 删掉 inject_doc_chars=1500）：块按 chunker 切的
+            # 原样整块进 prompt，注入的就是完整原文。
             header = f"[{plain_i}] 原文｜来源: {source} | 章节: {heading or '未知章节'}"
-            content = _clip_at_sentence(doc.page_content or "", settings.inject_doc_chars)
+            content = doc.page_content or ""
             if trace is not None:
-                _record_truncation(trace, doc, content, kind="source")
+                _record_boundary(trace, doc, kind="source")
 
         context_parts.append(f"{header}\n{content}")
 
