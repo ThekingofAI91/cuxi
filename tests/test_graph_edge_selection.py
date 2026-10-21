@@ -97,3 +97,31 @@ def test_hops_one_ignores_two_hop_edges():
     g = _graph([("A", "r", "B", 1), ("B", "r", "X", 1)])
     edges = _bfs_subgraph(g, ["A"], hops=1, max_edges=30)
     assert _pairs(edges) == {("A", "r", "B")}
+
+
+def test_hub_gate_drops_edges_to_entities_absent_from_question():
+    """枢纽（本体级节点）指向的节点必须在问题命中实体里，否则这条边不收。
+
+    A 度数 3/3 = 100%，按比例判据是枢纽；allowed 只有 A 与 X，所以 A—Y、A—Z 被挡。
+    """
+    g = _graph([("A", "r", "X", 1), ("A", "r", "Y", 1), ("A", "r", "Z", 1)])
+    edges = _bfs_subgraph(g, ["A"], hops=1, max_edges=30, allowed_endpoints={"A", "X"})
+    pairs = _pairs(edges)
+    assert ("A", "r", "X") in pairs
+    assert ("A", "r", "Y") not in pairs and ("A", "r", "Z") not in pairs
+
+
+def test_gate_is_off_without_allowed_endpoints():
+    """不传 allowed_endpoints 时闸门关闭，保持旧行为（离线探针、单测用）。"""
+    g = _graph([("A", "r", "X", 1), ("A", "r", "Y", 1), ("A", "r", "Z", 1)])
+    edges = _bfs_subgraph(g, ["A"], hops=1, max_edges=30)
+    assert len(edges) == 3
+
+
+def test_low_degree_node_is_not_gated():
+    """普通节点不受闸门约束：B 度数占全图 10%，它的邻居照收。"""
+    rels = [("A", "r", f"n{i}", 1) for i in range(18)] + [("B", "r", "X", 1), ("B", "r", "Y", 1)]
+    g = _graph(rels)
+    edges = _bfs_subgraph(g, ["B"], hops=1, max_edges=30, allowed_endpoints={"B"})
+    pairs = _pairs(edges)
+    assert ("B", "r", "X") in pairs and ("B", "r", "Y") in pairs

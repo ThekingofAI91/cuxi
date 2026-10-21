@@ -512,12 +512,13 @@ def _bfs_subgraph(
     hops: int,
     max_edges: int,
     min_support: Optional[int] = None,
+    allowed_endpoints: Optional[set] = None,
 ) -> list[dict]:
     """
     从种子节点做 k 跳 BFS，收集关联三元组（去重、按优先级截断）。
     返回 [{"h","r","t","e","w","s","hd"}, ...]，s/hd 为证据片段的真实出处/章节。
 
-    选边规则（2026-10-21 改）：
+    选边规则：
     1. 一跳边（直接挂着种子）优先于二跳边。
     2. 二跳边要求「支撑度」达标：支撑度 = 该边另一端在种子一跳邻域里有几个邻居（含跳板
        自己）。支撑度 1 意味着它只是从跳板伸出去的一条孤边——实测全库 79.7% 的二跳边都是
@@ -527,6 +528,11 @@ def _bfs_subgraph(
     3. 两端都在一跳邻域里的边算高支撑（2），它们两侧都贴着问题实体。
     4. 同优先级内按 w 降序。注意全库 w=1 占 94.7-99.5%，w 的实际区分度很弱，排序主要靠
        上面两条结构规则。
+    5. **枢纽闸门**（2026-10-21）：度数占比 >= `graph_hub_degree_ratio` 的节点视作本体级枢纽
+       （实测正好只圈中五个人物的本体，阿德勒占比 5% 不命中）。枢纽节点参与的边，另一端必须
+       在 `allowed_endpoints` 里，否则这条边既不收、也不继续跳。原因是本体一跳边远超上限：
+       王阳明 101 条边、张雪峰 363 条，而 w 全是 1、排序退化成关系数组顺序，于是十道题里
+       六道拿到逐字相同的 30 条。闸门一上，本体只留「本体 → 问题实体」这几条。
     """
     entities = graph.get("entities", {})
     relations = graph.get("relations", [])
@@ -540,6 +546,24 @@ def _bfs_subgraph(
     for r in relations:
         adj.setdefault(r["h"], []).append((r["t"], r))
         adj.setdefault(r["t"], []).append((r["h"], r))  # 无向扩展
+
+    # 枢纽闸门：只认「另一端是问题命中实体」的那几条边
+    hubs: set[str] = set()
+    if allowed_endpoints is not None:
+        ratio = float(getattr(settings, "graph_hub_degree_ratio", 0.15))
+        limit = ratio * len(relations)
+        for node, nbrs in adj.items():
+            if len(nbrs) >= limit:
+                hubs.add(node)
+
+    def _blocked(node: str, other: str) -> bool:
+        if not hubs:
+            return False
+        if node in hubs and other not in allowed_endpoints:
+            return True
+        if other in hubs and node not in allowed_endpoints:
+            return True
+        return False
 
     seeds = set(seed_keys)
     collected: dict[tuple, dict] = {}
@@ -567,6 +591,8 @@ def _bfs_subgraph(
     n1: set[str] = set()
     for node in seed_keys:
         for other, r in adj.get(node, []):
+            if _blocked(node, other):
+                continue
             _record(node, other, r, 1, 1)
             n1.add(other)
     n1 -= seeds
@@ -577,6 +603,8 @@ def _bfs_subgraph(
             for other, r in adj.get(node, []):
                 if other in seeds:
                     continue  # 一跳已收
+                if _blocked(node, other):
+                    continue
                 if other in n1:
                     _record(node, other, r, 2, 2)  # 两端都贴着种子邻域
                     continue
@@ -668,8 +696,14 @@ async def retrieve_graph_context(
     if trace_out is not None:
         trace_out["seeds"] = [(entities.get(k) or {}).get("name", k) for k in seed_keys]
 
-    # 2) 子图扩展
-    edges = _bfs_subgraph(graph, seed_keys, hops, max_edges)
+    # 2) 子图扩展：命中实体集合同时作为「本体跳不过去的白名单」
+    edges = _bfs_subgraph(
+        graph,
+        seed_keys,
+        hops,
+        max_edges,
+        allowed_endpoints=set(matched.keys()),
+    )
     if trace_out is not None:
         trace_out["edges"] = len(edges)
     if not edges:
