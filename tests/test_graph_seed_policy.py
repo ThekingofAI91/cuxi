@@ -66,10 +66,14 @@ def test_seeds_are_capped_and_sorted_by_freq():
 # ---------- 白名单与零产出 ----------
 
 def test_whitelist_comes_from_seeds_not_from_fuzzy_hits(monkeypatch):
-    """枢纽闸门的白名单同源：只放种子自己，模糊命中的「宁王」进不来。"""
+    """闸门白名单同源：只放种子自己，没进问题的「宁王」进不来。"""
     g = _graph(
         {"王阳明": 30, "龙场": 5, "宁王": 8},
         [("王阳明", "贬至", "龙场"), ("王阳明", "平定", "宁王")],
+    )
+    # 本体名按 collection 配置；测试库是 persona_test，这里临时给它配上王阳明
+    monkeypatch.setattr(
+        kg.settings, "graph_hub_entities", {"persona_test": ["王阳明"]}, raising=False
     )
     monkeypatch.setattr(kg, "load_graph", lambda name: g)
     text, docs = asyncio.run(

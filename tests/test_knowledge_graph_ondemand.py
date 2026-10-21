@@ -75,14 +75,14 @@ class TestMatchQueryEntities:
         graph = _make_graph()
         assert kg._match_query_entities("完全无关的问题xyz", graph) == []
 
-    def test_overlap_ratio(self):
-        """无子串命中时按词重叠比例给分（>0 且 <3.0）"""
+    def test_word_overlap_tier_is_gone(self):
+        """第三档（按单字重叠比例给分）已删除：零散字面重合不再给分。
+
+        旧行为下「Carl Gustav Jung」对「Jung 和弗洛伊德」能拿到 1/3 的词重叠分，足以
+        挤进种子名额；王阳明那六道题就是被「王」字把宁王/王华/王通带进来的。
+        """
         graph = _make_graph(entities={"jung": {"name": "Carl Gustav Jung", "freq": 1}})
-        matched = kg._match_query_entities("Jung 和弗洛伊德", graph)
-        assert len(matched) == 1
-        score = dict(matched)["jung"]
-        assert 0 < score < 3.0
-        assert score == pytest.approx(1 / 3)
+        assert kg._match_query_entities("Jung 和弗洛伊德", graph) == []
 
     def test_ordering_by_score(self):
         """评分降序：子串满分（3.0）排在「查询是节点名子串」（2.5）之前"""

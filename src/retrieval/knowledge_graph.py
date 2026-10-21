@@ -147,27 +147,39 @@ def _norm(name: str) -> str:
 # LLM 抽取（Triple Extraction）
 # ============================================================
 
+# 实体类型枚举（2026-10-21 加类型列时定）：只有「事件」会改变检索行为——事件节点不参与
+# 二跳扩展（见 `_bfs_subgraph` 第 6 条），其余类型只是标注、不进逻辑。所以这里宁可窄，
+# 也不放一堆用不上的类型。
+_ENTITY_TYPES = ("人物", "概念", "著作", "事件", "地点", "组织")
+_ENTITY_TYPES = set(_ENTITY_TYPES)
+
+
 # 抽取输出用「竖线分隔的行式格式」，不用 JSON。
 # 原因（2026-08-29 实测定价）：中转 API 对「要求输出 JSON + 长输入」的组合会静默返回空
 # 响应（同一段 7.9KB 文本，JSON 指令 3/3 返回空、自然语言指令正常）——导致图谱构建
 # 每批 0 实体、白烧几百次调用。行式输出就是普通文本生成，完全绕开该故障模式。
-# 格式：头实体 | 关系 | 尾实体 | 证据片段（一行一条，无关系的行不输出）
+# 格式：头实体 | 头类型 | 关系 | 尾实体 | 尾类型 | 证据片段（一行一条，无关系的行不输出）
 _EXTRACT_PROMPT = """你是知识图谱抽取器。下面是某位人物/主题的资料文本（可能包含多段）。
-请从中抽取「实体」与「实体之间的关系」，**直接输出结果行**，每行一条，格式（用竖线分隔，共 4 列）：
+请从中抽取「实体」与「实体之间的关系」，**直接输出结果行**，每行一条，格式（用竖线分隔，共 6 列）：
 
-头实体 | 关系 | 尾实体 | 证据片段
+头实体 | 头类型 | 关系 | 尾实体 | 尾类型 | 证据片段
 
 示例：
-集体潜意识 | 包含 | 原型 | 原型是集体潜意识中先天的心理倾向
-王阳明 | 提出 | 知行合一 | 知是行之始，行是知之成
+集体潜意识 | 概念 | 包含 | 原型 | 概念 | 原型是集体潜意识中先天的心理倾向
+王阳明 | 人物 | 提出 | 知行合一 | 概念 | 知是行之始，行是知之成
+王阳明 | 人物 | 经历 | 龙场悟道 | 事件 | 因触怒刘瑾谪至贵州龙场，夜半大悟
 
 规则：
 - 第一行不要任何标题、解释或 markdown 代码块，直接输出结果行
 - 只抽取文本中**明确出现**的关联，绝不臆测；没有就什么都不输出
+- 类型只能填这六个之一：人物、概念、著作、事件、地点、组织
+- 「事件」= 一次具体发生的事（龙场悟道、宁王之乱、某某讲学、某场辩论）；
+  「概念」= 可以反复讨论的理论/术语（心即理、知行合一、集体潜意识）；
+  拿不准是事件还是概念时填「概念」
 - 头/尾实体用规范实体名（同一概念用原文主要叫法，如统一用「集体潜意识」）
 - 关系用简短中文短语（如「提出」「属于」「对立于」「影响了」「出自」「反对」）
 - 证据片段摘自原文，控制在 50 字内
-- 实体类型不限：人物、理论、概念、著作、事件、地点都可
+- 证据片段放在最后一列，里面可以出现竖线，前面五列不行
 
 资料文本：
 {text}"""
@@ -213,18 +225,32 @@ async def _llm_extract_triples(llm, text: str) -> list[dict]:
             line = line.strip().strip("-*·").strip()
             if not line or "|" not in line:
                 continue
-            cols = [c.strip() for c in line.split("|")]
+            # maxsplit=5：证据片段的最后一列允许自带竖线
+            cols = [c.strip() for c in line.split("|", 5)]
             if len(cols) < 3:
                 continue
-            h, r, tl = cols[0], cols[1], cols[2]
-            ev = cols[3].strip() if len(cols) >= 4 else ""
+            # 新格式 6 列：头 | 头类型 | 关系 | 尾 | 尾类型 | 证据
+            # 模型偶尔会漏掉类型列，退回旧格式 4 列：头 | 关系 | 尾 | 证据。
+            # 判别看「第 2 列是不是合法类型名」而不是只看列数——旧格式的竖线数也可能
+            # 因为证据里带竖线凑够 5 列。
+            if (len(cols) >= 5 and cols[1] in _ENTITY_TYPES) or len(cols) >= 6:
+                h, h_type, r, tl, t_type = cols[0], cols[1], cols[2], cols[3], cols[4]
+                ev = cols[5] if len(cols) > 5 else ""
+                h_type = h_type if h_type in _ENTITY_TYPES else ""
+                t_type = t_type if t_type in _ENTITY_TYPES else ""
+            else:
+                h, r, tl = cols[0], cols[1], cols[2]
+                ev = cols[3] if len(cols) > 3 else ""
+                h_type = t_type = ""
             if not h or not r or not tl or h == tl:
                 continue
             out.append({
                 "head": h,
+                "head_type": h_type,
                 "relation": r,
                 "tail": tl,
-                "evidence": ev,
+                "tail_type": t_type,
+                "evidence": ev.strip(),
             })
         return out
     except Exception as ex:
@@ -286,6 +312,13 @@ def _load_collection_docs(collection, limit: int) -> list[Document]:
     return docs
 
 
+def _majority_type(type_counts: dict) -> str:
+    """实体类型取出现最多的那个（同一实体在不同批里可能被标成不同类，取多数）。"""
+    if not type_counts:
+        return ""
+    return max(type_counts.items(), key=lambda kv: kv[1])[0]
+
+
 def _write_graph_tmp(collection_name: str, entities: dict, rel_index: dict, processed: int) -> None:
     """把当前累积的图谱写入 .tmp（每批调用：崩溃可续传，且不污染最终文件）"""
     tmp = graph_path(collection_name).with_suffix(".json.tmp")
@@ -294,7 +327,10 @@ def _write_graph_tmp(collection_name: str, entities: dict, rel_index: dict, proc
         "built_at": time.time(),
         "resumable": True,
         "processed": processed,
-        "entities": {k: {"name": v["name"], "freq": v["freq"]} for k, v in entities.items()},
+        "entities": {
+            k: {"name": v["name"], "freq": v["freq"], "type": _majority_type(v.get("types") or {})}
+            for k, v in entities.items()
+        },
         "relations": [
             {"h": r["h"], "r": r["r"], "t": r["t"], "e": r["e"], "w": r["w"], "c": r["c"],
              "s": r.get("s", ""), "hd": r.get("hd", "")}
@@ -357,7 +393,12 @@ async def build_knowledge_graph(
             data = json.loads(tmp_path.read_text(encoding="utf-8"))
             if isinstance(data, dict) and "relations" in data:
                 for k, v in data.get("entities", {}).items():
-                    entities[k] = {"name": v.get("name", ""), "freq": v.get("freq", 0), "chunk_ids": set()}
+                    # .tmp 里只存了多数派类型（不存计数），续传时按 1 计即可
+                    tp = v.get("type") or ""
+                    entities[k] = {
+                        "name": v.get("name", ""), "freq": v.get("freq", 0),
+                        "chunk_ids": set(), "types": {tp: 1} if tp else {},
+                    }
                 for r in data.get("relations", []):
                     rk = (_norm(r["h"]), _norm(r["r"]), _norm(r["t"]))
                     rel_index[rk] = {
@@ -403,10 +444,16 @@ async def build_knowledge_graph(
             hk, tk = _norm(tr["head"]), _norm(tr["tail"])
             if not hk or not tk:
                 continue
-            for key, name in ((hk, tr["head"]), (tk, tr["tail"])):
+            for key, name, tp in (
+                (hk, tr["head"], tr.get("head_type", "")),
+                (tk, tr["tail"], tr.get("tail_type", "")),
+            ):
                 if key not in entities:
-                    entities[key] = {"name": name, "freq": 0, "chunk_ids": set()}
+                    entities[key] = {"name": name, "freq": 0, "chunk_ids": set(), "types": {}}
                 entities[key]["freq"] += 1
+                if tp:
+                    tc = entities[key].setdefault("types", {})
+                    tc[tp] = tc.get(tp, 0) + 1
             # 关系聚合（同 head/rel/tail 只留一条，权重累计、保留更长的证据）
             ev = tr["evidence"][:settings.graph_evidence_chars]
             rk = (hk, _norm(tr["relation"]), tk)
@@ -447,7 +494,10 @@ async def build_knowledge_graph(
             "entities": len(entities),
             "relations": len(relations),
         },
-        "entities": {k: {"name": v["name"], "freq": v["freq"]} for k, v in entities.items()},
+        "entities": {
+            k: {"name": v["name"], "freq": v["freq"], "type": _majority_type(v.get("types") or {})}
+            for k, v in entities.items()
+        },
         "relations": relations,
     }
 
@@ -469,18 +519,24 @@ async def build_knowledge_graph(
 
 def _match_query_entities(query: str, graph: dict, n: int = 8) -> list[tuple[str, float]]:
     """
-    查询实体对齐（纯词法匹配，零 LLM 调用）：把查询与图谱节点名做子串 / 词重叠匹配，
-    返回 [(实体键, 评分), ...] 按评分降序。取代原来的「每轮 LLM 抽取查询实体」，
+    查询实体对齐（纯词法匹配，零 LLM 调用）：节点名与问题做子串匹配，返回
+    [(实体键, 评分), ...] 按评分降序。取代原来的「每轮 LLM 抽取查询实体」，
     避免每次检索都多一次 LLM 往返，也避免 LLM 发散引入噪声。
 
-    评分：节点名整体作为子串命中查询=3.0；查询作为子串命中节点名=2.5；
-    否则按词重叠比例（重叠词数 / 节点词数）给分。
+    只有两档：
+    - 3.0：节点名整体出现在问题里（`n_name in q_norm`）
+    - 2.5：方向相反，问题整体是节点名的子串（`q_norm in n_name`）。实测这档几乎不产生
+      3.0 之外的新实体——要让一整句问题塞进节点名里很难。
+
+    ★第三档「按单字重叠比例给分」已于 2026-10-21 删除。原因是 `_tokenize` 把中文按单字
+    切，问题里只要出现「王」字，「宁王」0.50、「王华」0.50、「王通」0.50、「王阳明讲学」
+    0.60 全都能拿分，王阳明六道题的种子因此逐字相同。这一档在生产里本来就是死代码
+    （`_literal_seeds` 只取 3.0），删它是把语义收窄到「你说的词真的出现了」。
 
     单字节点名（「三」「心」「梦」「水」）直接不参与对齐：子串匹配下它们在任何含该字的
     查询里都拿 3.0，比真正的长实体还靠前，挤进种子后 2 跳就能撞满 graph_max_edges。
     只挡种子、不删实体——单字实体经别的种子 BFS 走到时仍会带出关系（见 config 注释）。
     """
-    q_tokens = set(_tokenize(query))
     q_norm = _norm(query)
     min_len = max(1, int(getattr(settings, "graph_min_seed_len", 1)))
     scored: list[tuple[str, float]] = []
@@ -491,18 +547,17 @@ def _match_query_entities(query: str, graph: dict, n: int = 8) -> list[tuple[str
         n_name = _norm(name)
         if not n_name or len(n_name) < min_len:
             continue
-        score = 0.0
-        if n_name and n_name in q_norm:
-            score = 3.0
+        if n_name in q_norm:
+            scored.append((key, 3.0))
         elif q_norm and q_norm in n_name:
-            score = 2.5
-        elif q_tokens:
-            overlap = set(_tokenize(name)) & q_tokens
-            if overlap:
-                score = len(overlap) / max(1, len(set(_tokenize(name))))
-        if score > 0:
-            scored.append((key, score))
-    scored.sort(key=lambda x: x[1], reverse=True)
+            scored.append((key, 2.5))
+    # 同分按节点频次降序：问题里同时出现多个实体时，反复出现的那个信息量更大；
+    # 顺带让 `_literal_seeds` 不必「先多取候选、再按频次重排」。
+    ents = graph.get("entities", {})
+    scored.sort(
+        key=lambda kv: (kv[1], (ents.get(kv[0]) or {}).get("freq", 0)),
+        reverse=True,
+    )
     return scored[:n]
 
 
@@ -522,17 +577,44 @@ def _literal_seeds(query: str, graph: dict, top_entities: int) -> dict[str, floa
       里 12 题零产出、峰哥 2/13、张雪峰 3/13，荣格与阿德勒 0 零产出。这是接受的代价
       —— 宁可不给，也不拿「宁王/王华」冒充问题的实体。
 
-    候选池取 max(top_entities, 8)：字面命中可能排在名额之外，先取宽一点再按
-    (得分, 节点频次) 排序截断，避免名额被低分实体挤掉后丢掉真正的字面命中。
+    候选池就是 top_entities 本身：`_match_query_entities` 只返回两档（3.0 字面命中 / 2.5
+    反向子串），同分已按节点频次降序，截断后不会漏掉信息量更大的那个。此前「先多取
+    8 个候选再按频次重排」的余量是为第三档（单字重叠 0.3-0.75）准备的，那一档删除后
+    余量失去意义，一并去掉。
     """
-    pool = _match_query_entities(query, graph, n=max(top_entities, 8))
-    ents = graph.get("entities", {})
-    literal = [(k, s) for k, s in pool if s >= 3.0]
-    literal.sort(
-        key=lambda kv: (kv[1], (ents.get(kv[0]) or {}).get("freq", 0)),
-        reverse=True,
-    )
-    return dict(literal[:top_entities])
+    pool = _match_query_entities(query, graph, n=top_entities)
+    return {k: s for k, s in pool if s >= 3.0}
+
+
+def _resolve_gate_nodes(graph: dict, collection_name: str) -> set[str]:
+    """
+    找出「闸门节点」的键：本体级枢纽 + 事件节点。
+
+    **本体枢纽**：名字来自 `settings.graph_hub_entities`（collection 名 → 本体名列表），
+    不再从度数比例猜。原因：图谱里一个本体常被抽成多个节点（峰哥 = 「峰哥亡命天涯」
+    61.1% + 「峰哥」21.2%），比例判据只有其中一个能靠阈值稳定命中，另一个靠余量碰巧够；
+    而「谁是主角」本来就是已知信息，没理由去拟合。名字对不上时该库没有枢纽。
+
+    **事件节点**：靠图谱里的 `type == "事件"` 认（抽取期打的标，见 `_EXTRACT_PROMPT`）。
+    事件往外连的都是同场的其他人物，放它进 BFS 等于把整场的人都拖进来；而它到本体的
+    那条边本身是有用的。所以事件节点与本体同一待遇：只保留「事件 → 问题命中实体」的边，
+    不向外扩张。旧图谱没有 type 字段 → 这里一个事件都认不出来 → 行为与加类型前一致。
+
+    返回的是**节点键**（`_norm` 后的键），不是显示名——关系数组里 h/t 存的都是键。
+    """
+    hubs: set[str] = set()
+    names = (getattr(settings, "graph_hub_entities", None) or {}).get(collection_name) or []
+    wanted = {_norm(n) for n in names if n}
+    if wanted:
+        hubs = {
+            key for key, info in graph.get("entities", {}).items()
+            if isinstance(info, dict) and _norm(info.get("name", "")) in wanted
+        }
+    events = {
+        key for key, info in graph.get("entities", {}).items()
+        if isinstance(info, dict) and info.get("type") == "事件"
+    }
+    return hubs | events
 
 
 def _bfs_subgraph(
@@ -542,6 +624,7 @@ def _bfs_subgraph(
     max_edges: int,
     min_support: Optional[int] = None,
     allowed_endpoints: Optional[set] = None,
+    gate_nodes: Optional[set] = None,
 ) -> list[dict]:
     """
     从种子节点做 k 跳 BFS，收集关联三元组（去重、按优先级截断）。
@@ -557,11 +640,14 @@ def _bfs_subgraph(
     3. 两端都在一跳邻域里的边算高支撑（2），它们两侧都贴着问题实体。
     4. 同优先级内按 w 降序。注意全库 w=1 占 94.7-99.5%，w 的实际区分度很弱，排序主要靠
        上面两条结构规则。
-    5. **枢纽闸门**（2026-10-21）：度数占比 >= `graph_hub_degree_ratio` 的节点视作本体级枢纽
-       （实测正好只圈中五个人物的本体，阿德勒占比 5% 不命中）。枢纽节点参与的边，另一端必须
-       在 `allowed_endpoints` 里，否则这条边既不收、也不继续跳。原因是本体一跳边远超上限：
-       王阳明 101 条边、张雪峰 363 条，而 w 全是 1、排序退化成关系数组顺序，于是十道题里
-       六道拿到逐字相同的 30 条。闸门一上，本体只留「本体 → 问题实体」这几条。
+    5. **闸门**（2026-10-21）：`gate_nodes` 里的节点（本体枢纽 + 事件节点）参与的边，另一端
+       必须在 `allowed_endpoints` 里，否则这条边既不收、也不继续跳。原因是本体一跳边远超
+       上限：王阳明 101 条边、张雪峰 363 条，而 w 全是 1、排序退化成关系数组顺序，于是十道
+       题里六道拿到逐字相同的 30 条。闸门一上，本体只留「本体 → 问题实体」这几条。
+       闸门节点由 `_resolve_gate_nodes` 定位（本体按配置名字、事件按图谱里的 type 字段）。
+    6. **事件不当跳板**（2026-10-21）：事件节点只贡献「事件 → 问题命中实体」的边。它到
+       同场其他人物的边被闸门挡掉，那些人进不了种子邻域，自然也就没有二跳。事件名命中
+       问题时它会成为种子，种子本身同样不做二跳出发点（`n1 -= seeds`）。
     """
     entities = graph.get("entities", {})
     relations = graph.get("relations", [])
@@ -576,21 +662,17 @@ def _bfs_subgraph(
         adj.setdefault(r["h"], []).append((r["t"], r))
         adj.setdefault(r["t"], []).append((r["h"], r))  # 无向扩展
 
-    # 枢纽闸门：只认「另一端是问题命中实体」的那几条边
-    hubs: set[str] = set()
-    if allowed_endpoints is not None:
-        ratio = float(getattr(settings, "graph_hub_degree_ratio", 0.15))
-        limit = ratio * len(relations)
-        for node, nbrs in adj.items():
-            if len(nbrs) >= limit:
-                hubs.add(node)
+    # 闸门：只认「另一端是问题命中实体」的那几条边。
+    # 闸门节点由调用方给出（`_resolve_gate_nodes`）；没有白名单就没有「允许的另一端」，
+    # 闸门整体关闭（离线探针不传这两个参数时保持旧行为）。
+    gates: set[str] = set(gate_nodes or ()) if allowed_endpoints is not None else set()
 
     def _blocked(node: str, other: str) -> bool:
-        if not hubs:
+        if not gates:
             return False
-        if node in hubs and other not in allowed_endpoints:
+        if node in gates and other not in allowed_endpoints:
             return True
-        if other in hubs and node not in allowed_endpoints:
+        if other in gates and node not in allowed_endpoints:
             return True
         return False
 
@@ -723,13 +805,19 @@ async def retrieve_graph_context(
     if trace_out is not None:
         trace_out["seeds"] = [(entities.get(k) or {}).get("name", k) for k in seed_keys]
 
-    # 2) 子图扩展：种子集合同时作为「本体跳不过去的白名单」
+    # 2) 子图扩展：种子集合同时作为「本体/事件跳不过去的白名单」
+    #    种子 = 问题里字面命中的实体（含事件名）。事件名进白名单，所以「本体—事件」这条边
+    #    收得下；但事件往别处扩张的边会被闸门挡掉，见 `_bfs_subgraph` 第 5、6 条规则。
+    gate_nodes = _resolve_gate_nodes(graph, collection.name)
+    if trace_out is not None:
+        trace_out["gates"] = len(gate_nodes)
     edges = _bfs_subgraph(
         graph,
         seed_keys,
         hops,
         max_edges,
         allowed_endpoints=set(seed_keys),
+        gate_nodes=gate_nodes,
     )
     if trace_out is not None:
         trace_out["edges"] = len(edges)

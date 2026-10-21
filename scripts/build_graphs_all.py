@@ -9,6 +9,7 @@ build_graphs_all.py — GraphRAG 建图战役：批量构建所有教育区角�
 用法：
     .venv/Scripts/python.exe scripts/build_graphs_all.py                # 全部缺失的
     .venv/Scripts/python.exe scripts/build_graphs_all.py --force        # 强制重建
+    .venv/Scripts/python.exe scripts/build_graphs_all.py --fresh        # 删旧图 + .tmp 后重抽
     .venv/Scripts/python.exe scripts/build_graphs_all.py --delay 8      # 批间延迟秒数
 """
 
@@ -21,13 +22,26 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.core.config import settings
-from src.retrieval.knowledge_graph import build_knowledge_graph, graph_exists
+from src.retrieval.knowledge_graph import build_knowledge_graph, graph_exists, graph_path, invalidate_graph
 
 # 教育区角色库（娱乐区不走图谱检索，不建）
 COLLECTIONS = ["persona_jung", "persona_wangyangming", "persona_adler"]
 
 UPSTREAM_BACKOFF_SEC = 180   # 上游空响应熔断/429 后的等待
 MAX_ATTEMPTS_PER_COL = 10    # 单库最大尝试轮数（resume 使每轮都从断点继续）
+
+
+def purge(name: str) -> None:
+    """删掉最终图谱与续传临时文件。
+
+    改了抽取 prompt（例如加类型列）之后必须重抽：`build_knowledge_graph` 的
+    resume 会把旧的 `.tmp` 直接续上来，导致新旧格式混在一个文件里。
+    """
+    invalidate_graph(name)  # 删最终文件 + 清 load_graph 的 mtime 缓存
+    tmp = graph_path(name).with_suffix(".json.tmp")
+    if tmp.exists():
+        tmp.unlink()
+        print(f"[campaign] 已删除续传文件 {tmp.name}")
 
 
 async def build_one(collection, force: bool, delay: float) -> bool:
@@ -70,6 +84,8 @@ async def build_one(collection, force: bool, delay: float) -> bool:
 async def main() -> None:
     parser = argparse.ArgumentParser(description="GraphRAG 批量建图战役")
     parser.add_argument("--force", action="store_true", help="已存在也强制重建")
+    parser.add_argument("--fresh", action="store_true",
+                        help="重建前删掉旧图谱与 .tmp（改了抽取 prompt 后用这个，别用 --force）")
     parser.add_argument("--delay", type=float, default=5.0,
                         help="批间延迟秒数（默认 5s ≈ 防中转 429）")
     parser.add_argument("--only", type=str, default="", help="只构建指定 collection")
@@ -94,7 +110,9 @@ async def main() -> None:
             print(f"[campaign] {name} 文档库为空，跳过")
             results[name] = "empty"
             continue
-        results[name] = await build_one(col, args.force, args.delay)
+        if args.fresh:
+            purge(name)
+        results[name] = await build_one(col, args.force or args.fresh, args.delay)
 
     print("\n" + "=" * 60)
     print(f"[campaign] 战役结束（总耗时 {(time.time() - t0) / 60:.1f} 分钟）:")
