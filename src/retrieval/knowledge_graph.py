@@ -645,6 +645,7 @@ def _bfs_subgraph(
        上限：王阳明 101 条边、张雪峰 363 条，而 w 全是 1、排序退化成关系数组顺序，于是十道
        题里六道拿到逐字相同的 30 条。闸门一上，本体只留「本体 → 问题实体」这几条。
        闸门节点由 `_resolve_gate_nodes` 定位（本体按配置名字、事件按图谱里的 type 字段）。
+       不传 `gate_nodes` 时按图谱里的 collection 名现查，所以离线探针只给白名单也一致。
     6. **事件不当跳板**（2026-10-21）：事件节点只贡献「事件 → 问题命中实体」的边。它到
        同场其他人物的边被闸门挡掉，那些人进不了种子邻域，自然也就没有二跳。事件名命中
        问题时它会成为种子，种子本身同样不做二跳出发点（`n1 -= seeds`）。
@@ -663,8 +664,10 @@ def _bfs_subgraph(
         adj.setdefault(r["t"], []).append((r["h"], r))  # 无向扩展
 
     # 闸门：只认「另一端是问题命中实体」的那几条边。
-    # 闸门节点由调用方给出（`_resolve_gate_nodes`）；没有白名单就没有「允许的另一端」，
-    # 闸门整体关闭（离线探针不传这两个参数时保持旧行为）。
+    # 闸门节点缺省按图谱自带的 collection 名现查（离线探针只传白名单也能拿到正确结果），
+    # 没有白名单就没有「允许的另一端」，闸门整体关闭（保持旧行为）。
+    if gate_nodes is None and allowed_endpoints is not None:
+        gate_nodes = _resolve_gate_nodes(graph, graph.get("collection", "") or "")
     gates: set[str] = set(gate_nodes or ()) if allowed_endpoints is not None else set()
 
     def _blocked(node: str, other: str) -> bool:
