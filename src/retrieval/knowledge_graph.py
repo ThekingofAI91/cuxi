@@ -506,15 +506,34 @@ def _match_query_entities(query: str, graph: dict, n: int = 8) -> list[tuple[str
     return scored[:n]
 
 
-def _bfs_subgraph(graph: dict, seed_keys: list[str], hops: int, max_edges: int) -> list[dict]:
+def _bfs_subgraph(
+    graph: dict,
+    seed_keys: list[str],
+    hops: int,
+    max_edges: int,
+    min_support: Optional[int] = None,
+) -> list[dict]:
     """
-    从种子节点做 k 跳 BFS，收集关联三元组（去重、按权重降序截断）。
+    从种子节点做 k 跳 BFS，收集关联三元组（去重、按优先级截断）。
     返回 [{"h","r","t","e","w","s","hd"}, ...]，s/hd 为证据片段的真实出处/章节。
+
+    选边规则（2026-10-21 改）：
+    1. 一跳边（直接挂着种子）优先于二跳边。
+    2. 二跳边要求「支撑度」达标：支撑度 = 该边另一端在种子一跳邻域里有几个邻居（含跳板
+       自己）。支撑度 1 意味着它只是从跳板伸出去的一条孤边——实测全库 79.7% 的二跳边都是
+       这种孤边，会顺着一条偶然的邻接把整串无关关系拖进来。典型：题「为什么说价值必须建立
+       在社会意义之上」，种子度数只有 1-5、一跳填不满，于是经 `约翰 —仇恨→ 社会` 这条
+       w=1 的边，把约翰（度数 48）的 47 条罪犯案例整批拉进来，30 格里占了 20 格。
+    3. 两端都在一跳邻域里的边算高支撑（2），它们两侧都贴着问题实体。
+    4. 同优先级内按 w 降序。注意全库 w=1 占 94.7-99.5%，w 的实际区分度很弱，排序主要靠
+       上面两条结构规则。
     """
     entities = graph.get("entities", {})
     relations = graph.get("relations", [])
     if not relations or not seed_keys:
         return []
+    if min_support is None:
+        min_support = max(2, int(getattr(settings, "graph_min_edge_support", 2)))
 
     # 邻接表：node -> [(other_node, relation_dict)]（无向扩展）
     adj: dict[str, list] = {}
@@ -522,38 +541,58 @@ def _bfs_subgraph(graph: dict, seed_keys: list[str], hops: int, max_edges: int) 
         adj.setdefault(r["h"], []).append((r["t"], r))
         adj.setdefault(r["t"], []).append((r["h"], r))  # 无向扩展
 
-    visited = set(seed_keys)
-    frontier = list(seed_keys)
+    seeds = set(seed_keys)
     collected: dict[tuple, dict] = {}
 
-    for _ in range(max(1, hops)):
-        nxt = []
-        for node in frontier:
-            for other, r in adj.get(node, []):
-                # 关系键用 (min,max,rel) 去重，避免 A->B 与 B->A 重复
-                rk = (min(node, other), max(node, other), _norm(r["r"]))
-                if rk not in collected:
-                    node_info = entities.get(node) or {}
-                    other_info = entities.get(other) or {}
-                    collected[rk] = {
-                        "h": node_info.get("name", node),
-                        "t": other_info.get("name", other),
-                        "r": r["r"],
-                        "e": r.get("e", ""),
-                        "w": r.get("w", 1),
-                        "s": r.get("s", ""),    # 真实出处（构建期反查原文 chunk）
-                        "hd": r.get("hd", ""),  # 真实章节
-                    }
-                else:
-                    collected[rk]["w"] += r.get("w", 1)
-                if other not in visited:
-                    visited.add(other)
-                    nxt.append(other)
-        frontier = nxt
-        if not frontier:
-            break
+    def _record(node: str, other: str, r: dict, hop: int, support: int) -> None:
+        rk = (min(node, other), max(node, other), _norm(r["r"]))
+        if rk in collected:
+            collected[rk]["w"] += r.get("w", 1)
+            return
+        node_info = entities.get(node) or {}
+        other_info = entities.get(other) or {}
+        collected[rk] = {
+            "h": node_info.get("name", node),
+            "t": other_info.get("name", other),
+            "r": r["r"],
+            "e": r.get("e", ""),
+            "w": r.get("w", 1),
+            "s": r.get("s", ""),    # 真实出处（构建期反查原文 chunk）
+            "hd": r.get("hd", ""),  # 真实章节
+            "hop": hop,
+            "support": support,
+        }
 
-    edges = sorted(collected.values(), key=lambda x: x["w"], reverse=True)[:max_edges]
+    # 一跳：种子的全部邻居
+    n1: set[str] = set()
+    for node in seed_keys:
+        for other, r in adj.get(node, []):
+            _record(node, other, r, 1, 1)
+            n1.add(other)
+    n1 -= seeds
+
+    # 二跳：从一跳邻域继续走，只保留有支撑的边
+    if hops >= 2:
+        for node in n1:
+            for other, r in adj.get(node, []):
+                if other in seeds:
+                    continue  # 一跳已收
+                if other in n1:
+                    _record(node, other, r, 2, 2)  # 两端都贴着种子邻域
+                    continue
+                support = len({x for x, _ in adj.get(other, [])} & n1)
+                if support < min_support:
+                    continue
+                _record(node, other, r, 2, support)
+
+    edges = sorted(
+        collected.values(),
+        key=lambda x: (x["hop"] == 1, x["support"], x["w"]),
+        reverse=True,
+    )[:max_edges]
+    for e in edges:
+        e.pop("hop", None)
+        e.pop("support", None)
     return edges
 
 
