@@ -306,7 +306,7 @@ class Settings(BaseSettings):
     graph_build_batch: int = 6           # 构建时每批送入 LLM 的 chunk 数（太大降质量、太小题太多）
     graph_build_max_chunks: int = 4000  # 单 collection 最多抽取多少 chunk（防爆 token，超大库截断）
     graph_hops: int = 2                  # 查询期子图扩展跳数
-    graph_top_entities: int = 6         # 匹配上的种子实体最多扩展多少个
+    graph_top_entities: int = 6         # 种子实体上限；只数「字面命中」的实体（2026-10-21 删了补位，见 knowledge_graph._literal_seeds）
     # 种子实体的最小字数（2026-10-20）：单字实体（「三」「心」「梦」「水」）在任何含该字
     # 的问题里都拿满分 3.0（_match_query_entities 是纯子串匹配），必然挤进 top-6 种子，
     # 再经 2 跳把邻边全拉出来，30 条上限一次打满。实测 15 题里图谱证据占条目 80.4%、

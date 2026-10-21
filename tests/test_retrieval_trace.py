@@ -329,7 +329,7 @@ class TestGraphTrace:
         monkeypatch.setattr(KG, "load_graph", lambda name: _fake_graph())
         monkeypatch.setattr(
             KG, "_match_query_entities",
-            lambda q, g, n=5: [("阿尼玛", 1.0), ("阴影", 0.5)],
+            lambda q, g, n=5: [("阿尼玛", 3.0), ("阴影", 3.0)],
         )
         trace: dict = {}
         asyncio.run(

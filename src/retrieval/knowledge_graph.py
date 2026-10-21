@@ -506,6 +506,35 @@ def _match_query_entities(query: str, graph: dict, n: int = 8) -> list[tuple[str
     return scored[:n]
 
 
+def _literal_seeds(query: str, graph: dict, top_entities: int) -> dict[str, float]:
+    """
+    取种子实体：只收「节点名整体出现在问题里」的实体（score == 3.0），不补位。
+
+    补位种子已于 2026-10-21 删除，依据是 n=110 的实测：
+
+    - `_match_query_entities` 另外两档低分（查询是节点名的子串 2.5、按词重叠 0.3-0.75）
+      描述的是「模糊相关」，拿来凑满名额就是污染。王阳明 24 题里 6 个名额被
+      「王阳明 + 王阳明讲学/王阳明弟子 + 宁王/王华/王通」占满，问题真正的主题
+      （梦、婚礼、十五岁）一个都进不来 —— 十道题里六道因此拿到逐字相同的边。
+    - 补位种子对好图零贡献：荣格阴影题、阿德勒自卑题的 S0（top6 含补位）与只取字面的
+      前 8 条证据一字不差，它们本来就排在 30 条之外。
+    - 代价是零产出：图里没有「梦」「婚礼」节点时，图谱通道给不出东西。实测王阳明 24 题
+      里 12 题零产出、峰哥 2/13、张雪峰 3/13，荣格与阿德勒 0 零产出。这是接受的代价
+      —— 宁可不给，也不拿「宁王/王华」冒充问题的实体。
+
+    候选池取 max(top_entities, 8)：字面命中可能排在名额之外，先取宽一点再按
+    (得分, 节点频次) 排序截断，避免名额被低分实体挤掉后丢掉真正的字面命中。
+    """
+    pool = _match_query_entities(query, graph, n=max(top_entities, 8))
+    ents = graph.get("entities", {})
+    literal = [(k, s) for k, s in pool if s >= 3.0]
+    literal.sort(
+        key=lambda kv: (kv[1], (ents.get(kv[0]) or {}).get("freq", 0)),
+        reverse=True,
+    )
+    return dict(literal[:top_entities])
+
+
 def _bfs_subgraph(
     graph: dict,
     seed_keys: list[str],
@@ -678,31 +707,29 @@ async def retrieve_graph_context(
         return "", []
 
     # 1) 查询实体对齐（词法匹配，零 LLM 调用）
-    matched = {k: s for k, s in _match_query_entities(query, graph, n=top_entities)}
+    #    种子只收「字面命中」：节点名整体出现在问题里（score == 3.0）。补位种子已删除
+    #    （2026-10-21，见 `_literal_seeds` 的说明），没有字面命中就零产出、不凑数。
+    entities = graph["entities"]
+    matched = _literal_seeds(query, graph, top_entities)
     if trace_out is not None:
         trace_out["matched"] = len(matched)
     if not matched:
+        print("[KnowledgeGraph] 问题里没有字面命中的实体，本次不产出图谱证据")
         return "", []
 
-    entities = graph["entities"]
-    # 种子：对齐得分高 + 出现频率高的节点
-    def _entity_freq(k: str) -> int:
-        info = entities.get(k) or {}
-        return info.get("freq", 0)
-
-    seed_keys = sorted(matched.keys(), key=lambda k: (matched[k], _entity_freq(k)), reverse=True)[:top_entities]
+    seed_keys = list(matched.keys())
     print(f"[KnowledgeGraph] 命中种子实体 {len(seed_keys)} 个: "
           f"{[(entities.get(k) or {}).get('name', k) for k in seed_keys]}")
     if trace_out is not None:
         trace_out["seeds"] = [(entities.get(k) or {}).get("name", k) for k in seed_keys]
 
-    # 2) 子图扩展：命中实体集合同时作为「本体跳不过去的白名单」
+    # 2) 子图扩展：种子集合同时作为「本体跳不过去的白名单」
     edges = _bfs_subgraph(
         graph,
         seed_keys,
         hops,
         max_edges,
-        allowed_endpoints=set(matched.keys()),
+        allowed_endpoints=set(seed_keys),
     )
     if trace_out is not None:
         trace_out["edges"] = len(edges)
@@ -767,12 +794,14 @@ def should_trigger_graph_retrieval(
     # 实体覆盖缺口：图谱里有该实体，但文本结果未提及
     graph = load_graph(collection_name)
     if graph:
-        matched = _match_query_entities(query, graph, n=settings.graph_top_entities)
+        # 与取种子同一口径（`_literal_seeds`）：只有字面命中的实体才可能被用来扩子图，
+        # 拿模糊命中当触发条件会白跑一趟图谱、最后零产出。
+        matched = _literal_seeds(query, graph, settings.graph_top_entities)
         if matched:
             text_blob = _norm(" ".join(d.page_content or "" for d in retrieved_docs))
             uncovered = [
                 graph["entities"][k]["name"]
-                for k, _score in matched
+                for k in matched
                 if _norm(graph["entities"][k]["name"]) not in text_blob
             ]
             if uncovered:
