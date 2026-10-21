@@ -269,7 +269,7 @@ flowchart TD
 
 **一次由评测驱动的修复**：首轮评测定位到王阳明忠实度仅 4.25，进一步查看发现检索精度与其他角色持平——是传记类语料缺失（库里没有），不是检索坏了。补语料后重测，原 0 分题升到满分，该角色忠实度 4.25 → 9.54（当时四维口径；当前五维口径下是 9.29）。
 
-评测集由内置 12 题（[`tests/eval_dataset.py`](tests/eval_dataset.py)）与扩充题库（[`tests/eval_dataset_expanded.json`](tests/eval_dataset_expanded.json)，98 题，带角色字段）合并而成。
+评测集由内置 12 题（[`tests/eval_dataset.py`](tests/eval_dataset.py)）与扩充题库（[`tests/eval_dataset_expanded.json`](tests/eval_dataset_expanded.json)，带角色字段）合并而成。扩充题库在 10-21 由 98 题增至 154 题：荣格 24→40、阿德勒 24→40、王阳明 24→40、峰哥 13→17、张雪峰 13→17，即 12+154=166 题。新增题目按「词条在语料里的出现次数」筛过一轮，语料里查不到的（家庭星座、创造性自我等）已换题。上面表里的分数都是在 110 题版本上跑的，新题库的基线尚未重跑，两组数字不可混用。
 
 ---
 
