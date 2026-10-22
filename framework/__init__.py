@@ -16,7 +16,6 @@ from framework.runtime import (
 )
 from framework.supervisor_agent import run_supervisor_agent, retrieve_documents
 from framework.analysis_agent import analysis_agent
-from framework.verification_agent import verification_agent
 
 # 默认注入名人对话场景配置（启动时自动初始化）
 from scenes.persona_chat.config import persona_chat_config
@@ -31,5 +30,4 @@ __all__ = [
     "get_conversation_history",
     "append_conversation",
     "analysis_agent",
-    "verification_agent",
 ]

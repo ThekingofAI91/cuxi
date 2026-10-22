@@ -15,7 +15,6 @@ Runtime 能力层 —— 场景上下文 / 会话历史 / 消息装配 / 生成 
 能力清单：
 - 消息装配 build_direct_messages（人设 → 用户记忆 → 资料 → 历史 → 后历史指令）
 - 直接生成 _generate_direct_response（空响应重试 + 首 token 超时）
-- 引用出处摘取 _citation_block（供 routes 层异步补推 type:'citations'）
 - 会话历史读写与摘要压缩（_conversation_history_store + session_store 持久化）
 - ChromaDB client 单例（首次构造加锁，见 get_chroma_client）
 """
@@ -476,19 +475,3 @@ async def _generate_direct_response(
     except Exception as e:
         print(f"[Supervisor] 直接回复生成失败: {e}")
         return f"你好！我是{fallback}，请问有什么可以帮你的？"
-
-
-def _citation_block(verification: str) -> str:
-    """从引用核查报告中提取「引用出处」列表，供回答返回后异步推送。
-
-    只取引用出处逐条列表，不输出核查摘要与引用可信度：前端把本函数的返回值
-    整体放进折叠区块正文且不解析 markdown，任何统计数字或 `**加粗**`、`---`
-    都会原样显示，纯列表最干净。verifier 移出图内后，routes.event_stream 用
-    本函数把引用出处渲染成 type:'citations' 事件补推给用户。
-    """
-    if not verification:
-        return ""
-    citation_match = re.search(r"### 引用出处\n(.*?)(?=\n###|\Z)", verification, re.DOTALL)
-    if not citation_match:
-        return ""
-    return citation_match.group(1).strip()

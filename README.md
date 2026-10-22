@@ -319,7 +319,6 @@ flowchart TD
 │   ├── supervisor_agent.py        #   一对一：Supervisor 与检索实现
 │   ├── runtime.py                 #   场景上下文 / 会话历史 / 消息装配 / Chroma 单例
 │   ├── analysis_agent.py          #   分析节点（上下文装配、块尾续接）
-│   ├── verification_agent.py      #   异步引用核查
 │   ├── roundtable.py              #   争鸣：LangGraph 主持人拓扑
 │   └── legend.py                  #   传奇：剧情推进
 ├── scenes/persona_chat/           # 人物对话场景

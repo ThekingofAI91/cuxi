@@ -57,7 +57,10 @@ from src.core.content_filter import contains_sensitive, sanitize_output, refusal
 from src.core.monitor import get_monitor
 from src.core.feedback import get_feedback_store
 from src.core import accounts
-from src.core.utils import strip_doc_ext
+from src.api.doc_refs import (
+    build_doc_map as _build_doc_map,
+    citations_from_doc_map as _citations_from_doc_map,
+)
 from src.document_processing.parser import DocumentParser
 from src.retrieval.chunker import AdaptiveChunker
 from src.retrieval.embedder import get_embedder
@@ -1468,38 +1471,8 @@ async def import_character_card(http_request: Request, request: CardImportReques
     }
 
 
-def _build_doc_map(docs: list) -> list[dict]:
-    """把注入的资料转成前端角标映射，两套编号分开：正文 1..N，图谱推断 G1..Gn。
-
-    编号顺序必须与 framework.analysis_agent._build_context 完全一致——那边按
-    retrieved_docs 的原始顺序依次给正文块 [n] / 推断块 [Gk] 编号，这里同序生成，
-    前端才能把正文里的 [3] 对上第三条正文块、[G2] 对上第二条推断。
-    kind 字段供前端区分样式：source = 原文，infer = 推断（不是原文字句）。
-    来源去掉 .pdf/.epub 后缀，界面上只显示著作名。
-    """
-    doc_map: list[dict] = []
-    plain_n = infer_n = 0
-    for d in docs or []:
-        meta = d.metadata or {}
-        if meta.get("kg_inferred"):
-            infer_n += 1
-            doc_map.append({
-                "n": f"G{infer_n}",
-                "kind": "infer",
-                "source": strip_doc_ext(meta.get("source", "")),
-                "heading": meta.get("heading", ""),
-            })
-        else:
-            plain_n += 1
-            doc_map.append({
-                "n": str(plain_n),
-                "kind": "source",
-                "source": strip_doc_ext(meta.get("source", "")),
-                "heading": meta.get("heading", ""),
-            })
-    return doc_map
-
-
+# 引用编号与出处清单见 src/api/doc_refs.py（build_doc_map / citations_from_doc_map），
+# 编号契约与 analysis_agent._build_context 绑死，改动必须两处同时对齐。
 @router.post("/persona/query")
 async def persona_query_endpoint(http_request: Request, request: PersonaQueryRequest):
     """
@@ -1776,39 +1749,15 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             else:
                 yield f"data: {json.dumps({'type': 'result', 'content': '查询完成'})}\n\n"
 
-            # ---- 异步引用核查：回答已流式推给用户，这里再补跑 verifier 并推送引用出处 ----
-            # verifier 含一次串行 LLM 调用（论断>3 条时），移到回答定稿之后执行，不阻塞用户看到答案。
-            # 但 end 事件在核查之后才发：核查不完，前端"完成"状态就一直挂着。
-            # 给核查设等待预算，超时即放弃本次引用出处推送，按时收尾。
-            if character.enable_verification and final_answer:
-                try:
-                    from framework.verification_agent import verification_agent
-                    from framework.runtime import _citation_block
-                    _v_docs = result_box.get("retrieved_docs", []) or []
-                    _v_analysis = result_box.get("analysis", "") or final_answer
-                    if _v_docs:
-                        _v_t0 = time.time()
-                        _v_task = asyncio.create_task(verification_agent({
-                            "analysis": _v_analysis,
-                            "retrieved_docs": _v_docs,
-                            "query": request.query,
-                            "route_history": [],
-                        }))
-                        _v_out = await asyncio.wait_for(
-                            _v_task, timeout=getattr(settings, "verify_deadline_sec", 15.0)
-                        )
-                        stage_mark("verify_ms", (time.time() - _v_t0) * 1000)
-                        _v_report = _v_out.get("verification", "")
-                        _v_cite = _citation_block(_v_report) if _v_report else ""
-                        if _v_cite:
-                            yield f"data: {json.dumps({'type': 'citations', 'content': _v_cite, 'graph_used': graph_used})}\n\n"
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "verify_timeout char=%s deadline=%.0fs（放弃本次引用出处推送）",
-                        character_id, getattr(settings, "verify_deadline_sec", 15.0),
-                    )
-                except Exception as _ve:
-                    print(f"[Persona Query] 异步引用核查失败（忽略）: {_ve}")
+            # ---- 引用出处：直接由本轮注入清单生成，不再异步跑核查 ----
+            # 出处（著作名/章节）在检索阶段就随 metadata 进来了，_build_doc_map 已经把它整理成
+            # 与正文角标 [n] / [Gk] 一一对应的清单。旧实现为此另跑一遍 verifier：论断级
+            # n-gram 核查 + 论断>3 时一次 LLM，最长等 15s，只为了抽出和 doc_map 重复的出处；
+            # 而它真正的产出（原著有据/部分依据/引用可信度）前端从未展示。2026-10-22 删除。
+            if character.enable_verification and _doc_map:
+                _cite = _citations_from_doc_map(_doc_map)
+                if _cite:
+                    yield f"data: {json.dumps({'type': 'citations', 'content': _cite, 'graph_used': graph_used})}\n\n"
 
             # ---- 知识图谱自动构建：推迟到回答返回之后再触发 ----
             # 避免后台构建的成百次 LLM 调用与本次回答争夺 DeepSeek API / CPU（见上方注释）。

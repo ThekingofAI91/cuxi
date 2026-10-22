@@ -226,11 +226,6 @@ class Settings(BaseSettings):
 
     # ---- Agent 配置 ----
     max_history_turns: int = 5
-    verifier_confidence_threshold: float = 0.7
-    # 异步引用核查（回答定稿后补跑）的等待预算（秒）。
-    # verifier 在 SSE 里位于 citations 事件与 end 事件之间：核查不完，
-    # 前端的"完成"状态就一直挂着。超时即放弃本次引用出处推送，按时发 end。
-    verify_deadline_sec: float = 15.0
 
     # ---- API 配置 ----
     api_host: str = "127.0.0.1"

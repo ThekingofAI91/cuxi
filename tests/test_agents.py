@@ -13,7 +13,6 @@ from src.core.config import settings
 from framework.runtime import set_scene_config
 from framework.supervisor_agent import retrieve_documents
 from framework.analysis_agent import analysis_agent
-from framework.verification_agent import verification_agent
 from scenes.persona_chat.config import persona_chat_config
 
 
@@ -129,11 +128,3 @@ class TestAgentNodes:
         assert "analysis" in result
         assert "route_history" in result
         assert "analysis_agent" in result["route_history"]
-
-    @pytest.mark.asyncio
-    async def test_verification_agent(self):
-        """测试验证 Agent"""
-        result = await verification_agent(_blank_state("测试验证"))
-        assert "verification" in result
-        assert "route_history" in result
-        assert "verification_agent" in result["route_history"]
