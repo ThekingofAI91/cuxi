@@ -24,12 +24,12 @@ def auth_env(tmp_path, monkeypatch):
 @pytest.fixture
 def client(auth_env, monkeypatch):
     from src.api.routes import router
-    from src.api import routes as routes_mod
+    from src.api import deps as deps_mod
     from src.core import config as cfg_mod
 
     # 限流是模块级全局桶，跨测试累积会误伤；默认放大限额，
     # 只有专门测限流的用例自己去覆盖 settings
-    routes_mod._RATE_STORE.clear()
+    deps_mod._RATE_STORE.clear()
     monkeypatch.setattr(cfg_mod.settings, "rate_limit_per_minute", 1000)
     monkeypatch.setattr(cfg_mod.settings, "rate_limit_per_day", 1000)
 
@@ -168,12 +168,12 @@ def test_terms_and_privacy_pages_served(client):
 
 def test_query_rate_limit_uses_account_bucket(client, monkeypatch):
     """登录用户达到限额时按账号拒绝；匿名（另一 IP）不受该账号额度影响。"""
-    from src.api import routes as routes_mod
+    from src.api import deps as deps_mod
     from src.core import config as cfg_mod
 
     # 限到极低便于触发
     monkeypatch.setattr(cfg_mod.settings, "rate_limit_per_minute", 1)
-    routes_mod._RATE_STORE.clear()
+    deps_mod._RATE_STORE.clear()
 
     client.post("/auth/register", json={"account": "quota@x.com", "password": "password1"})
     headers = {"X-Forwarded-For": "10.9.9.9"}  # 固定 IP，确认按账号而非 IP 限流

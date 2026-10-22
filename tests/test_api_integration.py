@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from main import app  # noqa: E402
 import src.api.routes as routes  # noqa: E402
+import src.api.deps as deps  # noqa: E402
 import src.core.monitor as monitor_mod  # noqa: E402
 from src.core.config import settings  # noqa: E402
 
@@ -64,7 +65,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "upload_limit_per_day", 100)
     monkeypatch.setattr(settings, "upload_max_mb", 10)
 
-    routes._RATE_STORE.clear()
+    deps._RATE_STORE.clear()
     routes._ANSWER_CACHE.clear()
     routes._session_store.clear()
     from framework.runtime import _conversation_history_store, _conversation_summaries
@@ -181,7 +182,7 @@ def test_upload_size_limit(client, monkeypatch):
 
 def test_upload_rate_limit(client):
     c, _ = client
-    routes._RATE_STORE["main::testclient"] = {
+    deps._RATE_STORE["main::testclient"] = {
         "min": time.time(),
         "min_count": 0,
         "day": time.time(),

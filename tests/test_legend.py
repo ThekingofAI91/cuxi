@@ -275,8 +275,9 @@ def client(tmp_path, monkeypatch):
     # 不放开的话，靠后的用例会莫名其妙地吃 429——表现成「状态补丁没生效」这种
     # 极难排查的假故障（真踩过）。限流本身另有专门用例覆盖，这里不需要它。
     import src.api.routes as routes_mod
+    import src.api.deps as deps_mod
     from src.core import config as cfg_mod
-    routes_mod._RATE_STORE.clear()
+    deps_mod._RATE_STORE.clear()
     monkeypatch.setattr(cfg_mod.settings, "rate_limit_per_minute", 1000)
     monkeypatch.setattr(cfg_mod.settings, "rate_limit_per_day", 100000)
     # ★兜底抽取会打真网关，单测必须打掉。不打掉的话，「模型漏了状态块」的用例

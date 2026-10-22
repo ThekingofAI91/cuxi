@@ -61,6 +61,15 @@ from src.api.doc_refs import (
     build_doc_map as _build_doc_map,
     citations_from_doc_map as _citations_from_doc_map,
 )
+from src.api.deps import (
+    client_ip as _client_ip,
+    check_rate as _check_rate,
+    current_session_token as _current_session_token,
+    get_current_user,
+    set_auth_cookie as _set_auth_cookie,
+    require_admin as _require_admin,
+    sampling_for as _sampling_for,
+)
 from src.document_processing.parser import DocumentParser
 from src.retrieval.chunker import AdaptiveChunker
 from src.retrieval.embedder import get_embedder
@@ -80,20 +89,6 @@ from scenes.persona_chat.prompt_builder import (
 from scenes.persona_chat.card_io import export_card, parse_card, CARD_FORMAT, CARD_VERSION
 
 
-def _sampling_for(character) -> dict | None:
-    """
-    挑出角色卡上的采样覆盖（temperature / top_p / frequency_penalty / presence_penalty）。
-
-    未配置的字段一律不传，让生成代码沿用默认值——既有角色的手感不受影响。
-    注意：不要透传 repetition_penalty 这类非 OpenAI 兼容参数——
-    DeepSeek API 会以 400 拒收未知字段，本地推理后端的专用参数对 API 无效。
-    """
-    out = {}
-    for key in ("temperature", "top_p", "frequency_penalty", "presence_penalty"):
-        v = getattr(character, key, None)
-        if v is not None:
-            out[key] = v
-    return out or None
 from scenes.persona_chat.custom_store import (
     save_custom_character,
     delete_custom_character_file,
@@ -136,42 +131,6 @@ _ANSWER_CACHE_TTL = 3600
 
 # 用户长期记忆的异步提取任务引用集（防 GC，同 advanced_search._bg_rewrite_tasks 模式）
 _MEMORY_TASKS: set = set()
-
-# 限流存储：ip -> {"min": 窗口起点, "min_count": 分钟计数, "day": 窗口起点, "day_count": 天计数}
-_RATE_STORE: dict[str, dict] = {}
-
-
-def _client_ip(request: Request) -> str:
-    """获取客户端 IP（部署在 nginx 后需启用 uvicorn --proxy-headers 信任 X-Forwarded-For）"""
-    fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else "unknown"
-
-
-def _check_rate(ip: str, per_minute: int = 0, per_day: int = 0, bucket: str = "main") -> None:
-    """固定窗口限流：超过限制抛 429（带 Retry-After）。
-
-    bucket：按用途分桶（聊天 / 建角 / 图谱构建 / 反馈各自独立计数），
-    避免重操作与轻操作共享额度——比如聊了几句就把"建角"额度吃光，或反之。
-    """
-    key = f"{bucket}::{ip}"
-    now = time.time()
-    cur = _RATE_STORE.get(key)
-    if not cur:
-        cur = {"min": now, "min_count": 0, "day": now, "day_count": 0}
-        _RATE_STORE[key] = cur
-    if now - cur["min"] > 60:
-        cur["min"], cur["min_count"] = now, 0
-    if now - cur["day"] > 86400:
-        cur["day"], cur["day_count"] = now, 0
-    if per_minute and cur["min_count"] >= per_minute:
-        raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试", headers={"Retry-After": "60"})
-    if per_day and cur["day_count"] >= per_day:
-        retry = int(86400 - (now - cur["day"]))
-        raise HTTPException(status_code=429, detail="今日使用次数已达上限，请明天再来", headers={"Retry-After": str(retry)})
-    cur["min_count"] += 1
-    cur["day_count"] += 1
 
 
 def _persist_session_db(session_id: str) -> None:
@@ -222,12 +181,6 @@ class FeedbackStatusIn(BaseModel):
     """管理端更新反馈处理状态"""
     status: str              # pending / resolved / replied
     reply: str = ""          # 仅 replied 时需要填写回复内容
-
-
-def _require_admin(token: str) -> None:
-    """管理端读取接口鉴权：设置 monitor_token 后必须带 ?token=xxx"""
-    if settings.monitor_token and token != settings.monitor_token:
-        raise HTTPException(status_code=403, detail="token 无效")
 
 
 @router.post("/admin/feedback")
@@ -393,31 +346,6 @@ class AuthRegisterIn(BaseModel):
 class AuthLoginIn(BaseModel):
     account: str
     password: str
-
-
-def _current_session_token(request: Request) -> str:
-    return request.cookies.get(settings.auth_cookie_name, "")
-
-
-def get_current_user(request: Request) -> Optional[dict]:
-    """从 Cookie 解析当前登录用户；未登录返回 None（不抛错）。"""
-    try:
-        return accounts.get_user_by_session(_current_session_token(request))
-    except Exception as e:
-        print(f"[Auth] 会话解析失败（按未登录处理）: {e}")
-        return None
-
-
-def _set_auth_cookie(response: Response, token: str) -> None:
-    response.set_cookie(
-        key=settings.auth_cookie_name,
-        value=token,
-        max_age=accounts.SESSION_TTL,
-        httponly=True,
-        samesite="lax",
-        secure=settings.auth_cookie_secure,
-        path="/",
-    )
 
 
 @router.post("/auth/register")
