@@ -543,7 +543,10 @@ async def advanced_retrieval(
     async def _bm25_pass(queries: list[str], bm25_index) -> list[list[str]]:
         """BM25 关键词检索（多路并行放线程池），返回每路 ranked doc_ids。"""
         ranked_groups: list[list[str]] = []
-        tasks = [asyncio.to_thread(bm25_index.search, bq, top_k * 2) for bq in queries]
+        # 与向量路同深度（fetch_k）：RRF 的「双票」只能落在两路都召回的那段交集里，
+        # 两路深度不等就等于把双票窗口压到短的那一路上（2026-10-22 前这里是内联的
+        # `top_k * 2`，池子放到 10 那次只改了 fetch_k，这行被漏掉，深度一直停在 12）。
+        tasks = [asyncio.to_thread(bm25_index.search, bq, fetch_k) for bq in queries]
         for _bq, bm25_results in zip(queries, await asyncio.gather(*tasks)):
             if not bm25_results:
                 continue

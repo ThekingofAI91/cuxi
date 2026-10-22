@@ -113,6 +113,18 @@ class TestBoards:
         assert [b["route"] for b in trace.boards] == ["original", "original"]
         assert all(b["hits"] > 0 for b in trace.boards)
 
+    def test_both_routes_recall_to_the_same_depth(self):
+        """两路深度必须一致：RRF 的双票只可能落在两路都召回的那段交集里。
+
+        2026-10-22 之前 BM25 那行是内联的 `top_k * 2`（top_k=6 时只有 12），向量走
+        fetch_k（=20）。结果是向量第 13-20 名永远拿不到第二票，双票窗口被短的那一路
+        压成 12。这里把「深度一致」锁死，防止再被漏改。
+        """
+        trace = RetrievalTrace()
+        _run(trace=trace, n_docs=40, top_k=6, anchor_k=3)
+        hits = {b["class"]: b["hits"] for b in trace.boards}
+        assert hits["vector"] == hits["bm25"] == 20
+
     def test_records_are_ranked_doc_ids(self):
         """ids 必须是完整名次（不是截断的头几名），且与 hits 对得上"""
         trace = RetrievalTrace()
