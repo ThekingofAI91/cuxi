@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from src.api.routes import router
 from src.api.setup import router as setup_router
+from src.api.graph_admin import router as graph_admin_router
 from src.api.security import (
     GlobalRateLimitMiddleware,
     RequestSizeLimitMiddleware,
@@ -219,6 +220,7 @@ if settings.security_headers_enabled:
 # 注册路由（必须先注册，避免被静态文件拦截）
 app.include_router(router)
 app.include_router(setup_router)
+app.include_router(graph_admin_router)
 
 # 前端静态文件服务
 frontend_path = Path(__file__).parent / "frontend"
