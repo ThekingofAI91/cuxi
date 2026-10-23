@@ -2,7 +2,8 @@
 hybrid_search.py — BM25 关键词索引
 
 仅保留被实际使用的 BM25Index（高级混合检索 hybrid_search / vector_search 已废弃，
-检索主链路统一走 advanced_search.advanced_retrieval：Multi-Query + HyDE + BM25 + Cross-Encoder 重排）。
+检索主链路统一走 advanced_search.advanced_retrieval：向量 + BM25 双路同深度召回，
+RRF 每类一票，尾部交 Cross-Encoder 精排）。
 """
 
 from __future__ import annotations

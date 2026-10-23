@@ -141,8 +141,8 @@ class Settings(BaseSettings):
     rerank_top_k: int = 5
 
     # RRF 融合的类间权重：一类 = 一种召回通道（vector / bm25）。
-    # 类内多路榜（原问、变体、HyDE）只取最好名次合成一票，因此打开改写不会改变
-    # 两类之间的票数比；要调「语义 vs 关键词」的相对话语权就改这两个值。
+    # 每类内部只留一条榜（原问），所以类权重就是「语义 vs 关键词」的相对话语权；
+    # 要调两者的相对权重改这两个值即可。
     rrf_vector_weight: float = 1.0
     rrf_bm25_weight: float = 1.0
 
@@ -172,7 +172,7 @@ class Settings(BaseSettings):
 
     # 检索力度不再按角色分区走两条路，而是由检索工具 search_library 的 strong
     # 参数在运行时决定（framework/supervisor_agent.py）：
-    #   strong=True  → 强检索：改写 + 向量/BM25 混合召回 + RRF 前 3 直通 + 尾部精排选 3
+    #   strong=True  → 强检索：向量/BM25 混合召回 + RRF 前 3 直通 + 尾部精排选 3
     #                  + 知识图谱，6 条带来源
     #   strong=False → 轻量检索：仅向量+BM25 召回 top-3，作为软背景、不带来源
     # 模型按请求性质自选；工具描述里带本区倾向提示，所以合并路由不会把娱乐区
