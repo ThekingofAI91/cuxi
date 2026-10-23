@@ -6,11 +6,12 @@ test_retrieval_trace.py — 检索轨迹的契约测试
 后面所有「为什么这个配置没赚分」的分析都是废的。所以这里锁三条：
 
 1. 每一路召回都要有一条 boards 记录，且标清所属类（vector/bm25）与产出它的查询；
-2. 打开改写后，变体与 HyDE 的榜要分别标成 variant1/variant2/hyde，不能糊成一条；
+2. 融合层必须按「类」计票：同一类多条榜只算一票（类内取最好名次）；
 3. 传不传 trace 都不改变检索结果——采集必须是纯旁路。
 """
 
 import asyncio
+import inspect
 
 import pytest
 from langchain_core.documents import Document
@@ -67,15 +68,12 @@ def _docs(n: int = 8):
     ]
 
 
-def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None,
+def _run(trace=None, n_docs=8, use_rerank=True, rerank_fn=None,
          top_k=5, anchor_k=0):
     """跑一次 advanced_retrieval（全替身，不碰真模型与真向量库）"""
     docs = _docs(n_docs)
     collection = _FakeCollection(docs)
     identity_rerank = lambda q, ds, top_k=None: list(ds)  # noqa: E731
-
-    async def _fake_rewrite(question, llm, num_variants):
-        return rewrite
 
     async def _go():
         with pytest.MonkeyPatch.context() as mp:
@@ -85,15 +83,10 @@ def _run(rewrite=None, trace=None, n_docs=8, use_rerank=True, rerank_fn=None,
                 "src.retrieval.reranker.rerank_documents",
                 rerank_fn or identity_rerank,
             )
-            if rewrite is not None:
-                mp.setattr(AS, "_rewrite_with_budget", _fake_rewrite)
             return await AS.advanced_retrieval(
                 question="测试问题",
                 collection=collection,
-                llm=None,
                 top_k=top_k,
-                use_multi_query=rewrite is not None,
-                use_hyde=rewrite is not None,
                 use_rerank=use_rerank,
                 anchor_k=anchor_k,
                 trace_out=trace,
@@ -134,16 +127,6 @@ class TestBoards:
         assert len(board["ids"]) == board["hits"]
         # 名次第一的 id 必须就是最终候选池里的那条（同源文本哈希）
         assert board["ids"][0] == AS._get_doc_id(docs[0].page_content)
-
-    def test_variants_and_hyde_get_own_routes(self):
-        """开改写：原问 + 2 变体 + HyDE 各算一条向量榜，变体再各算一条 BM25 榜"""
-        trace = RetrievalTrace()
-        _run(rewrite=(["变体一", "变体二"], "一段假设答案"), trace=trace)
-
-        vector_routes = [b["route"] for b in trace.boards if b["class"] == "vector"]
-        bm25_routes = [b["route"] for b in trace.boards if b["class"] == "bm25"]
-        assert vector_routes == ["original", "variant1", "variant2", "hyde"]
-        assert bm25_routes == ["original", "variant1", "variant2"]
 
     def test_question_is_recorded(self):
         trace = RetrievalTrace()
@@ -196,20 +179,20 @@ class TestFused:
             assert sum(info["contrib"].values()) == pytest.approx(info["score"], abs=1e-5)
 
     def test_best_rank_is_min_rank_within_class(self):
-        """best_rank 取类内最好名次：同一类多条榜时不能拿更差的那个"""
-        trace = RetrievalTrace()
-        _run(rewrite=(["变体一", "变体二"], "一段假设答案"), trace=trace)
+        """best_rank 取类内最好名次：多榜合并时不能拿更差的那个。
 
-        expected: dict[str, dict] = {}
-        for board in trace.boards:
-            for rank, doc_id in enumerate(board["ids"]):
-                cls = board["class"]
-                prev = expected.setdefault(doc_id, {}).get(cls)
-                if prev is None or rank < prev:
-                    expected[doc_id][cls] = rank
+        改写删除后 advanced_retrieval 每类只产一条榜，多榜场景直接构造 boards
+        走 fuse_by_class，锁的是融合层契约本身（详见 test_rrf_class_fusion.py）。
+        """
+        boards = [("vector", ["a", "b", "c"]), ("vector", ["c", "a"])]
+        meta = {i: {"source": "book.pdf"} for i in ("a", "b", "c")}
+        scores = fuse_by_class(boards, meta, {"vector": 1.0}, use_source_weight=False)
 
-        for doc_id, info in trace.fused.items():
-            assert info["best_rank"] == expected[doc_id]
+        rrf_k = inspect.signature(fuse_by_class).parameters["rrf_k"].default
+        # c 在两条榜里分别是第 2 名与第 0 名 → 只算最好名次 0
+        assert scores["c"] == pytest.approx(1.0 / (rrf_k + 0 + 1))
+        # a 的类内最好名次也是 0
+        assert scores["a"] == pytest.approx(1.0 / (rrf_k + 0 + 1))
 
     def test_only_pool_members_are_recorded(self):
         """只记进候选池的：池子大小由 rerank_pool_size 决定，没进池的不记"""

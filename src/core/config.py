@@ -146,20 +146,13 @@ class Settings(BaseSettings):
     rrf_vector_weight: float = 1.0
     rrf_bm25_weight: float = 1.0
 
-    # 检索查询改写（Multi-Query + HyDE，一次 LLM 调用）配置。
-    # 说明：改写曾被整体删除（2026-10-18），因为它是「同一批名次里多塞几条榜」，
-    # 会让向量路与 BM25 路的票数比从 1:1 悄悄变成 4:3；所以融合侧要改成
-    # 「每类一票 + 类间权重」，多出来的变体榜不再重复计票，改写才回归纯召回扩面。
-    # 短问题（字符数 <= 该值）跳过改写：省 1 次串行 LLM 往返，直接以原始查询检索。
-    skip_rewrite_max_chars: int = 30
-    # 首字为改写预留的等待上限（秒）。超时即放弃改写、用原始查询检索；
-    # 改写任务不取消，后台跑完写缓存，下次相似问题零等待命中。
-    rewrite_deadline_sec: float = 2.0
-    # 改写单次调用的超时上限（秒）。实测成功 3.5-6.7s，约 20% 概率触发重试/超时，
-    # 最坏 24.8s —— 超时即降级为「只用原始查询检索」，绝不卡死用户。
-    rewrite_timeout_sec: float = 10.0
-    # 改写总开关，默认关闭。
-    rewrite_enabled: bool = False
+    # 【已删除 2026-10-22】检索查询改写（Multi-Query + HyDE）整体移除。
+    # 历史：10-18 因三轮剂量实验测不出增益而删除（484 行），10-19 发现那批实验混了
+    # 两个变量（旧融合把榜拍平累加，开改写顺带把向量:BM25 从 1:1 变成 4:3）而恢复为
+    # 默认关闭；10-22 按作者要求彻底删除。删除前它已是死配置——默认关闭，生产从未启用。
+    # 连带清掉的四个配置项：skip_rewrite_max_chars / rewrite_deadline_sec /
+    # rewrite_timeout_sec / rewrite_enabled。若 `.env` 仍写着它们，pydantic 会因
+    # extra=forbid 启动报错，需要一并删掉。
 
 
     # 【已废弃 2026-09-30】娱乐区"是否保留轻量检索"这个分区开关已取消：

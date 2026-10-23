@@ -9,7 +9,7 @@ Supervisor Agent —— 一对一对话的唯一执行体。
     Workflow = 路径由代码预定义；Agent = LLM 运行时决定流程与工具调用。
 
 分档不再按分区走两条路，而是由工具的 strong 参数承担：
-    strong=True  → 强检索：改写 + 向量/BM25 混合召回 + RRF 头部直通 + 尾部精排 +
+    strong=True  → 强检索：向量/BM25 混合召回 + RRF 头部直通 + 尾部精排 +
                    知识图谱增强，6 条完整段落（RRF 前 3 直通 + 尾部精排选 3，
                    每条 ~1000 字不截断），带来源与章节，正文标 [n] 供前端渲染出处。
     strong=False → 轻量检索：只做向量+BM25 召回 top-3，作为"模糊印象"，
@@ -174,15 +174,8 @@ async def retrieve_documents(
             print("[Retrieval] 文档库为空，请先上传文档")
             return [], False, ""
 
-        # ---- 2. 高级检索（Multi-Query + HyDE + BM25 + 向量 + 重排序）----
-        from src.core.llm import get_chat_llm
+        # ---- 2. 高级检索（向量 + BM25 + 重排序）----
         from src.retrieval.advanced_search import advanced_retrieval
-
-        # 初始化 LLM（用于生成查询变体和 HyDE 文档；已合并为一次调用，256 足够）
-        retrieval_llm = get_chat_llm(
-            temperature=0.3,
-            max_tokens=256,
-        )
 
         # 注入条数与每条长度是一对：6 条 × ~1100 字完整段落 ≈ 6.6K 字。
         # 2026-10-20 起不再是「整池精排后取 5」，而是「RRF 前 3 条直通 + 尾部 7 条精排选 3」
@@ -191,12 +184,11 @@ async def retrieve_documents(
         # SEARCH_TOOL_DESCRIPTION 的文案保持一致。
         top_k = 6
 
-        # 轻量检索（工具 strong=false）：跳过 Multi-Query+HyDE 改写、
-        # 跳过 Cross-Encoder 重排、跳过知识图谱，仅用原始问题做向量+BM25 召回 top-3
-        # 作为软背景（不引用），换取更快首字与更"像人"的回答。
+        # 轻量检索（工具 strong=false）：跳过 Cross-Encoder 重排、跳过知识图谱，
+        # 仅用原始问题做向量+BM25 召回 top-3 作为软背景（不引用），换更快首字。
         if light_retrieval:
             top_k = 3
-            print(f"[Retrieval] 轻量召回（strong=false）：跳过改写/重排/图谱，top_k={top_k}")
+            print(f"[Retrieval] 轻量召回（strong=false）：跳过重排/图谱，top_k={top_k}")
 
         # ---- 历史感知检索 ----
         # 场景开启 history_aware_retrieval 时（如名人对话），将最近几轮对话拼入检索 query，
@@ -206,27 +198,11 @@ async def retrieve_documents(
             question = build_history_aware_query(query, history[-2:])
             print(f"[Retrieval] 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
 
-        # 短问题跳过 Multi-Query + HyDE 改写（省 1 次串行 LLM 往返，降低首字延迟）。
-        # 原始查询 + BM25 已能覆盖短问题的召回；长/复杂问题仍走完整改写以提升召回。
-        # 另有总开关 rewrite_enabled（默认 False）：实测改写延迟 3.5s 超过 2s 等待预算，
-        # 新问题必然白等 2s 后被放弃，故默认关闭（忠实度基线 8.8 即在改写无效时测得）。
-        use_rewrite = (
-            settings.rewrite_enabled
-            and len(query.strip()) > settings.skip_rewrite_max_chars
-            and not light_retrieval
-        )
-        if not use_rewrite:
-            print(f"[Retrieval] 跳过检索改写（{'总开关关闭' if not settings.rewrite_enabled else '短问题' if not light_retrieval else '轻量召回'}），直接向量+BM25")
-
         retrieved_docs, _contexts = await advanced_retrieval(
             question=question,
             collection=collection,
-            llm=retrieval_llm,
             top_k=top_k,
-            use_multi_query=use_rewrite,
-            use_hyde=use_rewrite,
             use_rerank=not light_retrieval,
-            num_variants=2,
             anchor_k=0 if light_retrieval else settings.rerank_anchor_k,
         )
         print(f"[Retrieval] 高级检索召回 {len(retrieved_docs)} 条")
@@ -253,7 +229,7 @@ async def retrieve_documents(
                 if trigger:
                     graph_used = True
                     g_ctx, g_docs = await retrieve_graph_context(
-                        question, collection, llm=retrieval_llm,
+                        question, collection,
                     )
                     if g_docs:
                         existing = {_get_doc_id(d.page_content) for d in retrieved_docs}

@@ -61,14 +61,16 @@ class TestClassInternalVoting:
         assert scores["a"] == pytest.approx(_score(0) * 2)
 
 
-class TestRewriteDoesNotLeakIntoWeights:
-    def test_vote_ratio_stable_when_rewrite_boards_added(self):
-        """改写开启后向量 4 榜、BM25 3 榜，同文档两类票数比仍是 1:1"""
+class TestMultiBoardVoting:
+    """同类多榜不能放大票数——改写时代踩过的坑，规则留在融合层。"""
+
+    def test_vote_ratio_stable_when_boards_added(self):
+        """向量 4 榜、BM25 3 榜时，同文档两类票数比仍是 1:1"""
         baseline = {
             "vector": [("vector", ["doc", "other1"])],
             "bm25": [("bm25", ["doc", "other2"])],
         }
-        with_rewrite = {
+        many_boards = {
             "vector": [("vector", ["doc", "other1"])] * 4,
             "bm25": [("bm25", ["doc", "other2"])] * 3,
         }
@@ -79,16 +81,16 @@ class TestRewriteDoesNotLeakIntoWeights:
             rrf_k=RRF_K, use_source_weight=False,
         )
         rw_scores = fuse_by_class(
-            with_rewrite["vector"] + with_rewrite["bm25"], meta, {"vector": 1.0, "bm25": 1.0},
+            many_boards["vector"] + many_boards["bm25"], meta, {"vector": 1.0, "bm25": 1.0},
             rrf_k=RRF_K, use_source_weight=False,
         )
         assert base_scores == pytest.approx(rw_scores)
 
-    def test_rewrite_can_still_promote_new_docs(self):
-        """改写榜引入的新文档照样能被召回，只是不会挤掉同类老文档的票数"""
+    def test_new_docs_from_extra_board_still_retrieved(self):
+        """多出来的榜引入的新文档照样能被召回，只是不会挤掉同类老文档的票数"""
         boards = [
             ("vector", ["a"]),
-            ("vector", ["b"]),   # 变体召回到的新文档
+            ("vector", ["b"]),   # 第二条榜召回到的新文档
         ]
         scores = fuse_by_class(
             boards, _no_source_meta("a", "b"), {"vector": 1.0},

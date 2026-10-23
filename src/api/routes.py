@@ -134,7 +134,7 @@ _session_store: dict[str, dict] = {}
 _ANSWER_CACHE: dict[str, tuple[float, str, list]] = {}
 _ANSWER_CACHE_TTL = 3600
 
-# 用户长期记忆的异步提取任务引用集（防 GC，同 advanced_search._bg_rewrite_tasks 模式）
+# 用户长期记忆的异步提取任务引用集（防 GC：create_task 的返回值若不持有，任务可能被回收）
 _MEMORY_TASKS: set = set()
 
 

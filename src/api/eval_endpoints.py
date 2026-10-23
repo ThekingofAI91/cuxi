@@ -55,9 +55,8 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         from src.retrieval.embedder import get_embedder
         from src.retrieval.advanced_search import advanced_retrieval
         from src.retrieval.trace import RetrievalTrace
-        from src.core.llm import get_chat_llm
 
-        # ---- 1. 高级检索：多查询 + HyDE 组合 ----
+        # ---- 1. 高级检索：向量 + BM25，RRF 融合后两段式选人 ----
         embedder = get_embedder()
 
         client = get_chroma_client()
@@ -68,17 +67,6 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             metadata={"hnsw:space": "cosine"},
         )
 
-        # 初始化 LLM（用于生成查询变体和 HyDE 文档；
-        # max_tokens 已合并为一次调用，256 足够容纳短变体 + 3-5 句假设答案）
-        retrieval_llm = get_chat_llm(
-            temperature=0.3,
-            max_tokens=256,
-        )
-
-        # 改写开关与主链路（retrieve_documents）保持同一配置口径——此前这里硬编码
-        # use_multi_query=True，导致评估测的是生产根本不跑的配置（主链路默认关改写）
-        use_rewrite = settings.rewrite_enabled
-
         # 执行高级检索（条数与主链路 retrieve_documents 保持一致：
         # RRF 前 3 直通 + 尾部 7 精排选 3 = 注入 6 条完整段落）
         # trace 只在评测端点启用：把每一路召回名次带出来，供离线脚本做
@@ -87,11 +75,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
-            llm=retrieval_llm,
             top_k=6,
-            use_multi_query=use_rewrite,
-            use_hyde=use_rewrite,
-            num_variants=2,
             anchor_k=settings.rerank_anchor_k,
             trace_out=trace,
         )
@@ -131,7 +115,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                 if trigger:
                     graph_used = True
                     g_ctx, g_docs = await retrieve_graph_context(
-                        request.query, collection, llm=retrieval_llm,
+                        request.query, collection,
                         trace_out=graph_trace,
                     )
                     if g_docs:

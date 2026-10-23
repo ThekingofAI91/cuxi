@@ -17,7 +17,6 @@ emb.embed_query("预热")
 print(f"[init] embedder load+warm: {time.time()-t0:.2f}s")
 
 from src.retrieval.advanced_search import advanced_retrieval, _ensure_bm25_ready
-from src.core.llm import get_chat_llm
 
 # ---- 阶段单独计时 ----
 t0 = time.time()
@@ -35,21 +34,11 @@ t0 = time.time()
 rerank_documents("什么是集体无意识", sample, top_k=10)
 print(f"[stage] rerank 10 candidates: {time.time()-t0:.2f}s")
 
-llm = get_chat_llm(temperature=0.3, max_tokens=256)
-t0 = time.time()
-try:
-    import asyncio
-    from src.retrieval.advanced_search import generate_query_variants_and_hyde
-    v, h = asyncio.run(generate_query_variants_and_hyde("什么是集体无意识", llm, 2))
-    print(f"[stage] rewrite LLM: {time.time()-t0:.2f}s variants={len(v)}")
-except Exception as e:
-    print(f"[stage] rewrite LLM FAILED after {time.time()-t0:.2f}s: {type(e).__name__}: {e}")
-
 # ---- 端到端 advanced_retrieval ----
 import asyncio
 for q in ["梦中的蛇象征什么", "荣格如何理解个体化过程"]:
     t0 = time.time()
-    got, _ = asyncio.run(advanced_retrieval(q, col, llm, top_k=15, use_multi_query=True, use_hyde=True, use_rerank=True))
+    got, _ = asyncio.run(advanced_retrieval(q, col, top_k=15, use_rerank=True))
     print(f"[e2e] '{q}' 完整检索: {time.time()-t0:.2f}s -> {len(got)} docs")
 
 # ---- 语料质量扫描 ----

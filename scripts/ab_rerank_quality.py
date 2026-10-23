@@ -105,8 +105,7 @@ async def run_with_model(model_name: str) -> dict:
         for q in questions:
             t0 = time.perf_counter()
             docs, _ctx = await advanced_retrieval(
-                q, col, llm=None, top_k=15,
-                use_multi_query=False, use_hyde=False, use_rerank=True,
+                q, col, top_k=15, use_rerank=True,
             )
             wall = (time.perf_counter() - t0) * 1000
             key = f"{col_name}::{q}"
