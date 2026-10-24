@@ -666,8 +666,7 @@ function openSidebar() { sidebar.classList.add('open'); sidebarMask.classList.ad
 function closeSidebar() { sidebar.classList.remove('open'); sidebarMask.classList.remove('show'); }
 document.getElementById('menuBtn').addEventListener('click', openSidebar);
 sidebarMask.addEventListener('click', closeSidebar);
-// .brand 元素已不存在（某次改版更名为 .intro-brand）；此前 null.addEventListener
-// 在脚本加载时抛 TypeError，导致其后的 backHomeBtn 绑定从未执行——"返回首页"因此失灵。
-// 可选链守卫：元素缺失时跳过，不再炸掉后续绑定。
-document.querySelector('.brand')?.addEventListener('click', showHome);
+// 历史注记：这里曾有一行 querySelector('.brand').addEventListener——.brand 元素在某次
+// 改版中被移除后，null.addEventListener 在脚本加载时抛 TypeError，导致其后所有绑定
+// （含"返回首页"）从未执行。死绑定已删，勿再引用不存在的 .brand。
 document.getElementById('backHomeBtn').addEventListener('click', showHome);

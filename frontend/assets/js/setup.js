@@ -48,11 +48,6 @@
     }, 60);
   }
 
-  function closeOverlay() {
-    overlay.hidden = true;
-    document.documentElement.classList.remove('setup-open');
-  }
-
   function renderPresets() {
     presetsBox.textContent = '';
     presets.forEach((p) => {
