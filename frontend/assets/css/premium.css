@@ -232,7 +232,7 @@ body .detail-stage .detail-enter:hover {
 }
 
 /* ---------- 聊天 chat：墨色玻璃 + 鎏金交互 ---------- */
-body .chat-container::before {
+body[data-theme='original'] .chat-container::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -242,33 +242,33 @@ body .chat-container::before {
     radial-gradient(800px 400px at 8% 108%, rgba(70, 80, 110, 0.05), transparent 60%);
   z-index: 0;
 }
-body .chat-container > * { position: relative; z-index: 1; }
+body[data-theme='original'] .chat-container > * { position: relative; z-index: 1; }
 
 /* 侧栏：金边新对话 + 会话卡层级 */
-body .new-chat-btn {
+body[data-theme='original'] .new-chat-btn {
   border: 1px solid rgba(201, 169, 97, 0.4) !important;
   color: #E7D9B8 !important;
   background: linear-gradient(135deg, rgba(201, 169, 97, 0.12), rgba(201, 169, 97, 0.04)) !important;
   letter-spacing: 2px;
   transition: border-color 0.4s var(--ease-lux), background 0.4s var(--ease-lux), transform 0.4s var(--ease-lux);
 }
-body .new-chat-btn:hover {
+body[data-theme='original'] .new-chat-btn:hover {
   border-color: rgba(201, 169, 97, 0.8) !important;
   background: linear-gradient(135deg, rgba(201, 169, 97, 0.2), rgba(201, 169, 97, 0.07)) !important;
   transform: translateY(-1px);
 }
-body .conv-item {
+body[data-theme='original'] .conv-item {
   border: 1px solid transparent !important;
   border-left: 2px solid transparent !important;
   transition: background 0.35s var(--ease-lux), border-color 0.35s var(--ease-lux);
 }
-body .conv-item.active {
+body[data-theme='original'] .conv-item.active {
   background: linear-gradient(90deg, rgba(201, 169, 97, 0.14), rgba(201, 169, 97, 0.03)) !important;
   border-left-color: var(--gold) !important;
 }
 
 /* 空状态 hero：金环呼吸头像 */
-body .hero-avatar {
+body[data-theme='original'] .hero-avatar {
   position: relative;
   animation: lux-breathe 5.2s ease-in-out infinite;
 }
@@ -276,14 +276,14 @@ body .hero-avatar {
   0%, 100% { box-shadow: 0 0 0 1px rgba(201, 169, 97, 0.35), 0 0 34px -6px rgba(201, 169, 97, 0.22); }
   50% { box-shadow: 0 0 0 1px rgba(201, 169, 97, 0.6), 0 0 52px -4px rgba(201, 169, 97, 0.4); }
 }
-body .hero-greet {
+body[data-theme='original'] .hero-greet {
   font-family: "Noto Serif SC", "Songti SC", serif !important;
   letter-spacing: 0.04em;
 }
-body .hero-mono { letter-spacing: 0.06em; }
+body[data-theme='original'] .hero-mono { letter-spacing: 0.06em; }
 
 /* 建议问法 chips：墨玻璃 + 金边浮现 */
-body .suggestion-chips button {
+body[data-theme='original'] .suggestion-chips button {
   background: rgba(255, 255, 255, 0.035) !important;
   border: 1px solid rgba(255, 255, 255, 0.10) !important;
   backdrop-filter: blur(8px);
@@ -292,7 +292,7 @@ body .suggestion-chips button {
   transition: border-color 0.4s var(--ease-lux), color 0.4s var(--ease-lux),
     transform 0.4s var(--ease-lux), background 0.4s var(--ease-lux);
 }
-body .suggestion-chips button:hover {
+body[data-theme='original'] .suggestion-chips button:hover {
   border-color: rgba(201, 169, 97, 0.65) !important;
   color: #EFE6CF !important;
   background: rgba(201, 169, 97, 0.08) !important;
@@ -300,47 +300,47 @@ body .suggestion-chips button:hover {
 }
 
 /* 输入区：悬浮墨玻璃长条 + 聚焦金环 */
-body .input-box,
-body .input-inner {
+body[data-theme='original'] .input-box,
+body[data-theme='original'] .input-inner {
   background: rgba(20, 20, 24, 0.72) !important;
   backdrop-filter: blur(14px) saturate(1.15);
   border: 1px solid rgba(255, 255, 255, 0.08) !important;
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35), 0 22px 48px -22px rgba(0, 0, 0, 0.65) !important;
   transition: border-color 0.45s var(--ease-lux), box-shadow 0.45s var(--ease-lux);
 }
-body .input-box:focus-within,
-body .input-inner:focus-within {
+body[data-theme='original'] .input-box:focus-within,
+body[data-theme='original'] .input-inner:focus-within {
   border-color: rgba(201, 169, 97, 0.55) !important;
   box-shadow:
     0 0 0 1px rgba(201, 169, 97, 0.25),
     0 0 32px -6px rgba(201, 169, 97, 0.20),
     0 22px 48px -22px rgba(0, 0, 0, 0.7) !important;
 }
-body .input-box textarea,
-body .input-inner textarea,
-body .input-area textarea {
+body[data-theme='original'] .input-box textarea,
+body[data-theme='original'] .input-inner textarea,
+body[data-theme='original'] .input-area textarea {
   caret-color: var(--gold) !important;
 }
 /* 发送键：墨金圆钮 */
-body .input-box button:not([disabled]),
-body .input-inner button:not([disabled]) {
+body[data-theme='original'] .input-box button:not([disabled]),
+body[data-theme='original'] .input-inner button:not([disabled]) {
   background: linear-gradient(135deg, rgba(201, 169, 97, 0.9), rgba(168, 137, 76, 0.9)) !important;
   border: none !important;
   color: #171310 !important;
   box-shadow: 0 4px 14px -4px rgba(201, 169, 97, 0.55);
   transition: transform 0.35s var(--ease-lux), box-shadow 0.35s var(--ease-lux);
 }
-body .input-box button:not([disabled]):hover,
-body .input-inner button:not([disabled]):hover {
+body[data-theme='original'] .input-box button:not([disabled]):hover,
+body[data-theme='original'] .input-inner button:not([disabled]):hover {
   transform: translateX(1px) scale(1.04);
   box-shadow: 0 6px 18px -4px rgba(201, 169, 97, 0.7);
 }
 
 /* 头像：金环 */
-body .avatar.assistant {
+body[data-theme='original'] .avatar.assistant {
   box-shadow: 0 0 0 1px rgba(201, 169, 97, 0.45), 0 4px 14px -6px rgba(201, 169, 97, 0.35) !important;
 }
-body .avatar.user {
+body[data-theme='original'] .avatar.user {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.14) !important;
 }
 
@@ -349,21 +349,21 @@ body .md-body {
   line-height: 1.95 !important;
   letter-spacing: 0.015em;
 }
-body .md-body strong { color: #F0E9D6; }
+body[data-theme='original'] .md-body strong { color: #F0E9D6; }
 
 /* 状态徽标 */
-body .agent-badge {
+body[data-theme='original'] .agent-badge {
   border: 1px solid rgba(255, 255, 255, 0.12) !important;
   background: rgba(255, 255, 255, 0.03) !important;
 }
-body .agent-badge.kg-badge {
+body[data-theme='original'] .agent-badge.kg-badge {
   border-color: rgba(201, 169, 97, 0.45) !important;
   color: #E3D3A6 !important;
   background: rgba(201, 169, 97, 0.07) !important;
 }
 
 /* 思考指示器：金点 */
-body .thinking-dots span {
+body[data-theme='original'] .thinking-dots span {
   background: var(--gold) !important;
 }
 
@@ -374,7 +374,7 @@ body ::-webkit-scrollbar-thumb {
   border-radius: 8px;
 }
 body ::-webkit-scrollbar-thumb:hover { background: rgba(201, 169, 97, 0.4); }
-body ::-webkit-scrollbar-track { background: transparent; }
+body[data-theme='original'] ::-webkit-scrollbar-track { background: transparent; }
 
 /* 选中文本 */
 ::selection { background: rgba(201, 169, 97, 0.32); color: inherit; }
@@ -406,7 +406,7 @@ body .msg-animate {
 }
 
 /* 圆桌主按钮：墨金 */
-body .rt-start:not([disabled]) {
+body[data-theme='original'] .rt-start:not([disabled]) {
   background: linear-gradient(135deg, rgba(201, 169, 97, 0.85), rgba(168, 137, 76, 0.85)) !important;
   color: #171310 !important;
   border: none !important;
@@ -414,7 +414,7 @@ body .rt-start:not([disabled]) {
 
 /* 动效尊重系统偏好 */
 @media (prefers-reduced-motion: reduce) {
-  body .hero-avatar { animation: none; }
+  body[data-theme='original'] .hero-avatar { animation: none; }
   body .intro-cta::before { display: none; }
   body .msg-animate { animation-duration: 0.01s; }
   * { transition-duration: 0.01s !important; }
@@ -432,8 +432,8 @@ body .input-inner textarea {
   border: none !important;
   box-shadow: none !important;
 }
-body .input-box:focus-within textarea::placeholder,
-body .input-inner textarea::placeholder {
+body[data-theme='original'] .input-box:focus-within textarea::placeholder,
+body[data-theme='original'] .input-inner textarea::placeholder {
   color: #6E6A5E;
 }
 /* 聊天消息列阅读宽度约束 */
@@ -459,7 +459,7 @@ body .input-area textarea::-webkit-scrollbar {
   height: 0;
 }
 /* 聚焦态：单层柔金环，去掉光晕 */
-body .input-box:focus-within {
+body[data-theme='original'] .input-box:focus-within {
   border-color: rgba(201, 169, 97, 0.45) !important;
   box-shadow: 0 0 0 1px rgba(201, 169, 97, 0.16), 0 18px 40px -22px rgba(0, 0, 0, 0.6) !important;
 }
@@ -467,8 +467,110 @@ body .input-box:focus-within {
 body .empty-state {
   animation: lux-view-in 0.55s var(--ease-lux) both;
 }
-body .conv-item { scroll-behavior: smooth; }
+body[data-theme='original'] .conv-item { scroll-behavior: smooth; }
 @keyframes lux-view-in {
   from { opacity: 0; transform: translateY(14px) scale(0.985); }
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
+
+/* ============================================================
+   PAPER 主题轻奢层（宣纸 × 墨 × 朱砂印章）
+   王阳明主题：基础层的朱砂设计语言完整（印章式 brand-mark、
+   朱砂发送键、序号纸片 chips），本层只做质感增强，不改设计方向。
+   ============================================================ */
+
+/* 环境光：顶部一抹极淡朱砂晕 + 纸纹加深（贴合纸本气质） */
+body[data-theme='paper'] .chat-container::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(1100px 400px at 62% -8%, rgba(169, 58, 43, 0.045), transparent 62%),
+    radial-gradient(900px 420px at 6% 110%, rgba(38, 34, 29, 0.035), transparent 58%);
+  z-index: 0;
+}
+body[data-theme='paper'] .chat-container > * { position: relative; z-index: 1; }
+
+/* 输入框：纸玻璃 + 柔影 + 聚焦朱砂（叠加在基础层 var(--paper2) 上） */
+body[data-theme='paper'] .input-box {
+  box-shadow:
+    0 1px 2px rgba(38, 34, 29, 0.06),
+    0 18px 36px -20px rgba(38, 34, 29, 0.28) !important;
+  transition: border-color 0.4s var(--ease-lux), box-shadow 0.4s var(--ease-lux);
+}
+body[data-theme='paper'] .input-box:focus-within {
+  box-shadow:
+    0 0 0 1px rgba(169, 58, 43, 0.18),
+    0 1px 2px rgba(38, 34, 29, 0.06),
+    0 20px 40px -20px rgba(38, 34, 29, 0.32) !important;
+}
+/* 朱砂发送键：印章手感（hover 微沉） */
+body[data-theme='paper'] .send-btn:not(:disabled) {
+  box-shadow: 0 3px 10px -3px rgba(169, 58, 43, 0.45);
+  transition: transform 0.3s var(--ease-lux), box-shadow 0.3s var(--ease-lux), background 0.2s ease;
+}
+body[data-theme='paper'] .send-btn:not(:disabled):hover {
+  transform: translateY(1px);
+  box-shadow: 0 5px 14px -4px rgba(169, 58, 43, 0.55);
+}
+
+/* 消息区：分隔线 hover 泛墨 */
+body[data-theme='paper'] .message-group {
+  border-bottom: 1px solid rgba(38, 34, 29, 0.06);
+  transition: border-color 0.4s var(--ease-lux);
+}
+body[data-theme='paper'] .message-group:hover {
+  border-bottom-color: rgba(169, 58, 43, 0.16);
+}
+/* 用户气泡：宣纸卡 + 墨线微影 */
+body[data-theme='paper'] .user-text {
+  box-shadow: 0 1px 2px rgba(38, 34, 29, 0.05), 0 8px 18px -12px rgba(38, 34, 29, 0.16);
+  border-radius: 14px 14px 3px 14px;
+}
+/* 正文：墨色层次 + 朱砂强调 */
+body[data-theme='paper'] .md-body strong { color: #1F1B15; }
+body[data-theme='paper'] .md-body blockquote {
+  border-left: 2px solid rgba(169, 58, 43, 0.55);
+  color: var(--ink2);
+}
+/* 引用角标：朱砂 */
+body[data-theme='paper'] .cite-mark { color: var(--red); }
+
+/* 头像：assistant 朱砂细环 */
+body[data-theme='paper'] .avatar.assistant {
+  box-shadow: 0 0 0 1px rgba(169, 58, 43, 0.35), 0 3px 10px -4px rgba(169, 58, 43, 0.25) !important;
+}
+
+/* 思考点：朱砂 */
+body[data-theme='paper'] .thinking-dots span { background: var(--red) !important; }
+
+/* 徽标：纸片描边 */
+body[data-theme='paper'] .agent-badge {
+  border: 1px solid rgba(38, 34, 29, 0.16) !important;
+  background: rgba(255, 252, 244, 0.6) !important;
+}
+body[data-theme='paper'] .agent-badge.kg-badge {
+  border-color: rgba(169, 58, 43, 0.4) !important;
+  color: var(--red-deep) !important;
+  background: rgba(169, 58, 43, 0.05) !important;
+}
+
+/* 侧栏：新对话（paper 基础是墨底纸字，加朱砂 hover）与活跃会话 */
+body[data-theme='paper'] .conv-item.active {
+  background: linear-gradient(90deg, rgba(169, 58, 43, 0.08), rgba(169, 58, 43, 0.015)) !important;
+  border-left-color: var(--red) !important;
+}
+
+/* 建议纸片：hover 微浮 */
+body[data-theme='paper'] .suggestion-chip {
+  transition: transform 0.4s var(--ease-lux), background 0.25s ease, color 0.25s ease, padding 0.25s ease, border-color 0.25s ease;
+}
+body[data-theme='paper'] .suggestion-chip:hover {
+  transform: translateY(-2px);
+}
+
+/* 选中文本朱砂 */
+body[data-theme='paper'] ::selection { background: rgba(169, 58, 43, 0.22); color: inherit; }
+body[data-theme='paper'] .input-box textarea,
+body[data-theme='paper'] .input-inner textarea { caret-color: var(--red) !important; }

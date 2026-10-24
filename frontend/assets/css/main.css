@@ -166,8 +166,9 @@
      （4 → 2 → 1，见文件末尾的分区层响应式），任何时候都不会有孤卡。
      列宽用 1fr 随容器缩，不再写死 280。 */
   .zone-deck {
-    display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 20px; width: 100%; max-width: 1210px;
+    /* 融合后 3 张卡（促膝/争鸣/传奇）：三等分居中，不再空出第 4 列 */
+    display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 22px; width: 100%; max-width: 950px; margin: 0 auto;
   }
   .zone-card {
     width: 100%; min-height: 184px;
