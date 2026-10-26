@@ -72,7 +72,7 @@ def test_compress_and_parse():
 
 
 def test_failure_falls_back_to_original(monkeypatch):
-    async def boom(*a, **k):
+    def boom(*a, **k):
         raise RuntimeError("上游挂了")
 
     monkeypatch.setattr(CC, "_norm_vec", boom)

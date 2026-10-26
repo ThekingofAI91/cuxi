@@ -1438,6 +1438,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             except Exception:
                 pass
             yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
+            yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
 
     return StreamingResponse(
         event_stream(),

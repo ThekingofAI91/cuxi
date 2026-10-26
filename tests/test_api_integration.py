@@ -97,6 +97,42 @@ def test_query_streams_result(client):
     assert fake.calls == 1
 
 
+@pytest.mark.parametrize("partial_output", [False, True])
+def test_query_failure_ends_stream_and_allows_retry(client, monkeypatch, partial_output):
+    c, fake = client
+    import framework.supervisor_agent as supervisor
+    from framework.runtime import get_conversation_history
+    from src.core.llm import LLMEmptyResponseError
+
+    async def failing_pipeline(state, on_stage=None):
+        if partial_output:
+            await state["stream_callback"]("尚未完成的回答")
+            raise RuntimeError("上游连接中断")
+        raise LLMEmptyResponseError("模型暂时没有返回内容")
+
+    monkeypatch.setattr(supervisor, "run_supervisor_agent", failing_pipeline)
+    payload = {"query": "什么是阴影？", "session_id": "failed-query", "character_id": "jung"}
+    response = c.post("/persona/query", json=payload)
+    assert response.status_code == 200
+    events = _sse_events(response)
+    assert [event["type"] for event in events[-2:]] == ["error", "end"]
+    assert events[-1]["session_id"] == payload["session_id"]
+    assert ("上游连接中断" if partial_output else "模型暂时没有返回内容") in events[-2]["content"]
+    assert any(event["type"] == "token" for event in events) is partial_output
+    assert not any(event["type"] == "result" for event in events)
+    assert get_conversation_history(payload["session_id"]) == []
+    assert not routes._ANSWER_CACHE
+    assert monitor_mod.get_monitor().summary(0)["errors"] == 1
+
+    monkeypatch.setattr(supervisor, "run_supervisor_agent", fake)
+    retry = c.post("/persona/query", json=payload)
+    retry_events = _sse_events(retry)
+    assert retry.status_code == 200
+    assert any(event["type"] == "result" for event in retry_events)
+    assert retry_events[-1] == {"type": "end", "session_id": payload["session_id"]}
+    assert fake.calls == 1
+
+
 def test_cache_hit_skips_graph(client):
     c, fake = client
     r1 = c.post(
