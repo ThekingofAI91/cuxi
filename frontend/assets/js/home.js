@@ -241,17 +241,18 @@ function homeCardHTML(c, i) {
 function renderDeck() {
   const all = state.characters.length > 0 ? state.characters : FALLBACK_CHARACTERS;
   const zone = state.homeZone;
-  const list = zone ? all.filter(c => (c.zone || 'education') === zone) : all;
+  const list = (zone && zone !== 'all') ? all.filter(c => (c.zone || 'education') === zone) : all;
   state._homeList = list;
   if (homeCount) homeCount.textContent = list.length + ' 位';
 
-  // 未选区域时（兜底，正常不会走到）按两区展示；选完区域后只渲染该区角色
+  // 融合入口（'all'，即首页「促膝」卡）：全部角色一页展示，
+  // 用气质分组标签（问道=言必有据 / 会心=不设防）保留角色的气质区分，省掉一次分区跳转
   let html = '';
-  if (!zone) {
+  if (!zone || zone === 'all') {
     const edu = all.filter(c => (c.zone || 'education') === 'education');
     const ent = all.filter(c => (c.zone || 'education') === 'entertainment');
-    if (edu.length) html += '<div class="deck-zone-label">问道</div>' + edu.map((c) => homeCardHTML(c)).join('');
-    if (ent.length) html += '<div class="deck-zone-label">会心</div>' + ent.map((c) => homeCardHTML(c)).join('');
+    if (edu.length) html += '<div class="deck-zone-label">问道 · 言必有据</div>' + edu.map((c) => homeCardHTML(c)).join('');
+    if (ent.length) html += '<div class="deck-zone-label">会心 · 不设防</div>' + ent.map((c) => homeCardHTML(c)).join('');
   } else {
     html = list.map((c) => homeCardHTML(c)).join('');
   }
@@ -271,10 +272,9 @@ function renderDeck() {
     homeDeck.querySelectorAll('.home-card').forEach((el) => el.classList.add('is-in'));
   });
 
-  // 选完区域后：娱乐区额外追加「创建人物」入口。
-  // 注：「争鸣」已升级为与问道/会心同级的入口（首页分区层第三张卡），
-  // 不再作为角色列表尾部的附加卡片——它是**玩法**，不是某个分区的一部分。
-  if (zone === 'entertainment') {
+  // 「创建人物」入口：融合入口（all）与娱乐区（自定义角色默认娱乐区）都追加在列表尾部。
+  // 注：「争鸣」是分区层第三张卡（玩法入口），不在角色列表里。
+  if (zone === 'entertainment' || !zone || zone === 'all') {
     const createEl = document.createElement('div');
     createEl.className = 'home-card create-card-entry';
     createEl.dataset.charId = '__create__';
