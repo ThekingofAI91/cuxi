@@ -16,6 +16,8 @@ from framework.runtime import (
     truncate_conversation_history,
     pop_last_turn,
 )
+from src.core import session_store as session_store_mod
+from src.core.config import settings
 from scenes.persona_chat.card_io import export_card, parse_card, CARD_FORMAT
 from scenes.persona_chat.models import CharacterDef
 from scenes.persona_chat.prompt_builder import (
@@ -30,23 +32,27 @@ from scenes.persona_chat.prompt_builder import (
 # ============================================================
 
 @pytest.fixture()
-def history_session():
-    """准备一个 4 轮历史的测试会话，结束后清理。"""
+def history_session(tmp_path, monkeypatch):
+    """准备一个 4 轮历史的测试会话（写真实 SQLite），结束后清理。
+
+    2026-10-26 起历史不再有进程内副本，测试也必须落库。
+    """
+    monkeypatch.setattr(settings, "session_db_path", str(tmp_path / "sessions.db"))
+    monkeypatch.setattr(session_store_mod, "_store", None)   # 重置单例，用新路径
     sid = "test-controls-session"
-    runtime._conversation_history_store[sid] = [
-        (f"问题{i}", f"回答{i}") for i in range(1, 5)
-    ]
-    runtime._conversation_summaries.pop(sid, None)
+    runtime.append_conversation(sid, "问题1", "回答1")
+    runtime.append_conversation(sid, "问题2", "回答2")
+    runtime.append_conversation(sid, "问题3", "回答3")
+    runtime.append_conversation(sid, "问题4", "回答4")
     yield sid
-    runtime._conversation_history_store.pop(sid, None)
-    runtime._conversation_summaries.pop(sid, None)
+    runtime._get_session_store().delete(sid)
 
 
 def test_truncate_conversation_history(history_session):
     sid = history_session
     n = truncate_conversation_history(sid, 2)
     assert n == 2
-    assert runtime._conversation_history_store[sid] == [("问题1", "回答1"), ("问题2", "回答2")]
+    assert runtime.get_conversation_history(sid) == [("问题1", "回答1"), ("问题2", "回答2")]
     # 截断到超出当前长度是空操作；不存在的会话返回 -1
     assert truncate_conversation_history(sid, 10) == 2
     assert truncate_conversation_history("no-such-session", 3) == -1
@@ -55,23 +61,23 @@ def test_truncate_conversation_history(history_session):
 def test_truncate_to_zero_clears(history_session):
     sid = history_session
     assert truncate_conversation_history(sid, 0) == 0
-    assert runtime._conversation_history_store[sid] == []
+    assert runtime.get_conversation_history(sid) == []
 
 
 def test_pop_last_turn(history_session):
     sid = history_session
     assert pop_last_turn(sid, expect_query="问题4") is True
-    turns = runtime._conversation_history_store[sid]
+    turns = runtime.get_conversation_history(sid)
     assert turns[-1] == ("问题3", "回答3")
     # 校验失败时不弹（防止并发误删）
     assert pop_last_turn(sid, expect_query="问题1") is False
     assert len(turns) == 3
 
 
-def test_pop_last_turn_empty_session():
-    sid = "test-pop-empty"
-    runtime._conversation_history_store.pop(sid, None)
-    assert pop_last_turn(sid) is False
+def test_pop_last_turn_empty_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "session_db_path", str(tmp_path / "sessions.db"))
+    monkeypatch.setattr(session_store_mod, "_store", None)
+    assert pop_last_turn("test-pop-empty") is False
 
 
 # ============================================================

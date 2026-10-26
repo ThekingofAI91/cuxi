@@ -68,10 +68,11 @@ def client(tmp_path, monkeypatch):
     deps._RATE_STORE.clear()
     routes._ANSWER_CACHE.clear()
     routes._session_store.clear()
-    from framework.runtime import _conversation_history_store, _conversation_summaries
+    # 历史现在只有 SQLite 一份（2026-10-26），重置单例让它用上面 monkeypatch 的临时库，
+    # 否则会继续指向 ./data/sessions.db，测试之间互相污染。
+    from src.core import session_store as _session_store_mod
 
-    _conversation_history_store.clear()
-    _conversation_summaries.clear()
+    _session_store_mod._store = None
     monitor_mod._monitor = None
 
     # 编排函数在 routes 内是延迟导入（每次调用都从源模块取属性），

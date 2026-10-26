@@ -19,7 +19,6 @@ from framework.runtime import (
     set_scene_config,
     get_chroma_client,
     get_conversation_history, append_conversation,
-    _conversation_history_store,
     _summarize_old_turns, delete_conversation_history,
     truncate_conversation_history, pop_last_turn,
 )
@@ -510,7 +509,7 @@ def _restore_history_from_frontend(session_id: str, history: list[dict]):
         return
     # 只在后端历史为空时恢复（避免覆盖已有数据）
     with _history_restore_lock:
-        if session_id in _conversation_history_store and _conversation_history_store[session_id]:
+        if get_conversation_history(session_id):
             return
         # 将前端历史转为 (query, answer) 元组
         restored = []
@@ -533,14 +532,14 @@ def _restore_history_from_frontend(session_id: str, history: list[dict]):
             i += 1
         to_summarize = []
         if restored:
-            _conversation_history_store[session_id] = restored
-            print(f"[History] 从前端恢复会话历史: session={session_id}, 轮次={len(restored)}")
             # 恢复的历史超过存储上限时，超出部分异步压缩为摘要，避免早期上下文直接丢失
             max_turns = settings.max_history_turns if hasattr(settings, 'max_history_turns') else 10
             if len(restored) > max_turns:
                 to_summarize = restored[:-max_turns]
-                _conversation_history_store[session_id] = restored[-max_turns:]
+                restored = restored[-max_turns:]
                 print(f"[History] 恢复历史超限，压缩 {len(to_summarize)} 轮旧对话为摘要")
+            _get_session_store().set_history(session_id, restored)
+            print(f"[History] 从前端恢复会话历史: session={session_id}, 轮次={len(restored)}")
     if to_summarize:
         asyncio.create_task(_summarize_old_turns(session_id, to_summarize))
 
@@ -1202,13 +1201,15 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             char_config = _dc_replace(persona_chat_config, chroma_collection=character.chroma_collection)
             set_scene_config(char_config)
             try:
-                history = get_conversation_history(session_id)
+                # 一次请求只取一次历史快照（event_stream 开头已读 history_before）。
+                # 同一请求内 prompt 装配与世界书扫描用同一份，避免两次读之间
+                # 被并发请求插进一轮，导致「注入的历史」和「扫描的历史」不一致。
+                history = history_before
                 print(f"[Persona Query] 加载会话历史: session={session_id}, 轮次={len(history)}")
 
                 # 酒馆式装配：人设 + 性格 + 场景 + 世界书命中词条 + 示例对话（+ 娱乐区语气指令）
                 # 世界书扫描范围 = 本轮消息 + 最近几轮对话（接住"我们刚才聊的那个XX"类指代）
-                _history_now = get_conversation_history(session_id)
-                _scan_text = compose_lorebook_scan_text(request.query, _history_now)
+                _scan_text = compose_lorebook_scan_text(request.query, history)
                 _role_prompt = build_character_prompt(
                     character, query=request.query, scan_text=_scan_text
                 )

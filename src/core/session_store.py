@@ -34,6 +34,7 @@ class SessionStore:
                     final_answer TEXT DEFAULT '',
                     history TEXT DEFAULT '[]',
                     summary TEXT DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 0,
                     created_at REAL,
                     updated_at REAL
                 )
@@ -61,6 +62,15 @@ class SessionStore:
                 )
             except sqlite3.OperationalError:
                 pass
+            # version：历史写入的乐观锁版本号（2026-10-26 加）。
+            # 多 worker 下同一 session 会被不同进程各自「读改写」，没有它就会
+            # 出现后落盘者覆盖先落盘者。见 set_history_cas。
+            try:
+                self._conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN version INTEGER NOT NULL DEFAULT 0"
+                )
+            except sqlite3.OperationalError:
+                pass
             self._conn.commit()
 
     def _ensure(self, session_id: str, now: float) -> None:
@@ -76,15 +86,56 @@ class SessionStore:
             self._ensure(session_id, now)
             self._conn.commit()
 
-    def set_history(self, session_id: str, history: list) -> None:
+    def get(self, session_id: str) -> Optional[dict[str, Any]]:
+        """按 session_id 取整行（历史 / 摘要 / 版本 / 元信息）。不存在返回 None。
+
+        历史读取的唯一入口。2026-10-26 起内存不再持有会话副本，
+        这样多 worker 下任何一个进程都能读到同一条最新历史。
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_history(self, session_id: str, history: list) -> int:
+        """无条件覆盖历史，返回写入后的 version。
+
+        只用于「确定要覆盖」的场景（前端历史恢复、CAS 连续冲突兜底）。
+        常规写入走 set_history_cas，否则并发下会互相冲掉。
+        """
         now = time.time()
         with self._lock:
             self._ensure(session_id, now)
             self._conn.execute(
-                "UPDATE sessions SET history=?, updated_at=? WHERE session_id=?",
+                "UPDATE sessions SET history=?, version=version+1, updated_at=? "
+                "WHERE session_id=?",
                 (json.dumps(history, ensure_ascii=False), now, session_id),
             )
             self._conn.commit()
+            row = self._conn.execute(
+                "SELECT version FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return int(row["version"]) if row else 0
+
+    def set_history_cas(
+        self, session_id: str, history: list, expected_version: int
+    ) -> bool:
+        """仅当 version 仍是 expected_version 时覆盖历史。
+
+        返回 False 表示期间被别人改过 —— 调用方必须重读、重新合并、再写，
+        不能当成「写失败」直接放弃，否则那一轮就丢了。
+        """
+        now = time.time()
+        with self._lock:
+            self._ensure(session_id, now)
+            cur = self._conn.execute(
+                "UPDATE sessions SET history=?, version=version+1, updated_at=? "
+                "WHERE session_id=? AND version=?",
+                (json.dumps(history, ensure_ascii=False), now, session_id, expected_version),
+            )
+            self._conn.commit()
+        return cur.rowcount > 0
 
     def set_summary(self, session_id: str, summary: str) -> None:
         now = time.time()

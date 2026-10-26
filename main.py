@@ -113,24 +113,18 @@ async def lifespan(app: FastAPI):
     # 避开 uvicorn 事件循环 + asyncio.to_thread 在 Windows 上的死锁问题
     threading.Thread(target=_warmup_sync, daemon=True, name="warmup").start()
 
-    # 启动时恢复近期会话（SQLite 写穿持久化），并启动过期清理任务
+    # 启动时只恢复「答案快照」（_session_store 供前端刷新后恢复答案）。
+    # 对话历史与摘要不再回灌内存：读写都直接走 SQLite（2026-10-26 起），
+    # 这样多 worker 下任何进程读到的都是同一份历史。
     import json as _json
 
     from src.core.session_store import get_store as _get_session_store
-    from framework.runtime import _conversation_history_store, _conversation_summaries
     from src.api.routes import _session_store
 
     try:
         rows = _get_session_store().load_recent(settings.session_ttl_days)
         for row in rows:
             sid = row["session_id"]
-            if row.get("history"):
-                try:
-                    _conversation_history_store[sid] = _json.loads(row["history"])
-                except Exception:
-                    pass
-            if row.get("summary"):
-                _conversation_summaries[sid] = row["summary"]
             if sid not in _session_store:
                 _session_store[sid] = {
                     "session_id": sid,
@@ -150,8 +144,6 @@ async def lifespan(app: FastAPI):
             try:
                 removed = _get_session_store().delete_expired(settings.session_ttl_days)
                 for sid in removed:
-                    _conversation_history_store.pop(sid, None)
-                    _conversation_summaries.pop(sid, None)
                     _session_store.pop(sid, None)
                 if removed:
                     print(f"[Session]  已清理 {len(removed)} 个过期会话")

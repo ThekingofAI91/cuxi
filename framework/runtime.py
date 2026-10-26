@@ -15,11 +15,12 @@ Runtime 能力层 —— 场景上下文 / 会话历史 / 消息装配 / 生成 
 能力清单：
 - 消息装配 build_direct_messages（人设 → 用户记忆 → 资料 → 历史 → 后历史指令）
 - 直接生成 _generate_direct_response（空响应重试 + 首 token 超时）
-- 会话历史读写与摘要压缩（_conversation_history_store + session_store 持久化）
+- 会话历史读写与摘要压缩（进程内不持有副本，读写均走 session_store 的 SQLite + 版本号 CAS）
 - ChromaDB client 单例（首次构造加锁，见 get_chroma_client）
 """
 
 import contextvars
+import json
 import re
 import asyncio
 import threading
@@ -47,19 +48,26 @@ _current_scene_config = contextvars.ContextVar("scene_config", default=None)
 # type error 事件推给前端（抛出时保证尚未向用户推送过任何 token）
 _EMPTY_UPSTREAM_MSG = "模型服务暂时没有返回内容，请稍后重试"
 
-# 对话历史存储：session_id -> [(user_query, assistant_answer), ...]
-_conversation_history_store: dict[str, list[tuple[str, str]]] = {}
-
-# 对话摘要存储：session_id -> str（旧对话的压缩摘要，保留原始话题和关键信息）
-_conversation_summaries: dict[str, str] = {}
+# 会话历史的唯一真相源是 SQLite（src/core/session_store.py）。
+# 2026-10-26 之前这里是进程内 dict（_conversation_history_store /
+# _conversation_summaries），SQLite 只做写穿镜像 —— 多 worker 部署时请求没有
+# 亲和性，同一 session 落到不同进程就读不到上文，落盘时还会用自己那份残缺
+# 快照把完整历史截断。现在读也走磁盘，进程内不再持有任何会话副本。
+#
+# 实测代价（1000 行库、每行 4.7KB、WAL）：一次读 + json 解析 p50 约 15us，
+# 一次 UPDATE+commit 约 1ms，相对一次问答（约 13.7s）可忽略。
 
 # 摘要生成锁：多个旧对话压缩任务并发时串行执行，
 # 避免后完成的任务基于旧的 existing 覆盖，导致早期轮次内容丢失
 _summary_lock = asyncio.Lock()
 
-# 会话历史读写锁：两个请求（如同一浏览器两个标签页共享 sessionId）
-# 并发 append/删除同一会话时，防止读改写竞态导致丢轮次/历史被截断
+# 进程内写入串行锁：跨进程的正确性靠 SQLite 的 version（CAS），这把锁只是
+# 把同进程内的白重试消掉——同一进程两个请求争同一行时会互相踢版本号。
 _history_lock = threading.Lock()
+
+# CAS 冲突后的重试次数。真机上冲突只在「同一用户两个标签页同时回答完成」
+# 出现，3 次绰绰有余；用尽后退化为无条件覆盖，优先保证这一轮不丢。
+_CAS_RETRY = 3
 
 
 def set_scene_config(config):
@@ -118,61 +126,83 @@ def get_chroma_client():
     return _chroma_client
 
 
+def _load_session(session_id: str) -> tuple[list[tuple[str, str]], int]:
+    """从 SQLite 读历史与版本号。会话不存在返回 ([], 0)。"""
+    row = _get_session_store().get(session_id)
+    if not row:
+        return [], 0
+    try:
+        raw = json.loads(row.get("history") or "[]")
+        turns = [(str(q), str(a)) for q, a in raw]
+    except Exception as e:
+        print(f"[Supervisor] 历史反序列化失败，按空历史处理: session={session_id}, {e}")
+        turns = []
+    return turns, int(row.get("version") or 0)
+
+
 def get_conversation_history(session_id: str) -> list[tuple[str, str]]:
-    """获取指定会话的对话历史"""
-    with _history_lock:
-        return list(_conversation_history_store.get(session_id, []))
+    """获取指定会话的对话历史（读 SQLite，多 worker 下各进程一致）"""
+    return _load_session(session_id)[0]
+
+
+def get_conversation_summary(session_id: str) -> str:
+    """获取指定会话的早期对话摘要（读 SQLite）"""
+    row = _get_session_store().get(session_id)
+    return (row or {}).get("summary") or ""
 
 
 def delete_conversation_history(session_id: str) -> bool:
     """
     删除指定会话的全部历史（对话历史 + 摘要）。
-    前端删除对话时调用，确保后端内存中的上下文同步清除，
-    避免复用/遗留 session 时把旧历史注入新对话导致"重复提问"误判。
+
+    前端删除对话时调用。整行删除，持久化层一并清掉，避免服务重启后
+    前端再发来旧历史时"被删对话复活、带旧回答"。
+    返回该会话此前是否存在。
     """
-    existed = False
-    with _history_lock:
-        if session_id in _conversation_history_store:
-            del _conversation_history_store[session_id]
-            existed = True
-        if session_id in _conversation_summaries:
-            del _conversation_summaries[session_id]
-            existed = True
+    existed = _get_session_store().get(session_id) is not None
     if existed:
+        _get_session_store().delete(session_id)
         print(f"[Supervisor] 已删除会话历史: session={session_id}")
-        try:
-            _get_session_store().delete(session_id)
-        except Exception as e:
-            print(f"[Supervisor] 会话持久化删除失败: {e}")
     return existed
 
 
-def append_conversation(session_id: str, query: str, answer: str):
-    """追加一轮对话到历史记录，超过阈值时自动压缩旧对话为摘要"""
-    # 锁：同一 sessionId 的两个请求并发完成时，append 与截断必须原子，
-    # 否则后完成的请求会基于旧的列表覆盖，导致轮次丢失
-    to_summarize = []
-    with _history_lock:
-        if session_id not in _conversation_history_store:
-            _conversation_history_store[session_id] = []
-        _conversation_history_store[session_id].append((query, answer))
-        # 限制最大轮次，超出部分用 LLM 压缩为摘要（防止丢失原始话题）
-        max_turns = settings.max_history_turns if hasattr(settings, 'max_history_turns') else 10
-        if len(_conversation_history_store[session_id]) > max_turns:
-            # 取出需要压缩的旧对话
-            to_summarize = _conversation_history_store[session_id][:-max_turns]
-            _conversation_history_store[session_id] = _conversation_history_store[session_id][-max_turns:]
-    if to_summarize:
-        # 异步压缩（不阻塞当前响应）；锁保证多个压缩任务串行合并，不丢轮次
-        asyncio.create_task(_summarize_old_turns(session_id, to_summarize))
+def _persist_append(session_id: str, query: str, answer: str) -> list[tuple[str, str]]:
+    """读改写 + CAS 落盘，返回被挤出的旧轮次（交给摘要）。
 
-    # 写穿持久化：对话历史落盘，服务重启后恢复
+    持久化失败只打日志不抛：答案已经生成，不能因为落盘失败把回答变成报错。
+    """
+    max_turns = settings.max_history_turns if hasattr(settings, 'max_history_turns') else 10
+    store = _get_session_store()
+    overflow: list[tuple[str, str]] = []
+    turns: list[tuple[str, str]] = []
     try:
         with _history_lock:
-            current = list(_conversation_history_store.get(session_id, []))
-        _get_session_store().set_history(session_id, current)
+            for _ in range(_CAS_RETRY):
+                turns, version = _load_session(session_id)
+                turns.append((query, answer))
+                overflow = turns[:-max_turns] if len(turns) > max_turns else []
+                if overflow:
+                    turns = turns[-max_turns:]
+                if store.set_history_cas(session_id, turns, version):
+                    return overflow
+            print(f"[Supervisor] 历史 CAS 冲突重试耗尽，改为无条件写入: session={session_id}")
+            store.set_history(session_id, turns)
     except Exception as e:
         print(f"[Supervisor] 对话历史持久化失败: {e}")
+        return []
+    return overflow
+
+
+def append_conversation(session_id: str, query: str, answer: str):
+    """追加一轮对话到历史记录，超过阈值时自动压缩旧对话为摘要。
+
+    写入走 CAS（版本号乐观锁）：多 worker 下同一 session 可能被不同进程
+    同时「读 → 改 → 写」，没有版本号就会出现后落盘者覆盖先落盘者。
+    """
+    to_summarize = _persist_append(session_id, query, answer)
+    if to_summarize:
+        # 异步压缩（不阻塞当前响应）；_summary_lock 保证多个压缩任务串行合并
+        asyncio.create_task(_summarize_old_turns(session_id, to_summarize))
 
 
 def truncate_conversation_history(session_id: str, keep_turns: int) -> int:
@@ -189,18 +219,22 @@ def truncate_conversation_history(session_id: str, keep_turns: int) -> int:
     """
     if keep_turns < 0:
         keep_turns = 0
-    with _history_lock:
-        turns = _conversation_history_store.get(session_id)
-        if turns is None:
-            return -1
-        if keep_turns < len(turns):
-            del turns[keep_turns:]
-        current = list(turns)
+    store = _get_session_store()
+    if store.get(session_id) is None:
+        return -1
     try:
-        _get_session_store().set_history(session_id, current)
+        with _history_lock:
+            for _ in range(_CAS_RETRY):
+                turns, version = _load_session(session_id)
+                if keep_turns < len(turns):
+                    turns = turns[:keep_turns]
+                if store.set_history_cas(session_id, turns, version):
+                    return len(turns)
+            store.set_history(session_id, turns)
+            return len(turns)
     except Exception as e:
         print(f"[Supervisor] 截断后历史持久化失败: {e}")
-    return len(current)
+        return -1
 
 
 def pop_last_turn(session_id: str, expect_query: str | None = None) -> bool:
@@ -211,20 +245,23 @@ def pop_last_turn(session_id: str, expect_query: str | None = None) -> bool:
     append_conversation 会把新一轮写回。expect_query 用于校验弹掉的
     确实是当前要重答的那轮（防止并发时误删别人的最后一轮）。
     """
-    with _history_lock:
-        turns = _conversation_history_store.get(session_id)
-        if not turns:
-            return False
-        if expect_query is not None and turns[-1][0] != expect_query:
-            print(f"[Supervisor] pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
-            return False
-        turns.pop()
-        current = list(turns)
+    store = _get_session_store()
     try:
-        _get_session_store().set_history(session_id, current)
+        with _history_lock:
+            for _ in range(_CAS_RETRY):
+                turns, version = _load_session(session_id)
+                if not turns:
+                    return False
+                if expect_query is not None and turns[-1][0] != expect_query:
+                    print(f"[Supervisor] pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
+                    return False
+                turns.pop()
+                if store.set_history_cas(session_id, turns, version):
+                    return True
     except Exception as e:
         print(f"[Supervisor] 弹轮后历史持久化失败: {e}")
-    return True
+        return False
+    return False
 
 
 async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
@@ -242,8 +279,8 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
                 parts.append(f"用户：{q}\n助手：{a_truncated}")
             turns_text = "\n\n".join(parts)
 
-            # 已有摘要则拼在前面
-            existing = _conversation_summaries.get(session_id, "")
+            # 已有摘要则拼在前面（读磁盘，多 worker 下拿到的是最新的一份）
+            existing = get_conversation_summary(session_id)
             if existing:
                 context = f"已有摘要：{existing}\n\n新增对话：\n{turns_text}"
             else:
@@ -264,10 +301,10 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
 5. 用中文输出，控制在 300 字以内"""),
                 ("user", context),
             ])
-            _conversation_summaries[session_id] = response.content.strip()
+            summary = response.content.strip()
             print(f"[Supervisor] 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
             try:
-                _get_session_store().set_summary(session_id, _conversation_summaries[session_id])
+                _get_session_store().set_summary(session_id, summary)
             except Exception as e:
                 print(f"[Supervisor] 摘要持久化失败: {e}")
         except Exception as e:
@@ -282,8 +319,10 @@ def format_history_for_prompt(history: list[tuple[str, str]], max_turns: int = N
     parts = []
 
     # 先注入摘要（保留的原始话题上下文）
-    if session_id and session_id in _conversation_summaries:
-        parts.append(f"【早期对话摘要】\n{_conversation_summaries[session_id]}")
+    if session_id:
+        _summary = get_conversation_summary(session_id)
+        if _summary:
+            parts.append(f"【早期对话摘要】\n{_summary}")
 
     # 再注入最近几轮完整对话
     if history:
