@@ -29,6 +29,12 @@ from typing import Optional
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# 评测配置（环境变量控制，用于同一批题跑不同检索模式做配对比较）
+#   EVAL_RETRIEVAL_MODE = full | vector_only
+#   EVAL_RESULT_FILE    = 结果文件名（相对 tests/），两组必须不同，否则续跑会跳过
+RETRIEVAL_MODE = os.environ.get("EVAL_RETRIEVAL_MODE", "full")
+RESULT_PATH = Path(__file__).parent / os.environ.get("EVAL_RESULT_FILE", "eval_results.json")
+
 from src.core.config import settings
 from src.core.llm import get_chat_llm, ainvoke_nonempty
 from src.core.llm_json import extract_json
@@ -60,8 +66,19 @@ def load_full_dataset() -> list[dict]:
 # ============================================================
 def get_judge_llm() -> ChatOpenAI:
     """获取评判用 LLM。max_retries=0：SDK 内置重试会把每次 429 变成 3 连击，
-    在中转限额紧张时火上浇油——重试统一交给 _judge 的长间隔策略"""
-    return get_chat_llm(
+    在中转限额紧张时火上浇油——重试统一交给 _judge 的长间隔策略
+
+    判官模型可用环境变量 EVAL_JUDGE_MODEL 单独指定（默认跟随 .env 的 LLM_MODEL）。
+    这样「谁的答案」和「谁打分」可以分开配：生成用一个模型，判官用另一个，
+    避免同一个模型自己评自己。
+    """
+    # 优先级：环境变量 > .env 的 EVAL_JUDGE_MODEL > 跟随 LLM_MODEL
+    judge_model = (
+        os.environ.get("EVAL_JUDGE_MODEL", "").strip()
+        or getattr(settings, "eval_judge_model", "")
+        or ""
+    )
+    kwargs = dict(
         temperature=0.1,  # 低温度，评判更稳定
         # 2026-10-09：1500 会截断长答案的判官 JSON（四维+幻觉清单+理由），
         # 表现为"判官输出无法解析"的系统性失败（两轮各 35/25 题）——实测 4000 稳定
@@ -71,6 +88,15 @@ def get_judge_llm() -> ChatOpenAI:
         # legend 口径），结构化判官必须关思考
         reasoning_effort="none",
     )
+    if judge_model:
+        kwargs["model"] = judge_model
+        # 不同模型的参数支持不一致：kimi-k3 只接受 temperature=1（否则 400
+        # "only 1 is allowed for this model"）；reasoning_effort 也未必支持，
+        # 一并去掉，让模型用它自己的默认值。
+        kwargs["temperature"] = 1
+        kwargs.pop("reasoning_effort", None)
+        print(f"判官模型（独立配置）: {judge_model}（temperature=1，不传 reasoning_effort）")
+    return get_chat_llm(**kwargs)
 
 
 # ============================================================
@@ -279,6 +305,7 @@ async def get_system_answer(question: str, scene: str = "persona", character: st
             json={
                 "query": question,
                 "character_id": character,
+                "retrieval_mode": RETRIEVAL_MODE,
             }
         )
 
@@ -290,6 +317,7 @@ async def get_system_answer(question: str, scene: str = "persona", character: st
             "answer": data.get("answer", ""),
             "contexts": data.get("contexts", []),
             "retrieval_trace": data.get("retrieval_trace", {}),
+            "route_history": data.get("route_history", []),
         }
 
 
@@ -302,7 +330,7 @@ def _save_progress(results: list) -> None:
     110 题连跑要 1.5-3 小时，中途被中断（手动停 / 崩溃 / 断电）不应丢掉
     已完成的题。只保证 results 可被断点续跑读取，summary 留到结尾统一写。
     """
-    path = Path(__file__).parent / "eval_results.json"
+    path = RESULT_PATH
     try:
         path.write_text(
             json.dumps({"results": results}, ensure_ascii=False, indent=2),
@@ -323,6 +351,18 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     if limit:
         dataset = dataset[:limit]
 
+    # 按角色分层抽样（EVAL_PER_CHARACTER=N，每角色取前 N 题），用于快速看方向
+    _per = os.environ.get("EVAL_PER_CHARACTER")
+    if _per:
+        from collections import Counter as _C
+        _n = int(_per); _seen = _C(); _picked = []
+        for _it in dataset:
+            _c = _it.get("character", "jung")
+            if _seen[_c] < _n:
+                _picked.append(_it); _seen[_c] += 1
+        dataset = _picked
+        print("分层抽样:", dict(_seen))
+
     print(f"\n测试集大小: {len(dataset)} 个问题")
     if difficulty:
         print(f"难度筛选: {difficulty}")
@@ -334,7 +374,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     # 存储结果（断点续跑：加载已完成的有效记录，本次只补缺口）
     results = []
     done_questions: set[str] = set()
-    _prev_path = Path(__file__).parent / "eval_results.json"
+    _prev_path = RESULT_PATH
     if _prev_path.exists() and not difficulty:
         try:
             _prev = json.loads(_prev_path.read_text(encoding="utf-8")).get("results", [])
@@ -404,6 +444,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             "contexts": contexts,  # 保存检索上下文：支持事后用不同判规对同一批答案重评
             # 过程记录（每路召回名次等）：判官不用，只给 scripts/analyze_injection.py 归因
             "retrieval_trace": system_response.get("retrieval_trace", {}),
+            "route_history": system_response.get("route_history", []),
             "evaluation": eval_result,
             "timing": {
                 "answer_seconds": elapsed,
@@ -414,7 +455,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         # 每题落盘：中途中断不丢已完成的结果（见 _save_progress）
         _save_progress(results)
         done_n = len([r for r in results if r.get("evaluation")])
-        print(f"     [进度] 已落盘 {done_n} 题 → tests/eval_results.json")
+        print(f"     [进度] 已落盘 {done_n} 题 → {RESULT_PATH.name}")
 
         # 题间节流：每题 2 次 LLM 调用（1 生成 + 1 判官五维合一），连打会触发
         # 中转服务的 rpm/tpm 配额（429），整轮报废。需要时用 --pace-sec 控制节奏
@@ -485,8 +526,8 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     print(f"   • 平均回答耗时: {avg_answer_time:.1f}s")
     print(f"   • 总回答耗时: {total_answer_time:.1f}s")
 
-    # 保存详细结果
-    output_path = Path(__file__).parent / "eval_results.json"
+    # 保存详细结果（必须跟落盘同一路径，否则小样本跑批会覆盖主结果文件）
+    output_path = RESULT_PATH
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({
             "summary": {

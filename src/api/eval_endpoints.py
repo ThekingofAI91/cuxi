@@ -31,6 +31,11 @@ class EvalQueryRequest(BaseModel):
     """评估查询请求（返回检索上下文）"""
     query: str
     character_id: Optional[str] = "jung"
+    # 检索模式，仅评测用：
+    #   full        = 现行管线（向量 + BM25 → RRF → 两段式精排 + 图谱按需）
+    #   vector_only = 基线：只用向量取 top-6，不做 BM25 / 融合 / 精排 / 图谱
+    # 用来回答「这套管线比朴素 RAG 强多少」，README 评测一节记着这是缺口。
+    retrieval_mode: str = "full"
 
 
 @router.post("/persona/eval_query")
@@ -51,6 +56,66 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
     set_scene_config(_dc_replace(persona_chat_config, chroma_collection=character.chroma_collection))
 
     try:
+        # ---- 模式 agent：走线上真实链路（模型经 Tool Calling 自决检索 + 多轮）----
+        # 为什么需要这一档：full / vector_only 是「代码强制检索 + analysis_agent 一次生成」，
+        # 属于隔离变量的实验链路，能测「检索改进有没有用」，但**测不到线上真实行为**——
+        # 模型自决查不查、寒暄直出、多轮追加检索，这些在隔离链路里根本不会发生。
+        # 2026-10-31 实测：历史 166 题的 contexts 无一为空，即模型从未获得"决定不查"的机会。
+        if request.retrieval_mode == "agent":
+            from framework.supervisor_agent import run_supervisor_agent
+            from src.api.deps import sampling_for as _sampling_for
+            from src.retrieval.stitch import with_continuation as _stitch_agent
+            from scenes.persona_chat.prompt_builder import (
+                build_post_history_directive as _build_post_history_directive,
+                compose_lorebook_scan_text as _compose_lorebook_scan_text,
+            )
+
+            agent_state = {
+                "query": request.query,
+                "session_id": "eval",
+                "history": [],
+                "zone": getattr(character, "zone", "education"),
+                "character_role_prompt": build_character_prompt(character, query=request.query),
+                "stream_callback": None,
+                # 以下三项与线上 routes.py:1236-1259 同口径，否则生成分布与线上不同：
+                # sampling 是按角色配的采样覆盖（温度等），空 dict 会退回全局默认
+                "sampling": _sampling_for(character),
+                # 后历史指令：线上在历史之后重钉一次角色防漂移；评测无历史，scan_text 传空历史
+                "post_history_directive": _build_post_history_directive(
+                    character, query=request.query,
+                    scan_text=_compose_lorebook_scan_text(request.query, []),
+                ),
+                "enable_verification": getattr(character, "enable_verification", False),
+                # 刻意与线上不同：评测是单轮独立题，故不带会话历史与长期记忆
+                "user_memory": "",
+                "route_history": [],
+                "retrieved_docs": [],
+                "analysis": "",
+                "final_answer": "",
+                "code_result": "",
+                "verification": "",
+                "next_agent": None,
+                "error": None,
+                "retrieval_trace": None,
+                "info_gap_questions": None,
+            }
+            result = await run_supervisor_agent(agent_state)
+            docs = result.get("retrieved_docs") or []
+            ctxs = [
+                _stitch_agent(d.page_content or "", d.metadata or {})[0]
+                for d in docs
+            ]
+            routes = result.get("route_history") or []
+            print(f"[Eval Query][agent] 检索 {len(docs)} 段 | route 记录 {len(routes)} 条")
+            return {
+                "answer": result.get("final_answer", "") or result.get("analysis", ""),
+                "contexts": ctxs,
+                "analysis": (result.get("analysis") or "")[:500],
+                "retrieval_trace": result.get("retrieval_trace") or {},
+                "route_history": routes,
+                "retrieved": len(docs),
+            }
+
         from langchain_core.documents import Document
         from src.retrieval.embedder import get_embedder
         from src.retrieval.advanced_search import advanced_retrieval
@@ -72,11 +137,16 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # trace 只在评测端点启用：把每一路召回名次带出来，供离线脚本做
         # 「这个配置为什么没赚分」的归因；生产路径不传，采集分支全部跳过。
         trace = RetrievalTrace(question=request.query, character=character_id)
+        # 基线模式：关掉 BM25、融合与精排，只用向量取前 6 条。
+        # anchor_k 只在精排开启时有意义，这里一并归零，避免留下「直通 3 条」的痕迹。
+        vector_only = request.retrieval_mode == "vector_only"
         retrieved_docs, contexts = await advanced_retrieval(
             question=request.query,
             collection=collection,
             top_k=6,
-            anchor_k=settings.rerank_anchor_k,
+            use_bm25=not vector_only,
+            use_rerank=not vector_only,
+            anchor_k=0 if vector_only else settings.rerank_anchor_k,
             trace_out=trace,
         )
 
@@ -99,7 +169,12 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
             "triggered": False, "reason": "", "available": False,
             "matched": 0, "seeds": [], "edges": 0, "evidence": 0, "added": 0,
         }
-        if settings.graph_rag_enabled and graph_exists(collection.name):
+        # graph_exists 必须在条件里就用，所以提到 if 之前导入。
+        # 此前它只在 if 内部 import，图谱开关为真时直接 NameError，
+        # 整条端点挂掉、answer 变成 "ERROR: name 'graph_exists' is not defined"。
+        from src.retrieval.knowledge_graph import graph_exists as _graph_exists
+
+        if settings.graph_rag_enabled and _graph_exists(collection.name) and not vector_only:
             try:
                 from src.retrieval.knowledge_graph import (
                     retrieve_graph_context,

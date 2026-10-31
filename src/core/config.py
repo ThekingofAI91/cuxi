@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     # 备用模型：主模型额度用完/不可用时自动切换（留空则不启用 fallback）
     llm_fallback_model: str = ""
+    # 评测判官专用模型：留空则跟随 llm_model（自己评自己）。
+    # 填上就与生成模型解耦——「谁的答案」和「谁打分」分开，避免同源自评。
+    # 注意不同模型参数支持不同：kimi-k3 只接受 temperature=1（见 tests/eval_rag.py）。
+    eval_judge_model: str = ""
     llm_temperature: float = 0.7
     llm_max_tokens: int = 2000
     # 稳定性：单次 LLM 请求超时（秒）+ 失败重试次数（默认重试 2 次）
