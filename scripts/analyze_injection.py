@@ -21,12 +21,17 @@ import argparse
 import json
 import re
 import statistics as st
+import sys
 from collections import Counter
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from src.core.evaluation import get_eval_result_path, get_score_scale
+
 DATASET = ROOT / "tests" / "eval_dataset_expanded.json"
-DEFAULT = ROOT / "tests" / "eval_results.json"
+DEFAULT = get_eval_result_path()
 
 SENTENCE_ENDS = "。！？!?…；;"
 CITE_RE = re.compile(r"\[(\d+)\]")
@@ -241,7 +246,8 @@ def main() -> None:
     data = load(args.input)
     rows = [per_question(r, cmap) for r in data.get("results", [])]
 
-    report(args.input.name, rows)
+    scale = get_score_scale(data)
+    report(f"{args.input.name}（{scale['min']}–{scale['max']} 分制）", rows)
     by_character(rows)
 
     s = data.get("summary") or {}

@@ -6,6 +6,7 @@
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -223,6 +224,10 @@ class Settings(BaseSettings):
 
     # ---- Agent 配置 ----
     max_history_turns: int = 5
+    # 超出完整历史窗口的轮次合并为滚动摘要；字符上限由代码校验。
+    history_summary_max_chars: int = Field(default=1000, ge=1)
+    # 检索前的相关历史摘要在请求内执行，超时回退当前问题，避免拖住回答。
+    history_query_summary_timeout: float = Field(default=8.0, gt=0)
 
     # ---- API 配置 ----
     api_host: str = "127.0.0.1"

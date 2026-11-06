@@ -19,6 +19,7 @@ Supervisor Agent —— 一对一对话的唯一执行体。
 
 成本边界（面试要能报数）：
     模型直答 = 1 次 LLM 往返；模型请求检索 = 2 次（1 次决策带生成 + 1 次依资料作答）。
+    开启历史感知且有可用背景预算时，检索前额外调用 1 次 LLM 提炼相关历史。
     轮数上限 = tool_max_rounds + 1，最后一轮不带工具，逼出答案而不是继续要资料。
 
 进度事件：
@@ -33,6 +34,7 @@ Supervisor Agent —— 一对一对话的唯一执行体。
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -42,7 +44,7 @@ from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
 
 from src.core.config import settings
-from src.core.llm import LLMEmptyResponseError, get_chat_llm
+from src.core.llm import LLMEmptyResponseError, ainvoke_nonempty, get_chat_llm
 from src.core.logger import stage_mark
 from src.core.state import AgentState
 from src.retrieval.knowledge_graph import graph_exists
@@ -104,34 +106,75 @@ _ZONE_HINTS = {
 # - 旧 vector_search 会对全部文档重新 embedding（本地模型推理，几万条极慢）；
 # - advanced_search 内部已分页拉取文档，并使用 ChromaDB 原生向量查询（入库时已存向量）。
 
-# bge-small-zh-v1.5 的窗口是 512 token（中文约 1 token/字 ≈ 507 字符）。
-# 历史感知检索把最近两轮对话拼进查询，长历史 + 长问题会把"当前用户问题"
-# 整个挤出窗口——拼接文本从右侧截断，真实问题根本进不了向量，检索完全失焦。
-# 对策：默认装配不变（绝大多数查询 < 460 字符，零行为变化）；
-# 超预算时逐级压缩历史长度——历史可以截，当前问题不能丢。
-_QUERY_CHAR_BUDGET = 460  # 512 token 留出分词开销安全余量
+# 检索查询总预算包含相关背景、分隔标签和当前问题。先给当前问题预留空间，
+# 剩余空间交给 LLM 摘要最近两轮，不再拼接历史原文或截取助手回答开头。
+_QUERY_CHAR_BUDGET = 450
 
 
-def build_history_aware_query(query: str, recent: list[tuple[str, str]]) -> str:
-    """拼接历史感知检索查询；超预算时逐级压缩历史，保证当前问题完整进窗口"""
-    def _assemble(ans_cap: int, q_cap: Optional[int] = None) -> str:
-        ctx_lines = []
-        for q, a in recent:
-            if q:
-                ctx_lines.append(f"用户：{q if q_cap is None else q[:q_cap]}")
-            if a:
-                ctx_lines.append(f"助手：{a[:ans_cap]}")
-        return ("以下是最近的对话（用于理解指代和上下文）：\n"
-                + "\n".join(ctx_lines) + "\n\n当前用户问题：\n" + query)
+def _bounded_query(query: str) -> str:
+    """摘要不可用时保留当前问题；超长问题同时保留开头与末尾提问。"""
+    if len(query) <= _QUERY_CHAR_BUDGET:
+        return query
+    separator = "\n…\n"
+    head_chars = (_QUERY_CHAR_BUDGET - len(separator)) // 2
+    tail_chars = _QUERY_CHAR_BUDGET - len(separator) - head_chars
+    return query[:head_chars] + separator + query[-tail_chars:]
 
-    question = _assemble(120)
-    if len(question) > _QUERY_CHAR_BUDGET:
-        for ans_cap, q_cap in ((80, 80), (50, 50), (30, 30), (0, 0)):
-            question = _assemble(ans_cap, q_cap)
-            if len(question) <= _QUERY_CHAR_BUDGET:
-                break
-        print(f"[Retrieval] 历史过长，已压缩至 {len(question)} 字符（保当前问题）")
-    return question
+
+async def build_history_aware_query(query: str, recent: list[tuple[str, str]]) -> str:
+    """LLM 提炼与当前问题有关的背景再拼接，总长度硬限制为 450 字符。
+
+    当前问题在预算内时原文保留。问题本身超长时由 LLM 压成检索问题，
+    仅改变检索输入，回答用的用户问题仍由 build_direct_messages 完整注入。
+    """
+    recent = recent[-2:]
+    prefix, separator = "相关背景：", "\n当前问题："
+    summary_budget = _QUERY_CHAR_BUDGET - len(prefix) - len(separator) - len(query)
+    compact_query = len(query) > _QUERY_CHAR_BUDGET
+    if not compact_query and (not recent or summary_budget <= 0):
+        return query
+
+    if compact_query:
+        output_budget = _QUERY_CHAR_BUDGET
+        instruction = f"""结合最近对话理解当前问题，把当前问题压缩成一个可独立检索的问题。
+只保留当前问题的核心意图、限定条件，以及消解指代所需的背景。
+必须保留关键概念、人名、书名、数字和日期，不得编造事实，不要回答问题。
+只输出检索问题，不要解释，严格控制在 {output_budget} 字符以内。"""
+    else:
+        output_budget = summary_budget
+        instruction = f"""为知识库检索提炼最近对话中与当前问题直接有关的背景。
+识别当前问题里的“它”“那个”“这”等指代，保留对应的具体概念和必要关系。
+忽略寒暄、无关话题和重复讨论；不要复述当前问题，也不要回答问题。
+必须原样保留必要的人名、书名、数字和日期，不得编造事实。
+只输出背景摘要，不要标签或解释，严格控制在 {output_budget} 字符以内。
+若没有相关背景，输出空字符串。"""
+
+    context = json.dumps({
+        "最近对话": [{"用户": q, "助手": a} for q, a in recent],
+        "当前问题": query,
+    }, ensure_ascii=False)
+    try:
+        llm = get_chat_llm(
+            temperature=0.1,
+            max_tokens=max(64, output_budget * 2),
+            request_timeout=settings.history_query_summary_timeout,
+            max_retries=0,
+        )
+        response = await asyncio.wait_for(
+            ainvoke_nonempty(llm, [("system", instruction), ("user", context)], attempts=0),
+            timeout=settings.history_query_summary_timeout,
+        )
+        summary = (response.content or "").strip()
+        if not summary or summary == '""':
+            return _bounded_query(query)
+        # 字符数由代码兜底；正常问题只截摘要，不截当前问题。
+        summary = summary[:output_budget]
+        if compact_query:
+            return summary
+        return prefix + summary + separator + query
+    except Exception as e:
+        print(f"[Retrieval] 相关历史摘要不可用，回退当前问题: {e}")
+        return _bounded_query(query)
 
 
 async def retrieve_documents(
@@ -185,18 +228,18 @@ async def retrieve_documents(
         top_k = 6
 
         # 轻量检索（工具 strong=false）：跳过 Cross-Encoder 重排、跳过知识图谱，
-        # 仅用原始问题做向量+BM25 召回 top-3 作为软背景（不引用），换更快首字。
+        # 用检索问题做向量+BM25 召回 top-3 作为软背景（不引用）。
         if light_retrieval:
             top_k = 3
             print(f"[Retrieval] 轻量召回（strong=false）：跳过重排/图谱，top_k={top_k}")
 
         # ---- 历史感知检索 ----
-        # 场景开启 history_aware_retrieval 时（如名人对话），将最近几轮对话拼入检索 query，
-        # 解决指代性问题（"那个梦"、"这跟它有什么关系"）检索不到前文上下文的问题。
+        # 场景开启 history_aware_retrieval 时，先摘要最近两轮的相关背景，
+        # 再拼当前问题；向量、BM25、精排与图谱共用这份不超过 450 字符的查询。
         question = query
-        if config and getattr(config, 'history_aware_retrieval', False) and history:
-            question = build_history_aware_query(query, history[-2:])
-            print(f"[Retrieval] 历史感知检索（拼接最近 {min(len(history), 2)} 轮对话，{len(question)} 字符）")
+        if config and getattr(config, 'history_aware_retrieval', False):
+            question = await build_history_aware_query(query, history[-2:])
+            print(f"[Retrieval] 历史感知检索（相关背景摘要 + 当前问题，{len(question)} 字符）")
 
         retrieved_docs, _contexts = await advanced_retrieval(
             question=question,

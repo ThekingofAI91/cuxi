@@ -7,6 +7,9 @@ RAG 评估脚本 - LLM-as-Judge
 2. Answer Relevancy（回答相关性）：回答是否切题
 3. Context Precision（上下文精确度）：检索的上下文是否与问题相关
 4. Key Points Coverage（要点覆盖率）：回答是否覆盖了关键要点
+5. Voice Consistency（口吻一致性）：说话方式是否符合人物设定
+
+五个维度均采用 1–5 整数分，均分保留小数；新结果默认写入 eval_results_5point.json。
 
 项目定制（2026-08-30）：
 - 被测系统是「名人角色扮演对话」应用，舞台指令/角色口吻/文学比喻是预期产品行为，
@@ -20,7 +23,6 @@ RAG 评估脚本 - LLM-as-Judge
 import asyncio
 import json
 import os
-import re
 import sys
 import time
 from pathlib import Path
@@ -29,11 +31,16 @@ from typing import Optional
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.core.evaluation import (
+    METRICS, SCORE_MAX, SCORE_SCALE, get_eval_result_path,
+    normalize_score, require_current_score_scale,
+)
+
 # 评测配置（环境变量控制，用于同一批题跑不同检索模式做配对比较）
 #   EVAL_RETRIEVAL_MODE = full | vector_only
 #   EVAL_RESULT_FILE    = 结果文件名（相对 tests/），两组必须不同，否则续跑会跳过
 RETRIEVAL_MODE = os.environ.get("EVAL_RETRIEVAL_MODE", "full")
-RESULT_PATH = Path(__file__).parent / os.environ.get("EVAL_RESULT_FILE", "eval_results.json")
+RESULT_PATH = get_eval_result_path()
 
 from src.core.config import settings
 from src.core.llm import get_chat_llm, ainvoke_nonempty
@@ -117,18 +124,21 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 ## 关键要点
 {key_points}
 
-## 评判规则（四个维度，全部针对本项目定制）
+## 评判规则（五个维度，全部针对本项目定制）
+每个维度只能选择 1、2、3、4、5 中的一个整数，不允许 0 分、小数或区间。
+5 分优秀，4 分良好，3 分一般，2 分较差，1 分很差；按各维度锚点判断。
+先排查严重缺陷，再判断是否满足高档条件；同时符合多个档位时，选择较低档。
 
-### 1. 忠实度 faithfulness（0-10）
+### 1. 忠实度 faithfulness（1-5）
 只考察回答的**实质论断**是否忠于上下文，**表达风格完全不参与评分**：
 - 不计分、绝不扣分：舞台指令与动作描写（如 *荣格轻轻叩了叩桌面*）、角色语气词、
   开场白/客套、戏剧化修辞与文学比喻、对上下文已有概念的通俗化复述、公认常识
 - 需逐条核查的实质论断：概念解释是否与上下文一致；具体事实（数字/年份/著作名/事件）；
   著作归属（"我在《X》中写过"——上下文有 → 忠实，完全找不到 → 幻觉）；
   第一人称经历（上下文有记载 → 忠实；完全没有且属具体事实陈述 → 幻觉）；与上下文矛盾 → 幻觉
-- 锚点：9-10 全部有依据 | 7-8 个别模糊但无编造 | 4-6 有 1-2 处无依据论断 | 0-3 大量编造
+- 锚点：5 全部实质论断有依据 | 4 个别表述模糊但无编造 | 3 有 1-2 处非核心的无依据论断 | 2 有多处无依据论断、核心论断无依据或与上下文矛盾，但仍有部分内容可信 | 1 大量编造，主要内容不可信
 
-### 2. 回答相关性 relevancy（0-10）
+### 2. 回答相关性 relevancy（1-5）
 只看**实质内容**是否回应了问题本身；表达形式完全不参与评分：
 - 不计分、绝不扣分：角色口吻与语气词、舞台指令与动作描写、寒暄式开场/收尾、
   口语化重复与口头禅、为了入戏而做的场景铺垫（前提是随后回到问题本身）
@@ -136,19 +146,19 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
   使用这个技巧的？"是两问，每一问都应有对应回应）；回应是否触到问题的**所问角度**
   （问"原因"就要给原因、问"区别"就要给区别，只复述概念定义而回避所问角度 → 该问算漏答）；
   延伸与反问不算跑题，但延伸占比过半且挤掉核心回应 → 按低档评
-- 锚点：9-10 实质内容直接回应问题的每一个子问 | 7-8 主体回应，夹杂少量延伸但无漏答 | 4-6 漏掉问题的一个核心子问，或回应浮于表面 | 0-3 答非所问
+- 锚点：5 实质内容直接回应问题的每一个子问 | 4 主体回应，夹杂少量延伸但无漏答 | 3 漏掉一个核心子问，或回应浮于表面 | 2 仅回应少量问题内容，大部分核心诉求未回应 | 1 答非所问
 
-### 3. 上下文精确度 context_precision（0-10）
+### 3. 上下文精确度 context_precision（1-5）
 评的是**检索质量**：注入的上下文里有没有回答该问题所需的信息、无关内容占多少：
 - 不算无关、不扣分：与问题同一话题下的相邻观点、人物/概念的背景铺垫、
   对已检索到概念的其他角度论述、二手文献中对原著观点的转述（内容本身相关即算）
 - 算无关：与问题话题明显不相干的片段（如问"共时性"却整段讲心理类型分类、
   问某事件却整段是另一本书的美学论述）；仅因个别关键词撞车而命中的段落
 - 需逐条核查的两点：①全部片段中至少 1-2 条含回答所需的核心信息（定义/观点/事例/数字）；
-  ②通读后估计无关内容占比（不足两成 → 不影响；两成到一半 → 7-8；过半 → 4-6）
-- 锚点：9-10 所需信息齐备，注入内容几乎全部相关 | 7-8 所需信息齐备或仅缺边角，夹杂少量无关内容 | 4-6 缺少回答所需的关键信息，或过半内容与问题无关 | 0-3 几乎没有回答该问题所需的信息
+  ②通读后估计无关内容占比（不足两成 → 不影响；两成到一半 → 至多 4 分；过半 → 至多 3 分）
+- 锚点：5 所需信息齐备，注入内容几乎全部相关 | 4 所需信息齐备或仅缺边角，夹杂少量无关内容 | 3 缺少部分关键信息，或过半内容无关，但仍能支持部分核心回答 | 2 只有零散相关线索，无法支持核心回答 | 1 几乎没有回答该问题所需的信息
 
-### 4. 要点覆盖率 key_points_coverage（0-10）
+### 4. 要点覆盖率 key_points_coverage（1-5）
 把关键要点**逐条**与回答对照，只数"意思到位没有"，不数"表述像不像"：
 - 意思覆盖判定：要点被同义表述、更口语的说法、更具体的展开覆盖 → 算覆盖；
   顺序不同、拆开说、合并说都不影响
@@ -156,9 +166,9 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 - 例证豁免：缺失要点若只是对**已覆盖观点**的举例、比喻或类比补充（如"钻石因共识才有价值"
   "像石头从斜坡滚落"），视为已覆盖，不扣分；missed_points 只列独立要点
 - 算漏：独立的新观点、新事实、新论断（如"人脉的本质是价值交换"）未在回答中出现任何等价表述
-- 锚点：9-10 独立要点全部覆盖（例证类缺失不算漏） | 7-8 缺 1-2 个独立要点 | 4-6 缺 3 个及以上独立要点，或核心要点缺失 | 0-3 绝大多数要点未覆盖
+- 锚点：5 独立要点全部覆盖（例证类缺失不算漏） | 4 缺 1-2 个非核心独立要点 | 3 缺 3 个及以上独立要点，或核心要点缺失，但仍覆盖至少一半独立要点 | 2 多数独立要点未覆盖，只覆盖少量要点 | 1 几乎没有覆盖独立要点
 
-### 5. 口吻一致性 voice_consistency（0-10）
+### 5. 口吻一致性 voice_consistency（1-5）
 评「这个回答像不像语料里的那个人在说话」。风格参照 = 上下文语料中人物的**第一人称原话
 与论述方式**（用词习惯、比喻偏好、立论方式、立场），以及人物的时代与身份设定。
 与忠实度的分工：忠实度管「说的事实有没有依据」，本维管「说话的方式像不像本人」——
@@ -168,18 +178,18 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 - 算跳出角色（计入 out_of_character）：①现代咨询师/AI 助手腔（如"我们可以这样思考"
   "建议您""希望对你有帮助"）；②人物时代或身份不可能出现的概念与工具；③通用助手式
   表达（列要点模板腔、"首先其次最后"的教程腔）；④立场与语料中人物的公开立场相反
-- 锚点：9-10 语感、用词与比喻方式与语料原话如出一手，第一人称经验表述与语料记载一致，
-  挑不出跳角色之处 | 7-8 口吻与立场总体一致、专业内容转述准确，但语气偏平、缺少人物
-  的标志性表达方式 | 4-6 有 1-2 处跳出角色（AI 腔/现代腔/立场漂移），人物感时有时无 |
-  0-3 通篇 AI 助手腔，人物只剩名字
+- 锚点：5 语感、用词与比喻方式与语料原话如出一手，第一人称经验表述与语料记载一致，
+  挑不出跳角色之处 | 4 口吻与立场总体一致、专业内容转述准确，但语气偏平、缺少人物
+  的标志性表达方式 | 3 有 1-2 处跳出角色（AI 腔/现代腔/立场漂移），人物感时有时无 |
+  2 频繁跳出角色，仅少量表述保有人物感 | 1 通篇 AI 助手腔，人物只剩名字
 
 ## 输出格式（严格 JSON，不要输出 JSON 以外的任何文字）
 {{
-    "faithfulness": {{"score": 0-10整数, "reason": "实质论断核查结论（风格不参与）", "unsupported_claims": ["无依据论断，没有则空列表"]}},
-    "relevancy": {{"score": 0-10整数, "reason": "简短理由"}},
-    "context_precision": {{"score": 0-10整数, "reason": "简短理由"}},
-    "key_points_coverage": {{"score": 0-10整数, "reason": "简短理由", "covered_points": [], "missed_points": []}},
-    "voice_consistency": {{"score": 0-10整数, "reason": "口吻一致性简评", "out_of_character": ["跳出角色的表述，没有则空列表"]}}
+    "faithfulness": {{"score": 1-5整数, "reason": "实质论断核查结论（风格不参与）", "unsupported_claims": ["无依据论断，没有则空列表"]}},
+    "relevancy": {{"score": 1-5整数, "reason": "简短理由"}},
+    "context_precision": {{"score": 1-5整数, "reason": "简短理由"}},
+    "key_points_coverage": {{"score": 1-5整数, "reason": "简短理由", "covered_points": [], "missed_points": []}},
+    "voice_consistency": {{"score": 1-5整数, "reason": "口吻一致性简评", "out_of_character": ["跳出角色的表述，没有则空列表"]}}
 }}
 """
 
@@ -229,7 +239,7 @@ async def evaluate_single(
     contexts: list[str],
     key_points: list[str],
 ) -> dict:
-    """评估单个问题：单次判官调用返回四维评分（原 4 连发会自撞中转 rpm 限额）"""
+    """评估单个问题：单次判官调用返回五维评分，避免连续调用撞中转 rpm 限额。"""
     contexts_text = "\n\n---\n\n".join(contexts) if contexts else "（无上下文）"
     key_points_text = "\n".join(f"- {kp}" for kp in key_points)
 
@@ -242,44 +252,35 @@ async def evaluate_single(
         v = (obj or {}).get(metric)
         return v if isinstance(v, dict) else {}
 
-    def norm_score(v) -> int:
-        """judge 可能返回 int / float / '8分' / '8/10'，统一归一为 0-10 整数"""
-        if isinstance(v, bool):
-            return 5
-        if isinstance(v, (int, float)):
-            return max(0, min(10, int(v)))
-        if isinstance(v, str):
-            m = re.search(r"(\d{1,2})\s*/?\s*10?", v)
-            if m:
-                return max(0, min(10, int(m.group(1))))
-        return 5
-
     def metric(sd: dict) -> Optional[int]:
-        return norm_score(sd.get("score")) if sd and "score" in sd else None
+        return normalize_score(sd.get("score")) if sd and "score" in sd else None
 
     f, r, c, k = sub("faithfulness"), sub("relevancy"), sub("context_precision"), sub("key_points_coverage")
     v = sub("voice_consistency")
-    return {
+    scores = {
         "faithfulness": metric(f),
         "relevancy": metric(r),
         "context_precision": metric(c),
         "key_points_coverage": metric(k),
         "voice_consistency": metric(v),
+    }
+    return {
+        **scores,
         "details": {
             "faithfulness_reason": f.get("reason", "判官输出无法解析"),
             "faithfulness_unsupported_claims": f.get("unsupported_claims", []),
-            "faithfulness_parse": "ok" if f else "failed",
+            "faithfulness_parse": "ok" if scores["faithfulness"] is not None else "failed",
             "relevancy_reason": r.get("reason", "判官输出无法解析"),
-            "relevancy_parse": "ok" if r else "failed",
+            "relevancy_parse": "ok" if scores["relevancy"] is not None else "failed",
             "context_precision_reason": c.get("reason", "判官输出无法解析"),
-            "context_precision_parse": "ok" if c else "failed",
+            "context_precision_parse": "ok" if scores["context_precision"] is not None else "failed",
             "key_points_reason": k.get("reason", "判官输出无法解析"),
             "covered_points": k.get("covered_points", []),
             "missed_points": k.get("missed_points", []),
-            "key_points_parse": "ok" if k else "failed",
+            "key_points_parse": "ok" if scores["key_points_coverage"] is not None else "failed",
             "voice_reason": v.get("reason", "判官输出无法解析"),
             "voice_out_of_character": v.get("out_of_character", []),
-            "voice_parse": "ok" if v else "failed",
+            "voice_parse": "ok" if scores["voice_consistency"] is not None else "failed",
         },
     }
 
@@ -333,7 +334,7 @@ def _save_progress(results: list) -> None:
     path = RESULT_PATH
     try:
         path.write_text(
-            json.dumps({"results": results}, ensure_ascii=False, indent=2),
+            json.dumps({"score_scale": SCORE_SCALE, "results": results}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
     except Exception as e:
@@ -343,7 +344,7 @@ def _save_progress(results: list) -> None:
 async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: float = 0.0):
     """运行完整评估"""
     print("=" * 60)
-    print("RAG 评估开始")
+    print(f"RAG 评估开始（五维，1–{SCORE_MAX} 分制）")
     print("=" * 60)
 
     # 获取测试集
@@ -375,17 +376,20 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     results = []
     done_questions: set[str] = set()
     _prev_path = RESULT_PATH
-    if _prev_path.exists() and not difficulty:
+    if _prev_path.exists():
         try:
-            _prev = json.loads(_prev_path.read_text(encoding="utf-8")).get("results", [])
-            for r in _prev:
-                if isinstance(r, dict) and r.get("question") and r.get("evaluation"):
-                    results.append(r)
-                    done_questions.add(r["question"])
-            if done_questions:
-                print(f"断点续跑：已有 {len(done_questions)} 题有效结果，本次只补缺口")
+            _prev_data = json.loads(_prev_path.read_text(encoding="utf-8"))
         except Exception as e:
             print(f"断点文件加载失败，从头评估: {e}")
+        else:
+            require_current_score_scale(_prev_data, _prev_path)
+            if not difficulty:
+                for r in _prev_data.get("results", []):
+                    if isinstance(r, dict) and r.get("question") and r.get("evaluation"):
+                        results.append(r)
+                        done_questions.add(r["question"])
+                if done_questions:
+                    print(f"断点续跑：已有 {len(done_questions)} 题有效结果，本次只补缺口")
     total_start = time.time()
 
     for i, item in enumerate(dataset, 1):
@@ -429,7 +433,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         eval_elapsed = time.time() - eval_start
 
         print(f"     评估耗时: {eval_elapsed:.1f}s")
-        print(f"     评分: 忠实度={eval_result['faithfulness']}, "
+        print(f"     评分（1–{SCORE_MAX} 分）: 忠实度={eval_result['faithfulness']}, "
               f"相关性={eval_result['relevancy']}, "
               f"上下文={eval_result['context_precision']}, "
               f"要点={eval_result['key_points_coverage']}, "
@@ -473,7 +477,6 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
         print("没有有效的评估结果")
         return
 
-    METRICS = ["faithfulness", "relevancy", "context_precision", "key_points_coverage", "voice_consistency"]
     METRIC_NAMES = {
         "faithfulness": "忠实度 (Faithfulness)",
         "relevancy": "回答相关性 (Relevancy)",
@@ -498,7 +501,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             print(f"   • {label:<28} 无有效评判")
         else:
             note = "" if cnt == n else f"（{n - cnt} 题判官输出无法解析，未计入）"
-            print(f"   • {label:<28} {avg:.1f}/10  [{cnt}/{n}]{note}")
+            print(f"   • {label:<28} {avg:.1f}/{SCORE_MAX}  [{cnt}/{n}]{note}")
 
     failed_metrics = sum(n - judged[m] for m in METRICS)
     if failed_metrics:
@@ -516,7 +519,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
                 if r["evaluation"].get(m) is not None
             ]
             if vals:
-                print(f"   • {diff:6s}: {sum(vals) / len(vals):.1f}/10 ({len(diff_results)} 题)")
+                print(f"   • {diff:6s}: {sum(vals) / len(vals):.1f}/{SCORE_MAX} ({len(diff_results)} 题)")
 
     # 耗时统计
     avg_answer_time = sum(r["timing"]["answer_seconds"] for r in results) / len(results)
@@ -530,12 +533,14 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     output_path = RESULT_PATH
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({
+            "score_scale": SCORE_SCALE,
             "summary": {
                 "total_questions": len(results),
                 "avg_faithfulness": round(avgs["faithfulness"], 2) if avgs["faithfulness"] is not None else None,
                 "avg_relevancy": round(avgs["relevancy"], 2) if avgs["relevancy"] is not None else None,
                 "avg_context_precision": round(avgs["context_precision"], 2) if avgs["context_precision"] is not None else None,
                 "avg_key_points_coverage": round(avgs["key_points_coverage"], 2) if avgs["key_points_coverage"] is not None else None,
+                "avg_voice_consistency": round(avgs["voice_consistency"], 2) if avgs["voice_consistency"] is not None else None,
                 "judged_counts": judged,
                 "total_time_seconds": round(total_elapsed, 1),
             },
@@ -551,7 +556,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
 
     def warn_if_low(metric: str, msg: str) -> None:
         avg, cnt = avg_of(metric)
-        if avg is not None and cnt >= max(3, n // 2) and avg < 7:
+        if avg is not None and cnt >= max(3, n // 2) and avg < 4:
             print(f"   {msg}")
 
     warn_if_low("faithfulness", "忠实度偏低：回答可能包含幻觉，建议优化 prompt 或增加检索量")
@@ -559,7 +564,7 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     warn_if_low("context_precision", "上下文精确度偏低：检索质量需要优化，建议调整 chunk_size 或 reranker")
     warn_if_low("key_points_coverage", "要点覆盖率偏低：回答不够完整，建议增加 retrieval_top_k")
 
-    if (avgs["faithfulness"] or 0) >= 8 and (avgs["relevancy"] or 0) >= 8:
+    if (avgs["faithfulness"] or 0) >= 4 and (avgs["relevancy"] or 0) >= 4:
         print("   整体表现良好！可以考虑增加更多测试问题来验证稳定性")
 
 

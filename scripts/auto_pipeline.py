@@ -26,6 +26,8 @@ ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(ROOT))
 os.chdir(ROOT)
 
+from src.core.evaluation import SCORE_MAX, get_eval_result_path, require_current_score_scale
+
 PROBE_INTERVAL = 180      # 3 分钟
 MAX_WAIT_ROUNDS = 60      # 最多守望 3 小时
 PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
@@ -120,7 +122,10 @@ def main() -> None:
                        env_extra={"EVAL_JUDGE_GAP_SEC": "25"}, timeout_s=5400)
     summary = {}
     try:
-        summary = json.loads((ROOT / "tests" / "eval_results.json").read_text(encoding="utf-8"))["summary"]
+        result_path = get_eval_result_path()
+        data = json.loads(result_path.read_text(encoding="utf-8"))
+        require_current_score_scale(data, result_path)
+        summary = data["summary"]
     except Exception:
         pass
     log(f"基线评估 summary: {json.dumps(summary, ensure_ascii=False)}")
@@ -140,9 +145,10 @@ def main() -> None:
         f"\n\n---\n\n#### 优化七十五（自动任务）：中转恢复，评估管线自动执行\n"
         f"- **触发**：守望者探测到中转恢复（连续 2 次有内容），自动按序执行。\n"
         f"- **评估集扩充**：{'已完成' if ok_gen else '未完成'}，{n_questions} 题（tests/eval_dataset_expanded.json，覆盖 jung/adler/wangyangming）。\n"
-        f"- **全量基线（含扩充题 + 合并判官）**：{'已完成' if ok_eval else '未完成'}，"
+        f"- **全量基线（含扩充题 + 合并判官，1–{SCORE_MAX} 分制）**：{'已完成' if ok_eval else '未完成'}，"
         f"忠实度 {summary.get('avg_faithfulness')} | 相关性 {summary.get('avg_relevancy')} | "
         f"上下文 {summary.get('avg_context_precision')} | 要点 {summary.get('avg_key_points_coverage')} | "
+        f"口吻 {summary.get('avg_voice_consistency')} | "
         f"有效评判数 {summary.get('judged_counts')} | 题数 {summary.get('total_questions')}。\n"
         f"- **建图战役**：已后台重启续传（--delay 8），进度见 output/graph_campaign3.log。\n"
         f"- **待办**：四项检索实验（改写开关 / RERANK_CANDIDATES=10 / 上下文压缩）待基线稳定后逐项 A/B。\n"

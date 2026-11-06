@@ -270,13 +270,10 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
         return
     async with _summary_lock:
         try:
-            # 格式化旧对话：用户输入完整保留，助手回答截断放宽
+            # 格式化旧对话：交给摘要模型选择要点，避免只看回答开头而丢掉后文事实。
             parts = []
             for q, a in turns:
-                # 用户输入必须完整保留（包含分数、日期等关键信息）
-                # 助手回答保留前 800 字符，足够包含核心内容
-                a_truncated = a[:800] + "..." if len(a) > 800 else a
-                parts.append(f"用户：{q}\n助手：{a_truncated}")
+                parts.append(f"用户：{q}\n助手：{a}")
             turns_text = "\n\n".join(parts)
 
             # 已有摘要则拼在前面（读磁盘，多 worker 下拿到的是最新的一份）
@@ -286,22 +283,37 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
             else:
                 context = turns_text
 
+            max_chars = settings.history_summary_max_chars
             llm = get_chat_llm(
                 temperature=0.1,  # 降低温度，减少摘要时的数字幻觉
-                max_tokens=600,
+                max_tokens=max_chars * 2,
             )
-            response = await llm.ainvoke([
-                ("system", """你是一个对话摘要专家。请将以下对话历史压缩为一段简洁的摘要。
+            instruction = f"""你是一个对话摘要专家。请将已有摘要与新增对话合并为简洁的滚动摘要。
 
 【关键要求】
 1. 必须原样保留用户提供的所有具体数字、分数、日期、名称等信息（如"558分"不能改成"561分"）
-2. 保留用户的核心问题和关注点
-3. 保留已给出的关键回答信息
-4. 去除重复的讨论
-5. 用中文输出，控制在 300 字以内"""),
+2. 保留用户背景、偏好、核心问题、关注点和尚未解决的问题
+3. 保留已给出的关键回答、结论与约定，不得编造事实
+4. 去除重复讨论；用户有更正时以最新信息为准
+5. 用中文输出，可分要点，严格控制在 {max_chars} 字符以内"""
+            response = await ainvoke_nonempty(llm, [
+                ("system", instruction),
                 ("user", context),
             ])
-            summary = response.content.strip()
+            summary = (response.content or "").strip()
+            if not summary:
+                raise ValueError("摘要为空，保留已有摘要")
+            if len(summary) > max_chars:
+                # 超限先让模型精简，尽量保留语义；仍超限才按字符上限兜底。
+                try:
+                    compact = await ainvoke_nonempty(llm, [
+                        ("system", instruction),
+                        ("user", f"以下摘要超出 {max_chars} 字符，请在保留关键事实的前提下进一步精简：\n{summary}"),
+                    ])
+                    summary = (compact.content or "").strip() or summary
+                except Exception as e:
+                    print(f"[Supervisor] 摘要二次精简失败，保留本次摘要并限制长度: {e}")
+                summary = summary[:max_chars]
             print(f"[Supervisor] 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
             try:
                 _get_session_store().set_summary(session_id, summary)
