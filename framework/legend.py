@@ -60,6 +60,7 @@ from scenes.persona_chat.legend_store import (
     FIELD_KIND_LABELS,
     LegendSave,
 )
+from scenes.persona_chat.skill_loader import legend_prompt_template
 from src.core.config import settings
 from src.core.llm import ainvoke_nonempty, astream_nonempty, get_chat_llm
 
@@ -243,6 +244,24 @@ def build_system_prompt(save: LegendSave) -> str:
     if save.has_state():
         state_rule = ("\n4. 每次回复的**最后**必须附上状态块（格式见文末「状态栏」）。"
                       "这是回复的一部分，漏掉即为不完整。")
+
+    # 契约正文外置在 data/persona_chat/skills/legend-narrator.md：
+    # 它是「输出格式的硬约束」（决定前端能否分色），属于内容而非逻辑，改动不该动代码。
+    # 技能包缺失时回退下面的内置模板，输出与改造前逐字相同（tests/test_skill_packs.py 校验）。
+    _tpl = legend_prompt_template()
+    if _tpl:
+        return (
+            _tpl.replace("{{state_rule}}", state_rule)
+            .replace("{{world}}", str(save.world or ""))
+            .replace("{{protagonist_name}}", str(save.protagonist_name or ""))
+            .replace(
+                "{{protagonist_desc}}",
+                f"：{save.protagonist_desc}" if save.protagonist_desc else "",
+            )
+            .replace("{{npc_block}}", npc_block)
+            .replace("{{style}}", style)
+            .replace("{{state_block}}", state_block)
+        )
 
     return f"""你是一款文字剧情游戏的**叙述者**，同时扮演这个世界里除主角以外的所有人。
 

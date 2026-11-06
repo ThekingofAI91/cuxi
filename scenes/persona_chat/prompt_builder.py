@@ -26,6 +26,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from scenes.persona_chat.skill_loader import resolve_role_prompt
+
 # 娱乐区专属语气指令：压掉 AI 味，强调查像真人微信聊天
 _ENTERTAINMENT_VOICE_DIRECTIVE = """【娱乐区口吻要求】（不要像 AI / 助手）
 - 像真人微信聊天：口语化、短句、可带语气词，别写长篇大论
@@ -174,7 +176,9 @@ def build_character_prompt(
     """
     parts: list[str] = []
 
-    base = (getattr(character, "role_prompt", "") or "").strip()
+    # 人设正文优先取技能包（data/persona_chat/skills/{id}.md），缺失时回退内联字段。
+    # 见 skill_loader：人设是内容不是逻辑，外置后可独立改动、不必动代码。
+    base = resolve_role_prompt(character)
     if base:
         parts.append(base)
 
