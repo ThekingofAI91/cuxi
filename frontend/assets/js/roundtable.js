@@ -3,7 +3,7 @@
 //
 // 与「问道 / 会心」同级的一种玩法：请两三位智者同桌，就一个议题各自判断要不要
 // 开口。多人同时举手时由用户点将；用户不想管，就让主持人代班。
-// 结尾只有纪要（分歧地图），不判胜负。
+// 结尾由主持人整理各方立场、分歧与适用条件，不判胜负。
 // ============================================================
 const rtState = {
   selected: new Set(),   // 已选与会者 id
@@ -436,8 +436,12 @@ async function handleRtEvent(data) {
 
     case 'converged':
       _rtNotice(data.reason === 'quota'
-        ? '发言额度已用完，会议到此为止。'
-        : '再无人举手，讨论自然收敛于此。', 'calm');
+        ? '发言额度已用完，讨论结束。'
+        : data.reason === 'rounds'
+          ? '本场交锋轮数已完成，讨论结束。'
+          : data.reason === 'budget'
+            ? '本场调用已达上限，讨论结束。'
+            : '暂时没有新的论点，讨论到此结束。', 'calm');
       _rtStageEach(s => s.classList.remove('raised', 'candidate', 'speaking'));
       break;
 
@@ -507,7 +511,7 @@ async function handleRtEvent(data) {
       // 纪要在 end 之后异步补推（非阻塞旁路），这里先立占位
       if (rtSummary) {
         rtSummary.hidden = false;
-        rtSummary.innerHTML = '<div class="rt-summary-loading">正在整理纪要…</div>';
+        rtSummary.innerHTML = '<div class="rt-summary-loading">主持人正在整理各方观点…</div>';
       }
       _rtScroll();
       break;
@@ -519,7 +523,7 @@ async function handleRtEvent(data) {
     case 'summary_error':
       if (rtSummary) {
         rtSummary.hidden = false;
-        rtSummary.innerHTML = `<div class="rt-summary-loading">${escapeHtml(data.content || '纪要暂时无法生成。')}</div>`;
+        rtSummary.innerHTML = `<div class="rt-summary-loading">${escapeHtml(data.content || '主持人总结暂时无法生成。')}</div>`;
       }
       break;
 
@@ -549,24 +553,28 @@ function _rtNameOf(id) {
 }
 
 // ============================================================
-// 纪要（分歧地图）
+// 主持人总结
 //
-// 系统不判胜负，只把"你们在哪吵、吵的是什么"摆清楚；怎么想留给你。
-// 因此这里没有胜负位，只有：交锋线 / 各方主张 / 悬而未决 / 你自己怎么看。
+// 保留各方立场与分歧，按发言中明确的条件说明如何运用，不以一致为结束前提。
 // ============================================================
 function _rtRenderSummary(d) {
   if (!rtSummary) return;
-  const clashes = d.clashes || [];
-  const positions = d.positions || [];
-  const openItems = d.open || [];
+  const clashes = Array.isArray(d.clashes) ? d.clashes : [];
+  const positions = Array.isArray(d.positions) ? d.positions : [];
+  const openItems = Array.isArray(d.open) ? d.open : [];
+  const applications = Array.isArray(d.applications) ? d.applications : [];
+  const closing = typeof d.closing === 'string' ? d.closing.trim() : '';
 
   let html = '<div class="rt-summary-card">';
   html += `<div class="rt-summary-head">
-      <span class="rt-summary-title">纪要</span>
-      <span class="rt-summary-note">只记录，不判胜负</span>
+      <span class="rt-summary-title">主持人总结</span>
+      <span class="rt-summary-note">保留分歧，不判胜负</span>
     </div>`;
   if (d.topic) {
     html += `<p class="rt-summary-topic">议题：${escapeHtml(d.topic)}</p>`;
+  }
+  if (closing) {
+    html += `<p class="rt-summary-closing">${escapeHtml(closing)}</p>`;
   }
 
   if (clashes.length) {
@@ -593,6 +601,20 @@ function _rtRenderSummary(d) {
     html += '</div>';
   }
 
+  if (applications.length) {
+    html += '<p class="rt-summary-label">观点的适用条件</p><div class="rt-summary-applications">';
+    applications.forEach((a) => {
+      html += `<div class="rt-application">
+          <span class="rt-position-name">${escapeHtml(a.name)}</span>
+          <div class="rt-application-body">
+            <span class="rt-application-scenario">${escapeHtml(a.scenario)}</span>
+            <span class="rt-position-stance">${escapeHtml(a.application)}</span>
+          </div>
+        </div>`;
+    });
+    html += '</div>';
+  }
+
   if (openItems.length) {
     html += '<p class="rt-summary-label">悬而未决</p><div class="rt-summary-open">';
     openItems.forEach((q, i) => {
@@ -602,7 +624,7 @@ function _rtRenderSummary(d) {
   }
 
   if (d.degraded) {
-    html += '<p class="rt-summary-degraded">本次纪要只保留了各方主张。</p>';
+    html += '<p class="rt-summary-degraded">本次总结仅保留发言记录中的主张，适用条件暂未整理。</p>';
   }
 
   // 发言次数：这是**事实**不是分数（配额本来就是公开机制）。
@@ -624,9 +646,9 @@ function _rtRenderSummary(d) {
     positions.forEach((p, i) => {
       html += `<button class="rt-stand-btn" type="button" data-idx="${i}">${escapeHtml(p.name)}</button>`;
     });
-    html += '<button class="rt-stand-btn rt-stand-nobody" type="button" data-idx="-1">都有一点</button>';
+    html += '<button class="rt-stand-btn rt-stand-nobody" type="button" data-idx="-1">按情境选择</button>';
     html += '</div>';
-    html += '<p class="rt-stand-note" id="rtStandNote">不必有结论——想清楚就好。</p>';
+    html += '<p class="rt-stand-note" id="rtStandNote">可以保留分歧，也可以按情境取舍。</p>';
     html += '</div>';
   }
 
@@ -644,7 +666,7 @@ function _rtRenderSummary(d) {
       if (note) {
         note.textContent = picked
           ? `你选了 ${picked} 这一边。这个判断只在你这里。`
-          : '你觉得两边都有道理。这个判断只在你这里。';
+          : '你会结合具体情境选择观点。这个判断只在你这里。';
       }
     });
   });

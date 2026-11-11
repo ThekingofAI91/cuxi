@@ -2502,7 +2502,7 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 }
 .rt-ask-cancel:hover { border-color: #161616; color: #161616; }
 
-/* ---- 纪要（分歧地图）：散场后从底部升起的一块面板 ---- */
+/* ---- 主持人总结：散场后保留立场、分歧与适用条件 ---- */
 .rt-summary {
   flex: none; max-height: 46vh; overflow-y: auto;
   border-top: 1px solid rgba(22,22,22,.1);
@@ -2521,11 +2521,16 @@ html.setup-open, html.setup-open body { overflow: hidden; }
   margin: 0 0 4px; font-size: 12.5px; color: #6B6B66;
   font-family: "Cormorant Garamond", "Noto Serif SC", "Songti SC", "SimSun", serif;
 }
+.rt-summary-closing {
+  margin: 2px 0 4px; padding: 10px 12px; border-left: 2px solid #B4AFA6;
+  background: #F6F4EE; color: #2B2B28; font-size: 13px; line-height: 1.8;
+  white-space: pre-wrap;
+}
 .rt-summary-label {
   margin: 8px 0 2px; font-size: 12px; letter-spacing: 1px; color: #8A857C;
 }
 
-.rt-summary-clashes, .rt-summary-positions, .rt-summary-open {
+.rt-summary-clashes, .rt-summary-positions, .rt-summary-open, .rt-summary-applications {
   display: flex; flex-direction: column; gap: 8px;
 }
 .rt-clash {
@@ -2542,6 +2547,9 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 .rt-position { display: flex; gap: 10px; font-size: 13px; line-height: 1.75; }
 .rt-position-name { flex: 0 0 60px; color: #8A857C; }
 .rt-position-stance { flex: 1; min-width: 0; color: #2B2B28; }
+.rt-application { display: flex; gap: 10px; font-size: 13px; line-height: 1.75; }
+.rt-application-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rt-application-scenario { color: #6B6B66; }
 .rt-open-item { display: flex; gap: 10px; font-size: 13px; line-height: 1.75; color: #2B2B28; }
 .rt-open-idx { flex: 0 0 14px; color: #B4AFA6; }
 .rt-summary-degraded { margin: 4px 0 0; font-size: 12px; color: #8A857C; }
