@@ -112,12 +112,16 @@ def test_lorebook_triggers_via_recent_history():
     )
     prompt = build_character_prompt(char, query="那它要怎么面对", scan_text=scan_text)
     assert "阴影是你不愿承认的那部分自己" in prompt
-    # 后历史位置的词条（position=after_history）同样凭扫描窗口命中
-    char.lorebook.append({"keyword": "shadow", "content": "后历史位置词条", "position": "after_history"})
+    # 世界书简化后只有一个人设之后的注入点，「历史之后」那一档已删除。
+    # 同一关键词重复出现时先到先得——后加的重复词条不占注入名额。
+    char.lorebook.append({"keyword": "shadow", "content": "重复关键词词条"})
+    prompt2 = build_character_prompt(char, query="那它要怎么面对", scan_text=scan_text)
+    assert "阴影是你不愿承认的那部分自己" in prompt2
+    assert "重复关键词词条" not in prompt2
+    # 后历史指令只承载语气与格式约束，不再注入任何词条
     post = build_post_history_directive(char, query="那它要怎么面对", scan_text=scan_text)
-    assert "后历史位置词条" in post
-    # before_char 词条不进后历史指令（位置语义不混用）
     assert "阴影是你不愿承认的那部分自己" not in post
+    assert "重复关键词词条" not in post
 
 
 def test_lorebook_not_triggered_without_history_hit():

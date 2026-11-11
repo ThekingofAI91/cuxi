@@ -39,7 +39,10 @@ def test_dry_run_never_retrieves_or_generates_and_keeps_attack_in_user_data(monk
     assert all(check["attack_absent"] for check in report["opening_order_checks"])
     for case in report["cases"]:
         audit = case["prompt_audit"]
-        assert audit["roles"] == ["system", "user"]
+        # 允许出现多条 system（身份 + 本轮规则），关键是首尾角色正确、
+        # 且攻击文本不得进入任何 system —— 这是这条探针真正要守的性质。
+        assert audit["roles"][0] == "system"
+        assert audit["roles"][-1] == "user"
         assert audit["system_contains_attack"] is False
         assert audit["user_contains_attack"] == (case["condition"] == "strong_false_peer_claim")
         assert case["response"] is None

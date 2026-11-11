@@ -28,6 +28,8 @@ from scenes.persona_chat.characters.wangyangming import wangyangming_character
 from scenes.persona_chat.characters.zhangxuefeng import zhangxuefeng_character
 from scenes.persona_chat.legend_store import LegendSave
 from scenes.persona_chat.skill_loader import (
+    load_persona,
+    parse_persona_sections,
     invalidate_cache,
     load_skill,
     resolve_role_prompt,
@@ -44,11 +46,26 @@ ALL_CHARACTERS = [
 
 
 @pytest.mark.parametrize("character", ALL_CHARACTERS, ids=lambda c: c.id)
-def test_skill_body_matches_inline_role_prompt(character):
-    """技能包正文必须与角色内联 role_prompt 逐字相同。"""
-    pack = load_skill(character.id)
-    assert pack is not None, f"{character.id} 缺少技能包，请跑 scripts/export_character_skills.py"
-    assert pack.body == (character.role_prompt or "").strip()
+def test_skill_persona_matches_inline_fields(character):
+    """技能包的五个分节必须与角色定义里的五个字段逐字相同。
+
+    这是迁移后的守门测试：人设正文、性格、场景、词条、示例全部搬进了 skill，
+    任何一处漂移都会让「改 skill 等于改人设」这个前提失效。
+    """
+    persona = load_persona(character.id)
+    assert persona is not None, f"{character.id} 缺少技能包，请跑 scripts/export_character_skills.py"
+
+    assert persona.role_prompt == (character.role_prompt or "").strip()
+    assert persona.personality == (character.personality or "").strip()
+    assert persona.scenario == (character.scenario or "").strip()
+    assert persona.mes_example == (character.mes_example or "").strip()
+
+    expected = [
+        {"keyword": str(e.get("keyword") or "").strip(), "content": str(e.get("content") or "").strip()}
+        for e in (character.lorebook or [])
+        if isinstance(e, dict) and e.get("keyword") and e.get("content")
+    ]
+    assert persona.lorebook == expected
 
 
 @pytest.mark.parametrize("character", ALL_CHARACTERS, ids=lambda c: c.id)
@@ -165,3 +182,30 @@ def test_legend_skill_exists():
     assert pack is not None
     assert "{{world}}" in pack.body
     assert "{{state_block}}" in pack.body
+
+
+def test_parse_sections_keeps_unknown_headings():
+    """只有五个已知标题切分节，正文里别的 ## 留在原分节里，不会被误切。"""
+    body = chr(10).join([
+        "## 人设", "", "第一段", "", "## 别的标题", "", "第二段", "", "## 性格特质", "", "温和",
+    ])
+    sections = parse_persona_sections(body)
+    assert sections.role_prompt == chr(10).join(["第一段", "", "## 别的标题", "", "第二段"])
+    assert sections.personality == "温和"
+
+
+def test_lorebook_splits_on_first_colon():
+    """词条按第一个冒号切分：内容里的冒号不能被当成关键词分隔符。"""
+    body = chr(10).join([
+        "## 核心概念词条", "", "- 阴影：他说：这是地下室", "- 原型: 英文冒号也认",
+    ])
+    sections = parse_persona_sections(body)
+    assert sections.lorebook[0] == {"keyword": "阴影", "content": "他说：这是地下室"}
+    assert sections.lorebook[1] == {"keyword": "原型", "content": "英文冒号也认"}
+
+
+def test_legacy_body_without_sections():
+    """没有分节标题的旧格式整篇归入人设，其余四块为空（由调用方逐块回退字段）。"""
+    sections = parse_persona_sections("你是某某，说话直接。")
+    assert sections.role_prompt == "你是某某，说话直接。"
+    assert sections.personality == "" and sections.lorebook == []

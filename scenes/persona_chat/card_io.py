@@ -37,11 +37,11 @@ from scenes.persona_chat.models import CharacterDef
 CARD_FORMAT = "gkrm-card"
 CARD_VERSION = 1
 
-# 世界书条目允许写入卡片的字段（其余字段一律丢弃，防脏数据）
-_LOREBOOK_FIELDS = (
-    "keyword", "content", "secondary_keys", "enabled",
-    "constant", "order", "position",
-)
+# 世界书条目允许写入卡片的字段。
+# 世界书已简化为「关键词 → 内容」两字段，position / constant / order /
+# secondary_keys / enabled 随之一并删除——导入旧卡时这些字段会被 parse_card 丢弃，
+# 旧卡的词条仍能进库，只是失去「注入位置 / 常驻 / 排序 / 副关键词」这些能力。
+_LOREBOOK_FIELDS = ("keyword", "content")
 
 
 def export_card(character: CharacterDef, background: str = "") -> dict:
@@ -210,21 +210,12 @@ def _st_to_native(card: dict) -> dict:
         content = (e.get("content") or "").strip()
         if not keys or not content:
             continue
-        pos_raw = e.get("position")
-        # 社区规范：0/数字=角色设定之前；1/"after_char"=之后。映射到本站两个注入位
-        pos = "after_history" if pos_raw in (1, "1", "after_char") else "before_char"
-        try:
-            order = int(e.get("insertion_order") or 100)
-        except (TypeError, ValueError):
-            order = 100
+        # 社区卡的 position / insertion_order / constant / enabled / 副关键词
+        # 在本站已无对应能力，只保留主关键词与内容；副关键词并入关键词表会被
+        # 简化后的 match_lorebook 忽略，故不写进条目。
         lorebook.append({
             "keyword": keys[0],
-            "secondary_keys": keys[1:],
             "content": content,
-            "enabled": e.get("enabled", True),
-            "constant": bool(e.get("constant")),
-            "order": order,
-            "position": pos,
         })
 
     return {

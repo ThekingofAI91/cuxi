@@ -88,13 +88,13 @@ def test_parse_v2_card_roundtrip():
     assert fields["role_prompt"] == "一位浪迹天涯的剑客。"
     assert fields["first_mes"] == "（他抬眼看你）坐。"
     assert "<START>" not in fields["mes_example"]
-    # 世界书：keys[0]→keyword，其余→secondary_keys；position 0→before_char，1→after_history
+    # 世界书已简化为「关键词 + 内容」：keys[0] 作关键词，副关键词与注入位置不再保留
     lb = fields["lorebook"]
     assert len(lb) == 2  # 缺关键词的条目被清洗
-    assert lb[0]["keyword"] == "剑" and lb[0]["secondary_keys"] == ["刀"]
-    assert lb[0]["position"] == "before_char"
-    assert lb[1]["keyword"] == "往事" and lb[1]["position"] == "after_history"
-    assert lb[1]["constant"] is True
+    assert lb[0] == {"keyword": "剑", "content": lb[0]["content"]}
+    assert "secondary_keys" not in lb[0] and "position" not in lb[0]
+    assert lb[1]["keyword"] == "往事"
+    assert set(lb[1]) == {"keyword", "content"}
 
 
 def test_parse_legacy_v1_flat_card():

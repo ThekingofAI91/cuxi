@@ -38,13 +38,45 @@ def _frontmatter(char) -> str:
         "description: |",
         f"  {char.name}角色扮演设定：{desc}",
         f"  分区：{char.zone}　｜　语料库：{char.chroma_collection}",
-        "  正文为逐字迁移的原始人设，改动请只改正文、不要动 frontmatter。",
+        "  正文分五节：人设 / 性格特质 / 当前场景 / 核心概念词条 / 对话示例。",
+        "  改人设只改这里，不必动 characters/*.py；改完用 --check 校验与代码字段一致。",
         f"zone: {char.zone}",
         f"collection: {char.chroma_collection}",
         "---",
         "",
     ]
     return "\n".join(lines)
+
+
+def _sections(char) -> str:
+    """把角色定义拆成五个二级标题分节，字段名与 skill_loader.PERSONA_SECTIONS 对齐。
+
+    分节顺序固定：人设 → 性格特质 → 当前场景 → 核心概念词条 → 对话示例。
+    顺序即拼装顺序，改动会让生成的 prompt 变样（可用 --check 对比发现）。
+    """
+    blocks = ["## 人设", "", (char.role_prompt or "").strip(), ""]
+
+    if (char.personality or "").strip():
+        blocks += ["## 性格特质", "", char.personality.strip(), ""]
+
+    if (char.scenario or "").strip():
+        blocks += ["## 当前场景", "", char.scenario.strip(), ""]
+
+    entries = [
+        (str(e.get("keyword") or "").strip(), str(e.get("content") or "").strip())
+        for e in (char.lorebook or [])
+        if isinstance(e, dict)
+    ]
+    entries = [(k, v) for k, v in entries if k and v]
+    if entries:
+        blocks += ["## 核心概念词条", ""]
+        blocks += [f"- {k}：{v}" for k, v in entries]
+        blocks.append("")
+
+    if (char.mes_example or "").strip():
+        blocks += ["## 对话示例", "", char.mes_example.strip(), ""]
+
+    return "\n".join(blocks).rstrip() + "\n"
 
 
 def collect_characters() -> list:
@@ -74,7 +106,7 @@ def main() -> int:
 
     for char in chars:
         path = SKILL_DIR / f"{char.id}.md"
-        content = _frontmatter(char) + (char.role_prompt or "").strip() + "\n"
+        content = _frontmatter(char) + "\n" + _sections(char)
 
         if args.check:
             old = path.read_text(encoding="utf-8") if path.exists() else ""

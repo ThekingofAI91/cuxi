@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from scenes.persona_chat.skill_loader import resolve_role_prompt
+from scenes.persona_chat.skill_loader import resolve_persona_sections
 
 # 娱乐区专属语气指令：压掉 AI 味，强调查像真人微信聊天
 _ENTERTAINMENT_VOICE_DIRECTIVE = """【娱乐区口吻要求】（不要像 AI / 助手）
@@ -75,79 +75,44 @@ def compose_lorebook_scan_text(query: str = "", history: list[tuple[str, str]] |
         parts.append(query)
     return "\n".join(parts)
 
-# 世界书条目的注入位置（与 SillyTavern 的 position 对应，见 card_io.py）
-POS_BEFORE_CHAR = "before_char"      # 人设之后、历史之前（默认）
-POS_AFTER_HISTORY = "after_history"  # 对话历史之后，与后历史指令一起
-
-
-def _entry_keywords(entry: dict) -> list[str]:
-    """主关键词 + 副关键词（副关键词为可选字段，老格式没有）"""
-    kws = []
-    main = (entry.get("keyword") or "").strip()
-    if main:
-        kws.append(main)
-    for sk in (entry.get("secondary_keys") or []):
-        sk = (sk or "").strip()
-        if sk and sk not in kws:
-            kws.append(sk)
-    return kws
-
-
-def _entry_matches(entry: dict, text: str) -> bool:
-    if not text:
-        return False
-    return any(kw in text for kw in _entry_keywords(entry))
+# 世界书已简化为「关键词 → 内容」两字段：条目不再带注入位置、常驻开关、
+# 排序权重与副关键词。这些能力内置角色从未使用，维护成本却要一直付。
+# 自建角色若从旧角色卡导入了这些字段，解析时静默丢弃（见 skill_loader._normalize_lorebook）。
 
 
 def match_lorebook(
-    lorebook: Any,
+    entries: Any,
     text: str,
     limit: int = _LOREBOOK_MAX_HITS,
-    position: str | None = POS_BEFORE_CHAR,
 ) -> list[dict]:
-    """
-    挑出本轮该注入的世界书条目。
+    """挑出本轮该注入的词条：关键词在扫描文本里出现即命中，按原顺序取前 limit 条。
 
-    规则：
-    - `enabled=False` 的条目跳过（单条开关）
-    - `constant=True` 的条目常驻注入，不要求命中关键词
-    - 其余条目须主关键词或副关键词命中用户消息
-    - 只取指定 `position` 的条目（传 None 表示不限位置）
-    - 排序：常驻条目优先，其余按 `order` 升序（小的在前）
+    去重按关键词，先到先得——重复词条不重复占注入名额。
+    不做排序：词条的先后就是人设里写的顺序，作者排的就是优先级。
     """
-    if not lorebook:
+    if not entries or not text:
         return []
     out: list[dict] = []
-    seen_keywords: set[str] = set()
-    for entry in lorebook:
+    seen: set[str] = set()
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
-        if entry.get("enabled") is False:
-            continue
+        keyword = (entry.get("keyword") or "").strip()
         content = (entry.get("content") or "").strip()
-        keywords = _entry_keywords(entry)
-        if not content or not keywords:
+        if not keyword or not content or keyword in seen:
             continue
-        if position and (entry.get("position") or POS_BEFORE_CHAR) != position:
+        if keyword not in text:
             continue
-        # 同关键词去重：先到先得，重复词条不重复占注入名额
-        if keywords[0] in seen_keywords:
-            continue
-        seen_keywords.add(keywords[0])
-        if not (bool(entry.get("constant")) or _entry_matches(entry, text)):
-            continue
-        out.append(entry)
-
-    out.sort(key=lambda e: (0 if e.get("constant") else 1, int(e.get("order") or 100)))
-    return out[:limit] if limit else out
+        seen.add(keyword)
+        out.append({"keyword": keyword, "content": content})
+        if limit and len(out) >= limit:
+            break
+    return out
 
 
 def _format_lorebook(hits: list[dict], zone: str) -> str:
     header = _LOREBOOK_HEADER_ENT if zone == "entertainment" else _LOREBOOK_HEADER_EDU
-    body = "\n".join(
-        f"· {(_entry_keywords(h)[0] if _entry_keywords(h) else '').strip()}：{h['content'].strip()}"
-        for h in hits
-    )
+    body = "\n".join(f"· {h['keyword']}：{h['content']}" for h in hits)
     return f"{header}\n{body}"
 
 
@@ -176,32 +141,28 @@ def build_character_prompt(
     """
     parts: list[str] = []
 
-    # 人设正文优先取技能包（data/persona_chat/skills/{id}.md），缺失时回退内联字段。
-    # 见 skill_loader：人设是内容不是逻辑，外置后可独立改动、不必动代码。
-    base = resolve_role_prompt(character)
-    if base:
-        parts.append(base)
+    # 五块人设统一从技能包取（data/persona_chat/skills/{id}.md 的五个分节），
+    # 逐块回退到 CharacterDef 字段——自建角色没有技能包，全程走回退。
+    # 见 skill_loader.resolve_persona_sections：人设是内容不是逻辑，外置后可独立改动。
+    sections = resolve_persona_sections(character)
 
-    personality = (getattr(character, "personality", "") or "").strip()
-    if personality:
-        parts.append("【性格特质】\n" + personality)
+    if sections.role_prompt:
+        parts.append(sections.role_prompt)
 
-    scenario = (getattr(character, "scenario", "") or "").strip()
-    if scenario:
-        parts.append("【当前场景】\n" + scenario)
+    if sections.personality:
+        parts.append("【性格特质】\n" + sections.personality)
+
+    if sections.scenario:
+        parts.append("【当前场景】\n" + sections.scenario)
 
     if include_lorebook:
         scan = "\n".join(t for t in (scan_text, query) if t)
-        hits = match_lorebook(
-            getattr(character, "lorebook", None), scan, position=POS_BEFORE_CHAR
-        )
+        hits = match_lorebook(sections.lorebook, scan)
         if hits:
             parts.append(_format_lorebook(hits, getattr(character, "zone", "education")))
 
-    if include_examples:
-        example = (getattr(character, "mes_example", "") or "").strip()
-        if example:
-            parts.append(f"{_EXAMPLE_HEADER}\n{example}")
+    if include_examples and sections.mes_example:
+        parts.append(f"{_EXAMPLE_HEADER}\n{sections.mes_example}")
 
     if getattr(character, "zone", "education") == "entertainment":
         parts.append(_ENTERTAINMENT_VOICE_DIRECTIVE)
@@ -239,12 +200,7 @@ def build_post_history_directive(character: Any, query: str = "", *, scan_text: 
 
     parts = [directive]
 
-    # 位置设在"历史之后"的世界书条目，与指令一起生效（扫描范围含最近几轮，接住指代式引用）
-    scan = "\n".join(t for t in (scan_text, query) if t)
-    hits = match_lorebook(
-        getattr(character, "lorebook", None), scan, position=POS_AFTER_HISTORY
-    )
-    if hits:
-        parts.append(_format_lorebook(hits, zone))
-
+    # 世界书只在人设之后注入一次（见 build_character_prompt）。
+    # 原先还有一档「历史之后」的位置，随世界书简化为两字段一并删除——
+    # 内置角色从未用过它，留着只是一条永远不会执行的分支。
     return "\n\n".join(parts).strip()

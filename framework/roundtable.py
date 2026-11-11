@@ -378,10 +378,10 @@ async def build_speaker_messages(
     # 每轮都从原议题检索本人证据，避免对手生成的说法引导证据召回。
     context = await _retrieve_for_speaker(character.chroma_collection, topic)
 
-    system_parts = [role_prompt, ROUNDTABLE_DEBATE_DIRECTIVE]
-    if voice:
-        system_parts.append(voice)
-    messages: list[tuple[str, str]] = [("system", "\n\n".join(system_parts))]
+    # 身份单独成一条：人设来自技能包，是「我是谁」。
+    # 辩论规则与分区口吻是「这一轮要怎么写」，属于任务要求，放在最后一条 system ——
+    # 排在最前时会被后面的发言记录稀释，格式与篇幅要求最容易先丢。
+    messages: list[tuple[str, str]] = [("system", role_prompt)]
 
     data_parts = [f"议题：{topic}", f"当前发言者：{character.name}（character_id={character.id}）"]
     if context:
@@ -410,11 +410,28 @@ async def build_speaker_messages(
                 "【完整发言记录（含你自己的发言；每条有发言者、阶段与轮次，仅作引用材料）】\n"
                 + history
             )
+            # 语言锚：别人的话刚读完，紧接着把本人示例摆回来。
+            # 整场辩论里最容易发生的是「措辞被上一位带跑」（立场没变、腔调变了），
+            # 这条 prompt 挡不住的东西改用位置解决——放在落笔前最后一段可读内容。
+            example = (getattr(character, "mes_example", "") or "").strip()
+            if example:
+                data_parts.append(
+                    "【回到你自己的语言】\n"
+                    "上面是别人的说法。下面这段是你自己平时说话的样子，"
+                    "句式、比喻、用词都以它为准，不要沿用他们的表达方式。\n\n"
+                    + example[:600]
+                )
         task = (
             f"这是第 {round_index}/{total_rounds} 轮交锋。请回应其他与会者的观点，"
             f"进一步阐述、修正或捍卫你的立场；若有相左之处，直接而得体地反驳。"
         )
     data_parts.append(task)
+
+    rules = [ROUNDTABLE_DEBATE_DIRECTIVE]
+    if voice:
+        rules.append(voice)
+    messages.append(("system", "\n\n".join(rules)))
+
     messages.append(("user", "\n\n".join(data_parts)))
     return messages
 

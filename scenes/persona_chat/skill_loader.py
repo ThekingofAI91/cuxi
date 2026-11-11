@@ -25,6 +25,7 @@ Anthropic Agent Skills 风格的 Markdown 包：
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,6 +188,159 @@ def resolve_role_prompt(character: Any) -> str:
             return pack.body
         print(f"[Skill] {char_id} 无技能包，回退内联 role_prompt")
     return (getattr(character, "role_prompt", "") or "").strip()
+
+
+# ============================================================
+# 分节人设：人设 / 性格特质 / 当前场景 / 核心概念词条 / 对话示例
+# ============================================================
+# 这五块本来分散在 skill 正文与 CharacterDef 的四个字段里，改一句话要动两个文件。
+# 现在统一以固定二级标题写在 skill 里，代码只负责按标题取值与补格式标记。
+#
+# 只认这五个标题：正文里若出现其他 `##`（例如某个人设自带小节），按普通正文保留，
+# 不会被误当成下一个分节的开始。
+
+SECTION_ROLE = "人设"
+SECTION_PERSONALITY = "性格特质"
+SECTION_SCENARIO = "当前场景"
+SECTION_LOREBOOK = "核心概念词条"
+SECTION_EXAMPLE = "对话示例"
+
+PERSONA_SECTIONS = (
+    SECTION_ROLE,
+    SECTION_PERSONALITY,
+    SECTION_SCENARIO,
+    SECTION_LOREBOOK,
+    SECTION_EXAMPLE,
+)
+
+_SECTION_RE = re.compile(
+    r"^##[ \t]+(" + "|".join(PERSONA_SECTIONS) + r")[ \t]*$",
+    re.MULTILINE,
+)
+
+
+@dataclass
+class PersonaSections:
+    """一个角色的五块人设内容。空字符串表示该块缺失，由调用方决定是否跳过。"""
+
+    role_prompt: str = ""
+    personality: str = ""
+    scenario: str = ""
+    lorebook: list = field(default_factory=list)  # [{"keyword": str, "content": str}]
+    mes_example: str = ""
+
+
+def _parse_lorebook_block(block: str) -> list:
+    """把「- 关键词：内容」列表解析成词条。
+
+    只按**第一个**冒号切分——内容里常有冒号（「他说：……」），按最后一个切会把关键词吃掉。
+    中文全角冒号与英文半角冒号都接受。
+    """
+    out: list = []
+    for raw in block.splitlines():
+        line = raw.strip()
+        if not line.startswith(("- ", "* ")):
+            continue
+        body = line[2:].strip()
+        for sep in ("：", ":"):
+            idx = body.find(sep)
+            if idx > 0:
+                keyword = body[:idx].strip()
+                content = body[idx + 1:].strip()
+                if keyword and content:
+                    out.append({"keyword": keyword, "content": content})
+                break
+    return out
+
+
+def parse_persona_sections(body: str) -> PersonaSections:
+    """按五个固定标题把技能包正文拆成结构化人设。
+
+    没有标题的旧格式（整篇都是人设正文）也能用：整篇归入 `role_prompt`。
+    """
+    if not body or not body.strip():
+        return PersonaSections()
+
+    hits = list(_SECTION_RE.finditer(body))
+    if not hits:
+        return PersonaSections(role_prompt=body.strip())
+
+    sections: dict[str, str] = {}
+    for i, m in enumerate(hits):
+        start = m.end()
+        end = hits[i + 1].start() if i + 1 < len(hits) else len(body)
+        sections[m.group(1)] = body[start:end].strip()
+
+    return PersonaSections(
+        role_prompt=sections.get(SECTION_ROLE, ""),
+        personality=sections.get(SECTION_PERSONALITY, ""),
+        scenario=sections.get(SECTION_SCENARIO, ""),
+        lorebook=_parse_lorebook_block(sections.get(SECTION_LOREBOOK, "")),
+        mes_example=sections.get(SECTION_EXAMPLE, ""),
+    )
+
+
+def load_persona(character_id: str) -> Optional[PersonaSections]:
+    """读技能包并解析成五块；技能包缺失或为空返回 None。"""
+    pack = load_skill(character_id)
+    if pack is None:
+        return None
+    parsed = parse_persona_sections(pack.body)
+    if not any((parsed.role_prompt, parsed.personality, parsed.scenario,
+                parsed.lorebook, parsed.mes_example)):
+        return None
+    return parsed
+
+
+def resolve_persona_sections(character: Any) -> PersonaSections:
+    """取角色最终的五块人设：优先技能包，缺失的回退 CharacterDef 字段。
+
+    逐块回退而不是整体回退——技能包只写了人设、没写词条时，词条仍从字段取，
+    这样迁移可以一个一个角色、一块一块地做，中途不会出现「人设有了但词条没了」。
+    """
+    char_id = str(getattr(character, "id", "") or "")
+    from_skill = None
+    if char_id and not getattr(character, "is_custom", False):
+        from_skill = load_persona(char_id)
+
+    def pick(skill_value: str, field_name: str) -> str:
+        if skill_value and skill_value.strip():
+            return skill_value.strip()
+        return (getattr(character, field_name, "") or "").strip()
+
+    if from_skill is None:
+        return PersonaSections(
+            role_prompt=(getattr(character, "role_prompt", "") or "").strip(),
+            personality=(getattr(character, "personality", "") or "").strip(),
+            scenario=(getattr(character, "scenario", "") or "").strip(),
+            lorebook=_normalize_lorebook(getattr(character, "lorebook", None)),
+            mes_example=(getattr(character, "mes_example", "") or "").strip(),
+        )
+
+    return PersonaSections(
+        role_prompt=pick(from_skill.role_prompt, "role_prompt"),
+        personality=pick(from_skill.personality, "personality"),
+        scenario=pick(from_skill.scenario, "scenario"),
+        lorebook=from_skill.lorebook or _normalize_lorebook(getattr(character, "lorebook", None)),
+        mes_example=pick(from_skill.mes_example, "mes_example"),
+    )
+
+
+def _normalize_lorebook(raw: Any) -> list:
+    """把任意历史格式的词条收敛成 [{"keyword","content"}]。
+
+    旧格式还带 position / constant / order / secondary_keys / enabled，
+    这些字段已随世界书简化一并删除；自建角色导入的卡如果还带，这里静默丢弃。
+    """
+    out: list = []
+    for entry in raw or []:
+        if not isinstance(entry, dict):
+            continue
+        keyword = str(entry.get("keyword") or "").strip()
+        content = str(entry.get("content") or "").strip()
+        if keyword and content:
+            out.append({"keyword": keyword, "content": content})
+    return out
 
 
 def legend_prompt_template() -> Optional[str]:
