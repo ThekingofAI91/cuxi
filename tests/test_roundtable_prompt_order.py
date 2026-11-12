@@ -1,22 +1,15 @@
 """
 圆桌发言 prompt 的结构约束
 
-守的是「位置」而不是「措辞」：同一段文字放在上下文的不同位置，对生成的影响强度不同。
-模型对越靠后的内容越敏感，所以：
-
-- 身份（人设、示例对话）放最前 —— 它定义「我是谁」；
-- 辩论规则（篇幅、要反驳、不和稀泥）放最后一条 system —— 它是「这一轮怎么写」，
-  排在最前时会被几千字的完整发言记录稀释，最先丢的就是篇幅与交锋性；
-- 语言锚必须夹在「别人的发言」之后、「本轮任务」之前 —— 整场辩论里最容易发生的
-  不是立场漂移，而是措辞被上一位带跑（立场没变、腔调变了），只有落笔前那一段有效。
-
-这些断言故意绑顺序而不是绑原文：措辞可以改，顺序错了就会退化。
+身份在前，记录是 user 数据，技能后历史指令和语言锚在记录之后、本轮任务之前。
+这些断言验证装配及单一来源，不把位置契约当成模型抗干扰效果的证明。
 """
 
 from __future__ import annotations
 
 import asyncio
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +18,8 @@ from framework.roundtable import (
     build_speaker_messages,
 )
 from scenes.persona_chat.characters.jung import jung_character
+from scenes.persona_chat import skill_loader
+from scenes.persona_chat.skill_loader import PersonaSections, render_persona_skill
 
 
 async def _fake_retrieve(*_args, **_kwargs) -> str:
@@ -74,31 +69,64 @@ def test_debate_rules_are_last_system_message():
 def test_language_anchor_sits_after_transcript_and_before_task():
     """语言锚必须夹在发言记录之后、本轮任务之前。"""
     messages = _build(is_opening=False)
-    user = next(content for role, content in messages if role == "user")
-
-    anchor = user.find("【回到你自己的语言】")
-    transcript = user.find("【完整发言记录")
-    task = user.find("这是第 1/2 轮交锋")
-
-    assert transcript >= 0 and anchor > transcript
-    assert task >= 0 and anchor < task
-    assert "{{user}}" in user[anchor:]  # 锚里带的是本人示例
+    transcript = next(i for i, (_, content) in enumerate(messages) if "【完整发言记录" in content)
+    anchor = next(i for i, (_, content) in enumerate(messages) if "【回到你自己的语言】" in content)
+    task = next(i for i, (_, content) in enumerate(messages) if "这是第 1/2 轮交锋" in content)
+    assert transcript < anchor < task
+    assert messages[transcript][0] == "user"
+    assert messages[anchor][0] == "system"
+    assert "{{user}}" in messages[anchor][1]
 
 
 def test_opening_has_no_anchor_and_no_transcript():
     """独立开场不传任何记录，也就不需要语言锚。"""
     messages = _build(is_opening=True)
-    user = next(content for role, content in messages if role == "user")
-    assert "【完整发言记录" not in user
-    assert "回到你自己的语言" not in user
-    assert "独立开场陈述" in user
+    text = "\n".join(content for _, content in messages)
+    assert "【完整发言记录" not in text
+    assert "回到你自己的语言" not in text
+    assert "独立开场陈述" in text
 
 
 def test_message_roles_order():
-    """消息角色顺序固定为 system → system → user，避免把规则塞到 user 之后。"""
+    """可信后历史指令实际位于引用记录之后。"""
     messages = _build(is_opening=False)
     roles = [role for role, _ in messages]
-    assert roles == ["system", "system", "user"]
+    assert roles == ["system", "user", "system", "user"]
+
+
+def test_skill_edits_update_anchor_and_post_history_without_python_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", tmp_path)
+    character = SimpleNamespace(
+        id="skill_only", name="技能人物", zone="education", chroma_collection="persona_skill_only",
+        role_prompt="旧 Python 人设", mes_example="旧 Python 示例",
+        post_history_instructions="旧 Python 后历史",
+    )
+    path = tmp_path / "skill_only.md"
+
+    def build_from_skill(example, post):
+        sections = PersonaSections(
+            role_prompt="技能人物人设", mes_example=example,
+            post_history_instructions=post,
+        )
+        path.write_text(render_persona_skill(character, sections), encoding="utf-8")
+        with patch("framework.roundtable._retrieve_for_speaker", _fake_retrieve):
+            return asyncio.run(build_speaker_messages(
+                character=character, topic="议题", transcript=_transcript(),
+                round_index=1, total_rounds=2, is_opening=False,
+            ))
+
+    before = build_from_skill("技能示例第一版", "技能后历史第一版")
+    after = build_from_skill("技能示例第二版增加内容", "技能后历史第二版增加内容")
+    assert "技能示例第一版" in before[0][1] and "技能示例第一版" in before[2][1]
+    assert "技能示例第二版增加内容" in after[0][1]
+    assert "技能示例第二版增加内容" in after[2][1]
+    assert "技能后历史第二版增加内容" in after[2][1]
+    assert "技能后历史第二版增加内容" not in after[0][1]
+    assert "旧 Python" not in str(after)
+
+    cleared = build_from_skill("", "")
+    assert "【回到你自己的语言】" not in str(cleared)
+    assert "旧 Python" not in str(cleared)
 
 
 def test_rule_directive_still_forbids_flattery():

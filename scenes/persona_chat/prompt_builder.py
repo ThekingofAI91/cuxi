@@ -28,25 +28,6 @@ from typing import Any
 
 from scenes.persona_chat.skill_loader import resolve_persona_sections
 
-# 娱乐区专属语气指令：压掉 AI 味，强调查像真人微信聊天
-_ENTERTAINMENT_VOICE_DIRECTIVE = """【娱乐区口吻要求】（不要像 AI / 助手）
-- 像真人微信聊天：口语化、短句、可带语气词，别写长篇大论
-- 可以甩金句、抖机灵、反问、吐槽，但别油滑、别说教
-- 严禁任何结构化格式：不要出现"总结""需要注意的是""综上所述""第一/第二/第三"等词
-- 严禁 markdown 小标题、列表符号、引用标注、出处说明、置信度
-- 严禁以"作为 AI""基于资料"等第三方视角说话，全程第一人称
-- 回答尽量短（一到两段就好），说人话，像活人在跟你聊"""
-
-# 世界书抬头：两区措辞不同，教育区强调"以词条为准"，娱乐区强调"按你的说法接"
-_LOREBOOK_HEADER_EDU = (
-    "【核心概念词条（用户问及下列概念时，以这里的界定为准；"
-    "这是你的原意，不要换成通用教科书说法，可自然点明出处）】"
-)
-_LOREBOOK_HEADER_ENT = (
-    "【你的黑话与老梗（用户提到下列词时，按你自己的说法接住，"
-    "不要解释成普通话，也不要解释成中立客观的表述）】"
-)
-
 _EXAMPLE_HEADER = (
     "【对话示例·严格模仿其中的语气、节奏与句式，"
     "严禁照抄内容、严禁把示例里的事情当成真实发生过的】"
@@ -110,10 +91,9 @@ def match_lorebook(
     return out
 
 
-def _format_lorebook(hits: list[dict], zone: str) -> str:
-    header = _LOREBOOK_HEADER_ENT if zone == "entertainment" else _LOREBOOK_HEADER_EDU
+def _format_lorebook(hits: list[dict]) -> str:
     body = "\n".join(f"· {h['keyword']}：{h['content']}" for h in hits)
-    return f"{header}\n{body}"
+    return f"【核心概念词条】\n{body}"
 
 
 def has_tavern_components(character: Any) -> bool:
@@ -122,7 +102,8 @@ def has_tavern_components(character: Any) -> bool:
 
     用于诊断日志：娱乐区但缺构件时只能靠背景检索撑住，属于"弱角色卡"。
     """
-    return bool(getattr(character, "lorebook", None) or getattr(character, "mes_example", ""))
+    sections = resolve_persona_sections(character)
+    return bool(sections.lorebook or sections.mes_example)
 
 
 def build_character_prompt(
@@ -141,9 +122,7 @@ def build_character_prompt(
     """
     parts: list[str] = []
 
-    # 五块人设统一从技能包取（data/persona_chat/skills/{id}.md 的五个分节），
-    # 逐块回退到 CharacterDef 字段——自建角色没有技能包，全程走回退。
-    # 见 skill_loader.resolve_persona_sections：人设是内容不是逻辑，外置后可独立改动。
+    # 内置与自建角色都只从技能包取内容；缺失技能由加载器明确报错。
     sections = resolve_persona_sections(character)
 
     if sections.role_prompt:
@@ -159,48 +138,20 @@ def build_character_prompt(
         scan = "\n".join(t for t in (scan_text, query) if t)
         hits = match_lorebook(sections.lorebook, scan)
         if hits:
-            parts.append(_format_lorebook(hits, getattr(character, "zone", "education")))
+            parts.append(_format_lorebook(hits))
 
     if include_examples and sections.mes_example:
         parts.append(f"{_EXAMPLE_HEADER}\n{sections.mes_example}")
 
-    if getattr(character, "zone", "education") == "entertainment":
-        parts.append(_ENTERTAINMENT_VOICE_DIRECTIVE)
+    if sections.voice_directive:
+        parts.append(sections.voice_directive)
 
     return "\n\n".join(parts).strip()
 
 
 def build_post_history_directive(character: Any, query: str = "", *, scan_text: str = "") -> str:
+    """返回技能中的后历史指令；调用方负责把它放在历史之后。
+
+    query / scan_text 保留调用兼容性；词条仅在 build_character_prompt 中注入。
     """
-    后历史指令（对应 SillyTavern 的 Author's Note / post-history instructions）。
-
-    为什么必须存在：模型对越靠后的内容越敏感。人设指令全堆在最前面时，
-    对话历史一长就会被稀释，聊十几轮后角色开始漂移、AI 味回来。
-    在历史之后再钉一次「你是谁、该怎么说话、什么绝对不能说」，成本只有几十 token。
-
-    两区内容不同（保留本项目的分区特色）：
-    - 教育区：判断先行、术语翻译、动作描写、可溯源
-    - 娱乐区：口语短句、零引用痕迹、禁结构化
-    """
-    name = (getattr(character, "name", "") or "").strip() or "这个人物"
-    zone = getattr(character, "zone", "education")
-
-    if zone == "entertainment":
-        directive = f"""【落笔前再确认一遍】你是{name}本人，正在跟人微信聊天，不是 AI 助手。
-- 口语、短句，一到两段就收，别写长篇大论
-- 禁止结构化格式：markdown 小标题、列表符号、"第一/第二/第三"、"总结""综上所述"
-- 禁止任何引用痕迹：出处、章节名、资料名、"根据……"
-- 禁止以第三方视角说话（"作为 AI""基于资料"）"""
-    else:
-        directive = f"""【落笔前再确认一遍】你是{name}本人，正与来访者当面交谈，不是 AI 助手。
-- 先点明你的判断，再用大白话解释，最后给出可落地的做法
-- 术语出现当场翻译成白话；引用自己的著作时自然说明出处
-- 每次回答穿插 1~2 处 *动作* 描写，用"他"或自己的名字指代，不要用"你"
-- 禁止"作为 AI""基于资料""总的来说""综上所述"这类助手腔"""
-
-    parts = [directive]
-
-    # 世界书只在人设之后注入一次（见 build_character_prompt）。
-    # 原先还有一档「历史之后」的位置，随世界书简化为两字段一并删除——
-    # 内置角色从未用过它，留着只是一条永远不会执行的分支。
-    return "\n\n".join(parts).strip()
+    return resolve_persona_sections(character).post_history_instructions

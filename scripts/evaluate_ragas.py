@@ -43,6 +43,7 @@ async def run_one(character, char_config, question: str) -> dict:
     """
     from framework.runtime import set_scene_config
     from framework.supervisor_agent import run_supervisor_agent
+    from scenes.persona_chat.prompt_builder import build_character_prompt, build_post_history_directive
     from src.core.state import AgentState
 
     set_scene_config(char_config)
@@ -58,11 +59,11 @@ async def run_one(character, char_config, question: str) -> dict:
         "route_history": [],
         "next_agent": None,
         "error": None,
-        "character_role_prompt": character.role_prompt,
+        "character_role_prompt": build_character_prompt(character, query=question),
         "enable_verification": character.enable_verification,
         "zone": getattr(character, "zone", "education"),
         "sampling": None,
-        "post_history_directive": None,
+        "post_history_directive": build_post_history_directive(character, query=question),
         "user_memory": None,
         "stream_callback": None,
     }

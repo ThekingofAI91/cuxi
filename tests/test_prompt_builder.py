@@ -8,14 +8,22 @@ test_prompt_builder.py — 酒馆式提示词装配器的行为契约
 3. 娱乐区语气指令只给娱乐区（教育区一旦混进去，引用与结构化格式会被禁掉）
 """
 
+from types import SimpleNamespace
+
 import pytest
 
-from scenes.persona_chat.models import CharacterDef
+from scenes.persona_chat import skill_loader
+from scenes.persona_chat.skill_loader import PERSONA_FIELDS, PersonaSections, render_persona_skill
 from scenes.persona_chat.prompt_builder import (
     build_character_prompt,
     has_tavern_components,
     match_lorebook,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_skills(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", tmp_path)
 
 
 def _char(**kw):
@@ -28,7 +36,12 @@ def _char(**kw):
         data_source="",
     )
     base.update(kw)
-    return CharacterDef(**base)
+    character = SimpleNamespace(**base)
+    sections = PersonaSections(**{key: base[key] for key in PERSONA_FIELDS if key in base})
+    (skill_loader.SKILL_DIR / "t.md").write_text(
+        render_persona_skill(character, sections), encoding="utf-8",
+    )
+    return character
 
 
 LORE = [
@@ -95,7 +108,7 @@ class TestBuildCharacterPrompt:
         assert "知而不行" not in p
 
     def test_entertainment_gets_voice_directive(self):
-        c = _char(zone="entertainment")
+        c = _char(zone="entertainment", voice_directive="娱乐区口吻要求由本技能决定")
         p = build_character_prompt(c, query="你好")
         assert "娱乐区口吻要求" in p
 
@@ -104,10 +117,12 @@ class TestBuildCharacterPrompt:
         p = build_character_prompt(c, query="你好")
         assert "娱乐区口吻要求" not in p
 
-    def test_uses_entertainment_lorebook_wording(self):
-        c = _char(zone="entertainment", lorebook=LORE)
+    def test_uses_skill_lorebook_voice_without_zone_override(self):
+        c = _char(zone="entertainment", lorebook=LORE, voice_directive="用人物自己规定的方式解释词条")
         p = build_character_prompt(c, query="知行合一")
-        assert "【你的黑话与老梗" in p
+        assert "【核心概念词条】" in p
+        assert "用人物自己规定的方式解释词条" in p
+        assert "娱乐区口吻要求" not in p
 
     def test_bare_character_still_returns_role_prompt(self):
         c = _char()

@@ -1,127 +1,120 @@
-"""
-export_character_skills.py — 把内置角色的 role_prompt 导出成 skill 包
+"""校验内置角色技能包；保留旧命令入口，不再从 Python 导出或覆盖人设。
 
-人设正文在 `scenes/persona_chat/characters/*.py` 里以字符串常量维护，这个脚本把它
-逐字搬到 `data/persona_chat/skills/{id}.md`，前面补一段 frontmatter（名称、定位、分区、
-对应 collection），后面保持原文不动。
-
-为什么要脚本而不是手抄：人设是一千多字的精细措辞，手抄必然改动字句，而 prompt 的
-字句直接影响生成结果。脚本保证「搬过去的内容与搬之前逐字相同」，行为零变化。
-
-幂等：重复执行覆盖同名文件；已存在但名字不在内置角色列表里的文件不动
-（例如手写的 legend-narrator.md）。
+技能包是人设内容的唯一来源。此命令只检查技能结构、必需人设和身份元数据，
+不启动应用，不读取自建角色，也不写任何技能文件。
 
 用法：
-    .venv/Scripts/python.exe scripts/export_character_skills.py
-    .venv/Scripts/python.exe scripts/export_character_skills.py --check   # 只比对不写盘
+    .venv/Scripts/python.exe scripts/export_character_skills.py --check
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
+import importlib.util
+import re
 import sys
 from pathlib import Path
+from types import ModuleType
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
 SKILL_DIR = ROOT / "data" / "persona_chat" / "skills"
+CHARACTER_IDS = ("jung", "adler", "wangyangming", "fengge", "zhangxuefeng")
+PERSONA_HEADINGS = (
+    "人设", "性格特质", "当前场景", "世界书", "对话示例", "开场白", "口吻要求", "后历史指令",
+)
 
 
-def _frontmatter(char) -> str:
-    """生成 frontmatter。description 用首页卡片已有的文案，避免另写一份说法。"""
-    desc_bits = [b for b in (char.ability, char.review) if b]
-    desc = "；".join(desc_bits) or char.description
-    lines = [
-        "---",
-        f"name: {char.id}-persona",
-        "description: |",
-        f"  {char.name}角色扮演设定：{desc}",
-        f"  分区：{char.zone}　｜　语料库：{char.chroma_collection}",
-        "  正文分五节：人设 / 性格特质 / 当前场景 / 核心概念词条 / 对话示例。",
-        "  改人设只改这里，不必动 characters/*.py；改完用 --check 校验与代码字段一致。",
-        f"zone: {char.zone}",
-        f"collection: {char.chroma_collection}",
-        "---",
-        "",
-    ]
-    return "\n".join(lines)
+def _load_parser() -> ModuleType:
+    """直接加载无应用副作用的解析器，避免包入口启动 config 和自建角色存储。"""
+    name = "_persona_skill_validation_loader"
+    spec = importlib.util.spec_from_file_location(
+        name, ROOT / "scenes" / "persona_chat" / "skill_loader.py",
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("无法加载技能解析器")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    module.SKILL_DIR = SKILL_DIR
+    return module
 
 
-def _sections(char) -> str:
-    """把角色定义拆成五个二级标题分节，字段名与 skill_loader.PERSONA_SECTIONS 对齐。
-
-    分节顺序固定：人设 → 性格特质 → 当前场景 → 核心概念词条 → 对话示例。
-    顺序即拼装顺序，改动会让生成的 prompt 变样（可用 --check 对比发现）。
-    """
-    blocks = ["## 人设", "", (char.role_prompt or "").strip(), ""]
-
-    if (char.personality or "").strip():
-        blocks += ["## 性格特质", "", char.personality.strip(), ""]
-
-    if (char.scenario or "").strip():
-        blocks += ["## 当前场景", "", char.scenario.strip(), ""]
-
-    entries = [
-        (str(e.get("keyword") or "").strip(), str(e.get("content") or "").strip())
-        for e in (char.lorebook or [])
-        if isinstance(e, dict)
-    ]
-    entries = [(k, v) for k, v in entries if k and v]
-    if entries:
-        blocks += ["## 核心概念词条", ""]
-        blocks += [f"- {k}：{v}" for k, v in entries]
-        blocks.append("")
-
-    if (char.mes_example or "").strip():
-        blocks += ["## 对话示例", "", char.mes_example.strip(), ""]
-
-    return "\n".join(blocks).rstrip() + "\n"
+def _metadata(character_id: str) -> dict[str, str]:
+    """只读取 Python 中的身份元数据，不实例化角色，也不把正文当作校验基线。"""
+    path = ROOT / "scenes" / "persona_chat" / "characters" / f"{character_id}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    call = next(
+        node.value for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name) and node.value.func.id == "CharacterDef"
+    )
+    return {
+        keyword.arg: ast.literal_eval(keyword.value)
+        for keyword in call.keywords
+        if keyword.arg in {"id", "zone", "chroma_collection"}
+    }
 
 
-def collect_characters() -> list:
-    from scenes.persona_chat.characters.adler import adler_character
-    from scenes.persona_chat.characters.fengge import fengge_character
-    from scenes.persona_chat.characters.jung import jung_character
-    from scenes.persona_chat.characters.wangyangming import wangyangming_character
-    from scenes.persona_chat.characters.zhangxuefeng import zhangxuefeng_character
+def _headings(body: str) -> set[str]:
+    headings = set(re.findall(r"^##[ \t]+([^\r\n]+?)[ \t]*$", body, flags=re.MULTILINE))
+    # 旧标题继续可读，作者可以逐份改名，无需同时重写所有技能。
+    if "核心概念词条" in headings:
+        headings.add("世界书")
+    return headings
 
-    return [
-        jung_character,
-        adler_character,
-        wangyangming_character,
-        fengge_character,
-        zhangxuefeng_character,
-    ]
+
+def validate() -> list[str]:
+    parser = _load_parser()
+    errors: list[str] = []
+    for character_id in CHARACTER_IDS:
+        filename = f"{character_id}.md"
+        pack = parser.load_skill(character_id)
+        if pack is None:
+            errors.append(f"{filename}: 技能包缺失或为空")
+            continue
+        missing = set(PERSONA_HEADINGS) - _headings(pack.body)
+        if missing:
+            errors.append(f"{filename}: 缺少分节 {', '.join(sorted(missing))}")
+        sections = parser.parse_persona_sections(pack.body)
+        if not sections.role_prompt:
+            errors.append(f"{filename}: 人设不能为空")
+        metadata = _metadata(character_id)
+        if pack.name != f"{character_id}-persona":
+            errors.append(f"{filename}: name 与角色 id 不一致")
+        if pack.zone != metadata.get("zone", "education"):
+            errors.append(f"{filename}: zone 与角色元数据不一致")
+        if pack.meta.get("collection") != metadata["chroma_collection"]:
+            errors.append(f"{filename}: collection 与角色元数据不一致")
+
+    for zone in ("education", "entertainment"):
+        filename = f"_defaults-{zone}.md"
+        pack = parser.load_skill(f"_defaults-{zone}")
+        if pack is None:
+            errors.append(f"{filename}: 默认模板缺失或为空")
+            continue
+        if _headings(pack.body) != {"口吻要求", "后历史指令"}:
+            errors.append(f"{filename}: 默认模板只应包含口吻要求与后历史指令")
+        if pack.zone != zone:
+            errors.append(f"{filename}: zone 与模板名称不一致")
+        sections = parser.parse_persona_sections(pack.body)
+        if not sections.voice_directive or not sections.post_history_instructions:
+            errors.append(f"{filename}: 默认口吻与后历史指令不能为空")
+        if "{{char}}" not in sections.post_history_instructions:
+            errors.append(f"{filename}: 后历史指令应使用 {{{{char}}}} 角色名占位符")
+    return errors
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--check", action="store_true", help="只比对差异，不写盘")
-    args = parser.parse_args()
-
-    SKILL_DIR.mkdir(parents=True, exist_ok=True)
-    chars = collect_characters()
-    changed = 0
-
-    for char in chars:
-        path = SKILL_DIR / f"{char.id}.md"
-        content = _frontmatter(char) + "\n" + _sections(char)
-
-        if args.check:
-            old = path.read_text(encoding="utf-8") if path.exists() else ""
-            status = "一致" if old == content else "有差异"
-            if old != content:
-                changed += 1
-            print(f"{status:>4}　{char.id:<14} {len(char.role_prompt or ''):>5} 字")
-            continue
-
-        path.write_text(content, encoding="utf-8")
-        print(f"写入　{char.id:<14} {len(char.role_prompt or ''):>5} 字　{path}")
-
-    if args.check:
-        print(f"\n共 {len(chars)} 个角色，{changed} 个与磁盘不一致")
-        return 1 if changed else 0
+    parser = argparse.ArgumentParser(description="只读校验技能包，不再从 Python 导出人设")
+    parser.add_argument("--check", action="store_true", help="兼容旧命令；所有运行均只读校验")
+    parser.parse_args()
+    errors = validate()
+    if errors:
+        for error in errors:
+            print(f"ERROR: {error}")
+        return 1
+    print("技能校验通过：5 个内置角色、2 个自建角色默认模板。未写入任何文件。")
     return 0
 
 

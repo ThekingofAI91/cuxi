@@ -20,6 +20,8 @@ from src.core import session_store as session_store_mod
 from src.core.config import settings
 from scenes.persona_chat.card_io import export_card, parse_card, CARD_FORMAT
 from scenes.persona_chat.models import CharacterDef
+from scenes.persona_chat import skill_loader
+from scenes.persona_chat.skill_loader import PersonaSections, render_persona_skill
 from scenes.persona_chat.prompt_builder import (
     compose_lorebook_scan_text,
     build_character_prompt,
@@ -84,14 +86,20 @@ def test_pop_last_turn_empty_session(tmp_path, monkeypatch):
 # 世界书扫描窗口
 # ============================================================
 
-def _char_with_lorebook():
-    return CharacterDef(
-        id="t", name="测试人物", description="", role_prompt="你是测试人物。",
+def _char_with_lorebook(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", tmp_path)
+    character = CharacterDef(
+        id="t", name="测试人物", description="",
         chroma_collection="persona_t", data_source="",
+    )
+    sections = PersonaSections(
+        role_prompt="你是测试人物。",
         lorebook=[
             {"keyword": " shadow", "content": "阴影是你不愿承认的那部分自己。"},
         ],
     )
+    (tmp_path / "t.md").write_text(render_persona_skill(character, sections), encoding="utf-8")
+    return character
 
 
 def test_lorebook_scan_text_contains_history():
@@ -104,9 +112,9 @@ def test_lorebook_scan_text_contains_history():
     assert "a0" not in text2 and "a9" in text2
 
 
-def test_lorebook_triggers_via_recent_history():
+def test_lorebook_triggers_via_recent_history(tmp_path, monkeypatch):
     """关键词只出现在最近几轮对话里（不在本轮消息中），词条也应被注入。"""
-    char = _char_with_lorebook()
+    char = _char_with_lorebook(tmp_path, monkeypatch)
     scan_text = compose_lorebook_scan_text(
         "那它要怎么面对", [("我们刚才聊的 shadow 是什么", "……")]
     )
@@ -114,7 +122,9 @@ def test_lorebook_triggers_via_recent_history():
     assert "阴影是你不愿承认的那部分自己" in prompt
     # 世界书简化后只有一个人设之后的注入点，「历史之后」那一档已删除。
     # 同一关键词重复出现时先到先得——后加的重复词条不占注入名额。
-    char.lorebook.append({"keyword": "shadow", "content": "重复关键词词条"})
+    sections = skill_loader.resolve_persona_sections(char)
+    sections.lorebook.append({"keyword": "shadow", "content": "重复关键词词条"})
+    (tmp_path / "t.md").write_text(render_persona_skill(char, sections), encoding="utf-8")
     prompt2 = build_character_prompt(char, query="那它要怎么面对", scan_text=scan_text)
     assert "阴影是你不愿承认的那部分自己" in prompt2
     assert "重复关键词词条" not in prompt2
@@ -124,8 +134,8 @@ def test_lorebook_triggers_via_recent_history():
     assert "重复关键词词条" not in post
 
 
-def test_lorebook_not_triggered_without_history_hit():
-    char = _char_with_lorebook()
+def test_lorebook_not_triggered_without_history_hit(tmp_path, monkeypatch):
+    char = _char_with_lorebook(tmp_path, monkeypatch)
     prompt = build_character_prompt(char, query="今天天气不错")
     assert "阴影是你不愿承认的那部分自己" not in prompt
 
@@ -144,12 +154,17 @@ def _full_card_char():
             {"keyword": "阴影", "content": "……", "position": "before_char"},
             {"keyword": "", "content": "缺关键词，导出时应被丢弃"},
         ],
-        zone="education", theme="paper", enable_verification=True,
+        zone="education", theme="paper", enable_verification=True, is_custom=True,
+        voice_directive="用短句，保留讽刺。",
+        post_history_instructions="直接回应最后一个问题。",
     )
 
 
-def test_card_export_parse_roundtrip():
+def test_card_export_parse_roundtrip(tmp_path, monkeypatch):
+    from scenes.persona_chat import custom_store
+    monkeypatch.setattr(custom_store, "CUSTOM_DIR", tmp_path)
     char = _full_card_char()
+    custom_store.save_custom_character(char)
     card = export_card(char, background="背景全文")
     assert card["format"] == CARD_FORMAT
     fields = parse_card(card)
@@ -159,6 +174,8 @@ def test_card_export_parse_roundtrip():
     assert fields["zone"] == "education"
     assert fields["enable_verification"] is True
     assert fields["background"] == "背景全文"
+    assert fields["voice_directive"] == "用短句，保留讽刺。"
+    assert fields["post_history_instructions"] == "直接回应最后一个问题。"
     # 缺关键词的词条被清洗掉
     assert len(fields["lorebook"]) == 1
     assert fields["lorebook"][0]["keyword"] == "阴影"

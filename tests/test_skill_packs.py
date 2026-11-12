@@ -1,20 +1,9 @@
-"""
-技能包加载与装配的回归测试
-
-守的是三条线：
-1. 人设正文逐字一致 —— skill 文件与 characters/*.py 里的 role_prompt 必须完全相同。
-   这条防的是「改了 md 没同步上游」或「导出脚本写坏了」，因为 prompt 的措辞直接
-   影响生成结果，差一个字就是另一个角色。
-2. 回退路径有效 —— 技能包缺失（自建角色、删文件、格式坏）时必须回退到内联字段，
-   不能让角色变成没有设定的空白。
-3. 传奇文面契约逐字不变 —— 那份 system prompt 决定前端能否把台词/神情/环境分开
-   着色，且里面排篇布局是实测调出来的（状态块不能排最后）。把它抽成模板后必须
-   与内置模板逐字相同，否则排版会糊成一色。
-"""
+"""角色技能单源、热更新、角色卡无损序列化及传奇文面契约。"""
 
 from __future__ import annotations
 
 import hashlib
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +22,11 @@ from scenes.persona_chat.skill_loader import (
     invalidate_cache,
     load_skill,
     resolve_role_prompt,
+    resolve_persona_sections,
+    PersonaSections,
+    PersonaSkillError,
+    PERSONA_FIELDS,
+    render_persona_skill,
 )
 
 
@@ -46,26 +40,13 @@ ALL_CHARACTERS = [
 
 
 @pytest.mark.parametrize("character", ALL_CHARACTERS, ids=lambda c: c.id)
-def test_skill_persona_matches_inline_fields(character):
-    """技能包的五个分节必须与角色定义里的五个字段逐字相同。
-
-    这是迁移后的守门测试：人设正文、性格、场景、词条、示例全部搬进了 skill，
-    任何一处漂移都会让「改 skill 等于改人设」这个前提失效。
-    """
+def test_builtin_persona_lives_only_in_skill(character):
+    """内置 Python 只留元数据，八块人设均从技能读取。"""
     persona = load_persona(character.id)
-    assert persona is not None, f"{character.id} 缺少技能包，请跑 scripts/export_character_skills.py"
-
-    assert persona.role_prompt == (character.role_prompt or "").strip()
-    assert persona.personality == (character.personality or "").strip()
-    assert persona.scenario == (character.scenario or "").strip()
-    assert persona.mes_example == (character.mes_example or "").strip()
-
-    expected = [
-        {"keyword": str(e.get("keyword") or "").strip(), "content": str(e.get("content") or "").strip()}
-        for e in (character.lorebook or [])
-        if isinstance(e, dict) and e.get("keyword") and e.get("content")
-    ]
-    assert persona.lorebook == expected
+    assert persona is not None
+    for key in PERSONA_FIELDS:
+        assert getattr(persona, key), f"{character.id} 技能缺少 {key}"
+        assert not getattr(character, key), f"{character.id} 在 Python 重复维护 {key}"
 
 
 @pytest.mark.parametrize("character", ALL_CHARACTERS, ids=lambda c: c.id)
@@ -82,17 +63,20 @@ def test_resolve_prefers_skill(monkeypatch):
     """技能包存在时，装配取的是技能包正文而不是内联字段。"""
     pack = load_skill("jung")
     assert pack is not None
-    assert resolve_role_prompt(jung_character) == pack.body
+    assert resolve_role_prompt(jung_character) == parse_persona_sections(pack.body).role_prompt
 
 
-def test_resolve_falls_back_when_skill_missing(monkeypatch):
-    """技能包缺失时回退到内联 role_prompt，不返回空串。"""
+def test_missing_skill_fails_instead_of_using_stale_fields(monkeypatch):
+    """缺技能必须明确报错，不能重新启用旧人设。"""
     monkeypatch.setattr(skill_loader, "load_skill", lambda name: None)
-    assert resolve_role_prompt(jung_character) == jung_character.role_prompt.strip()
+    character = SimpleNamespace(id="missing", role_prompt="旧设定不能复活")
+    with pytest.raises(PersonaSkillError, match="missing"):
+        resolve_role_prompt(character)
 
 
-def test_custom_character_always_uses_inline():
-    """自建角色没有技能包，必须走回退。"""
+def test_custom_character_also_uses_skill(tmp_path, monkeypatch):
+    from scenes.persona_chat import custom_store
+    monkeypatch.setattr(custom_store, "CUSTOM_DIR", tmp_path)
     custom = type(jung_character)(
         id="persona_deadbe",
         name="自建角色",
@@ -102,7 +86,52 @@ def test_custom_character_always_uses_inline():
         data_source="data/persona_chat/custom/",
         is_custom=True,
     )
-    assert resolve_role_prompt(custom) == "你是一个测试角色。"
+    with pytest.raises(PersonaSkillError):
+        resolve_role_prompt(custom)
+    (tmp_path / f"{custom.id}.md").write_text("## 人设\n\n技能里的新角色", encoding="utf-8")
+    assert resolve_role_prompt(custom) == "技能里的新角色"
+
+
+def test_empty_skill_sections_never_refill_from_inline(tmp_path, monkeypatch):
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", tmp_path)
+    (tmp_path / "demo.md").write_text(
+        "## 人设\n新身份\n\n## 对话示例\n\n## 世界书\n\n## 后历史指令\n", encoding="utf-8"
+    )
+    character = SimpleNamespace(
+        id="demo", mes_example="旧示例", lorebook=[{"keyword": "旧", "content": "旧词条"}],
+        post_history_instructions="旧后历史指令",
+    )
+    sections = resolve_persona_sections(character)
+    assert sections.mes_example == ""
+    assert sections.lorebook == []
+    assert sections.post_history_instructions == ""
+
+
+def test_skill_serializer_preserves_embedded_headings_and_multiline_lore():
+    character = SimpleNamespace(id="demo", name="演示", zone="education")
+    original = PersonaSections(
+        role_prompt="这是原文\n\n## 对话示例\n这是原文内的标题\n~~~\n围栏也要保留",
+        mes_example="{{char}}: 你好\n## 人设\n这是台词的一部分",
+        lorebook=[{"keyword": "HTTP:状态", "content": "他说：第一句\n## 后历史指令\n第二句"}],
+        first_mes="坐吧", voice_directive="直接回答", post_history_instructions="保持原来的口吻",
+    )
+    _, body = skill_loader._split_frontmatter(render_persona_skill(character, original))
+    assert parse_persona_sections(body) == original
+
+
+def test_cache_isolated_between_directories(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (a / "demo.md").write_text("甲的人设", encoding="utf-8")
+    (b / "demo.md").write_text("乙的人设", encoding="utf-8")
+    import os
+    stat = (a / "demo.md").stat()
+    os.utime(b / "demo.md", ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", a)
+    assert load_skill("demo").body == "甲的人设"
+    monkeypatch.setattr(skill_loader, "SKILL_DIR", b)
+    assert load_skill("demo").body == "乙的人设"
 
 
 def test_cache_invalidated_by_mtime(tmp_path, monkeypatch):
@@ -197,15 +226,15 @@ def test_parse_sections_keeps_unknown_headings():
 def test_lorebook_splits_on_first_colon():
     """词条按第一个冒号切分：内容里的冒号不能被当成关键词分隔符。"""
     body = chr(10).join([
-        "## 核心概念词条", "", "- 阴影：他说：这是地下室", "- 原型: 英文冒号也认",
+        "## 核心概念词条", "", "- 阴影：他说：这是地下室", "- 原型: 他说：英文冒号也认",
     ])
     sections = parse_persona_sections(body)
     assert sections.lorebook[0] == {"keyword": "阴影", "content": "他说：这是地下室"}
-    assert sections.lorebook[1] == {"keyword": "原型", "content": "英文冒号也认"}
+    assert sections.lorebook[1] == {"keyword": "原型", "content": "他说：英文冒号也认"}
 
 
 def test_legacy_body_without_sections():
-    """没有分节标题的旧格式整篇归入人设，其余四块为空（由调用方逐块回退字段）。"""
+    """旧技能正文仍可读，其余设定保持空白。"""
     sections = parse_persona_sections("你是某某，说话直接。")
     assert sections.role_prompt == "你是某某，说话直接。"
     assert sections.personality == "" and sections.lorebook == []

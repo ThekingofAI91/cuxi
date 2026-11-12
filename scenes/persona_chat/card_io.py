@@ -32,6 +32,7 @@ from __future__ import annotations
 from typing import Any
 
 from scenes.persona_chat.models import CharacterDef
+from scenes.persona_chat.skill_loader import resolve_persona_sections
 
 # 卡片格式标识与版本（导入时校验，向后兼容留出版本号空间）
 CARD_FORMAT = "gkrm-card"
@@ -45,20 +46,23 @@ _LOREBOOK_FIELDS = ("keyword", "content")
 
 
 def export_card(character: CharacterDef, background: str = "") -> dict:
-    """把 CharacterDef 序列化为卡片 dict（不含 format/version 由调用方补）。"""
+    """导出最终技能内容与角色元数据，不导出 DTO 中可能过期的人设。"""
+    persona = resolve_persona_sections(character)
     return {
         "format": CARD_FORMAT,
         "version": CARD_VERSION,
         "name": character.name or "",
         "description": character.description or "",
-        "role_prompt": character.role_prompt or "",
-        "personality": character.personality or "",
-        "scenario": character.scenario or "",
-        "first_mes": character.first_mes or "",
-        "mes_example": character.mes_example or "",
+        "role_prompt": persona.role_prompt,
+        "personality": persona.personality,
+        "scenario": persona.scenario,
+        "first_mes": persona.first_mes,
+        "mes_example": persona.mes_example,
+        "voice_directive": persona.voice_directive,
+        "post_history_instructions": persona.post_history_instructions,
         "lorebook": [
             {k: entry[k] for k in _LOREBOOK_FIELDS if k in entry}
-            for entry in (character.lorebook or [])
+            for entry in persona.lorebook
             if isinstance(entry, dict) and entry.get("keyword") and entry.get("content")
         ],
         "zone": character.zone or "education",
@@ -121,6 +125,8 @@ def parse_card(data: dict) -> dict:
         # 旧版 V1 的开场白字段名为 greeting
         "first_mes": (data.get("first_mes") or data.get("greeting") or "").strip(),
         "mes_example": (data.get("mes_example") or "").strip(),
+        "voice_directive": (data.get("voice_directive") or "").strip(),
+        "post_history_instructions": (data.get("post_history_instructions") or "").strip(),
         "lorebook": lorebook,
         "zone": zone,
         "theme": (data.get("theme") or "original").strip() or "original",
@@ -228,6 +234,8 @@ def _st_to_native(card: dict) -> dict:
         # 旧版 V1 的开场白字段名为 greeting
         "first_mes": (data.get("first_mes") or data.get("greeting") or "").strip(),
         "mes_example": mes,
+        "voice_directive": (data.get("voice_directive") or "").strip(),
+        "post_history_instructions": (data.get("post_history_instructions") or "").strip(),
         "lorebook": lorebook,
         "zone": "entertainment",
         "theme": "original",

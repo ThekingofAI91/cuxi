@@ -12,9 +12,11 @@ class CharacterDef:
     id: str                        # 唯一标识，如 "jung"
     name: str                      # 显示名称（全名），如 "卡尔·荣格"
     description: str               # 简介
-    role_prompt: str               # 角色人设prompt（决定说话风格、立场、知识范围）
     chroma_collection: str         # 向量库collection名
     data_source: str               # 数据目录
+    # 以下人设字段仅承接创建/导入请求与旧 JSON 迁移，不作为运行时回退。
+    # 内置定义不填写正文；生成、导出与开场展示统一读取 Markdown 技能包。
+    role_prompt: str = ""
     avatar: str = "🎭"             # 头像（emoji，空状态中央展示）
     tagline: str = ""              # 个性化标语（首页问候语，按角色展示各自擅长领域）
     ability: str = ""              # 能力标签（首页人物卡片，一句话定位）
@@ -26,20 +28,15 @@ class CharacterDef:
     created_at: float = 0.0           # 自建角色创建时间戳（Unix 秒）；内置角色为 0.0
     zone: str = "education"           # 分区："education"（教育成长区，重专业/可溯源）| "entertainment"（娱乐区，重像人/轻检索/极短）
 
-    # ---- 酒馆式角色卡构件（思路借鉴 SillyTavern：结构化角色卡 + 世界书）----
-    # 两区共用。示例对话与世界书决定"像不像这个人"，但用法不同：
-    #   教育区 —— 词条规定核心概念（降幻觉、提专业度），示例对话示范严谨作答的节奏；
-    #   娱乐区 —— 词条记黑话与口头禅（保人味），并取代向量检索。
+    # ---- 创建/导入时的人设输入，保存后以技能包为唯一来源 ----
     first_mes: str = ""               # 开场白：进入对话时角色先说的一句
     mes_example: str = ""             # 示例对话（few-shot），用 {{user}} / {{char}} 标记
     scenario: str = ""                # 场景设定：角色与来访者所处的情境
     personality: str = ""             # 性格特质（结构化补充，不与人设主体重复）
     # 世界书：[{"keyword": "触发词", "content": "背景片段"}]，用户消息命中关键词才注入
-    # 可扩展字段（均可省略，老格式只有 keyword/content 也能正常工作）：
-    #   secondary_keys: 副关键词列表    enabled: 单条开关（默认 True）
-    #   constant: 常驻条目，不命中也注入  order: 同批排序，小的在前（默认 100）
-    #   position: "before_char"（默认，人设后历史前）| "after_history"（历史后）
     lorebook: list = field(default_factory=list)
+    voice_directive: str = ""         # 口吻要求
+    post_history_instructions: str = ""  # 在历史之后注入的角色指令
 
     # ---- 采样手感（可选；None = 沿用代码默认值）----
     # 不同角色想要的手感不同：峰哥要"稳、短、有梗"，张雪峰要"快、密、有压迫感"。

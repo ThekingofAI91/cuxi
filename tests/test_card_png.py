@@ -10,6 +10,7 @@ import base64
 import json
 import struct
 import zlib
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -58,6 +59,8 @@ def st_v2_card() -> dict:
             "scenario": "客栈相遇",
             "first_mes": "（他抬眼看你）坐。",
             "mes_example": "<START>\n{{user}}: 你好\n{{char}}: 嗯。",
+            "voice_directive": "说话惜字如金。",
+            "post_history_instructions": "先回答眼前的问题。",
             "character_book": {
                 "entries": [
                     {"keys": ["剑", "刀"], "content": "他的剑名为听雨。", "insertion_order": 10,
@@ -88,6 +91,8 @@ def test_parse_v2_card_roundtrip():
     assert fields["role_prompt"] == "一位浪迹天涯的剑客。"
     assert fields["first_mes"] == "（他抬眼看你）坐。"
     assert "<START>" not in fields["mes_example"]
+    assert fields["voice_directive"] == "说话惜字如金。"
+    assert fields["post_history_instructions"] == "先回答眼前的问题。"
     # 世界书已简化为「关键词 + 内容」：keys[0] 作关键词，副关键词与注入位置不再保留
     lb = fields["lorebook"]
     assert len(lb) == 2  # 缺关键词的条目被清洗
@@ -129,14 +134,22 @@ def test_non_png_rejected():
 # ============================================================
 
 @pytest.fixture()
-def client():
-    from src.api.routes import router
+def client(tmp_path, monkeypatch):
+    from framework import runtime
+    from scenes.persona_chat import custom_store
+    from src.api import routes
+    monkeypatch.setattr(custom_store, "CUSTOM_DIR", tmp_path)
+    monkeypatch.setattr(routes.persona_chat_config, "characters", dict(routes.persona_chat_config.characters))
+    monkeypatch.setattr(routes, "_check_rate", lambda *args, **kwargs: None)
+    fake_chroma = SimpleNamespace(delete_collection=lambda **kwargs: None)
+    monkeypatch.setattr(runtime, "get_chroma_client", lambda: fake_chroma)
+    monkeypatch.setattr(routes, "get_chroma_client", lambda: fake_chroma)
     app = FastAPI()
-    app.include_router(router)
+    app.include_router(routes.router)
     return TestClient(app)
 
 
-def test_import_png_card_endpoint_creates_character(client):
+def test_import_png_card_endpoint_creates_character(client, tmp_path):
     card_b64 = base64.b64encode(json.dumps(st_v2_card()).encode("utf-8")).decode("ascii")
     png_b64 = base64.b64encode(build_png({"chara": card_b64})).decode("ascii")
     resp = client.post("/persona/characters/import", json={"png_base64": png_b64})
@@ -145,8 +158,57 @@ def test_import_png_card_endpoint_creates_character(client):
     assert data["character"]["name"] == "测试剑客"
     assert data["lorebook_entries"] == 2
     cid = data["character"]["id"]
+    stored = json.loads((tmp_path / f"{cid}.json").read_text(encoding="utf-8"))
+    assert "role_prompt" not in stored and "first_mes" not in stored
+    skill = tmp_path / f"{cid}.md"
+    assert skill.is_file()
+    skill.write_text(skill.read_text(encoding="utf-8").replace("（他抬眼看你）坐。", "门开着。"), encoding="utf-8")
+    exported = client.get(f"/persona/characters/{cid}/export").json()
+    assert exported["first_mes"] == "门开着。"
+    assert exported["voice_directive"] == "说话惜字如金。"
+    listed = client.get("/persona/characters").json()["characters"]
+    assert next(char for char in listed if char["id"] == cid)["first_mes"] == "门开着。"
     # 清理：删除自建角色（同时清落盘与向量库）
     assert client.delete(f"/persona/characters/{cid}").status_code == 200
+    assert not skill.exists()
+
+
+def test_import_storage_failure_does_not_register_character(client, monkeypatch):
+    from src.api import routes
+    before = set(routes.persona_chat_config.characters)
+
+    def fail_save(character):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(routes, "save_custom_character", fail_save)
+    response = client.post("/persona/characters/import", json={
+        "card": {"name": "临时人物", "role_prompt": "你是临时人物。"},
+    })
+    assert response.status_code == 500
+    assert set(routes.persona_chat_config.characters) == before
+
+
+def test_create_storage_failure_does_not_register_character(client, monkeypatch):
+    from src.api import routes
+    before = set(routes.persona_chat_config.characters)
+
+    async def build(**kwargs):
+        return "你是临时人物。", "背景", [], {}
+
+    async def ingest(*args):
+        return 1
+
+    def fail_save(character):
+        raise OSError("disk unavailable")
+
+    monkeypatch.setattr(routes, "build_persona", build)
+    monkeypatch.setattr(routes, "ingest_texts_async", ingest)
+    monkeypatch.setattr(routes, "save_custom_character", fail_save)
+    response = client.post("/persona/characters/create", json={
+        "name": "临时人物", "role_prompt": "你是临时人物。", "use_web_search": False,
+    })
+    assert response.status_code == 500
+    assert set(routes.persona_chat_config.characters) == before
 
 
 def test_import_png_without_card_data_400(client):

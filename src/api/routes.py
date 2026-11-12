@@ -91,6 +91,7 @@ from scenes.persona_chat.prompt_builder import (
 
 # 角色卡导出/导入（原生 JSON 格式，含世界书与示例对话）
 from scenes.persona_chat.card_io import export_card, parse_card, CARD_FORMAT, CARD_VERSION
+from scenes.persona_chat.skill_loader import resolve_persona_sections
 
 
 from scenes.persona_chat.custom_store import (
@@ -697,6 +698,8 @@ class CharacterCreateRequest(BaseModel):
     scenario: str = ""                # 场景设定
     personality: str = ""             # 性格特质
     lorebook: list = []               # 世界书：[{"keyword","content"}]
+    voice_directive: str = ""         # 角色口吻规则（留空则从分区技能模板复制）
+    post_history_instructions: str = ""  # 历史后的约束（同样存入角色技能）
 
 
 
@@ -720,7 +723,7 @@ async def list_characters():
             location=char_def.location,
             is_custom=char_def.is_custom,
             zone=char_def.zone,
-            first_mes=char_def.first_mes,
+            first_mes=resolve_persona_sections(char_def).first_mes,
         ))
     return {"characters": characters}
 
@@ -882,11 +885,14 @@ async def create_character(http_request: Request, request: CharacterCreateReques
         scenario=(request.scenario or "").strip() or card.get("scenario", ""),
         personality=(request.personality or "").strip() or card.get("personality", ""),
         lorebook=(request.lorebook or []) or card.get("lorebook", []),
+        voice_directive=request.voice_directive.strip(),
+        post_history_instructions=request.post_history_instructions.strip(),
     )
     try:
         save_custom_character(char)
     except Exception as e:
-        print(f"[Create] 落盘失败（内存已注册）: {e}")
+        print(f"[Create] 角色技能与元数据保存失败: {e}")
+        raise HTTPException(status_code=500, detail="角色保存失败，请检查存储目录后重试") from e
     persona_chat_config.characters[cid] = char
 
     print(f"[Create] 自建角色 '{name}' (id={cid}) 已创建，背景 {n_chunks} 块")
@@ -903,7 +909,7 @@ async def create_character(http_request: Request, request: CharacterCreateReques
             location=char.location,
             is_custom=True,
             zone=char.zone,
-            first_mes=char.first_mes,
+            first_mes=resolve_persona_sections(char).first_mes,
         ),
         "chunks": n_chunks,
         "web_search_used": bool(sources),
@@ -924,10 +930,12 @@ async def delete_character(char_id: str):
     if not char.is_custom:
         raise HTTPException(status_code=400, detail="内置角色不可删除")
 
-    # 注销内存
+    # 先删除持久化内容；失败时保留内存注册，避免重启后角色意外复活。
+    try:
+        delete_custom_character_file(char_id)
+    except (OSError, ValueError) as e:
+        raise HTTPException(status_code=500, detail="角色文件删除失败，请重试") from e
     persona_chat_config.characters.pop(char_id, None)
-    # 删除落盘
-    delete_custom_character_file(char_id)
     # 清空向量库
     try:
         from framework.runtime import get_chroma_client
@@ -1060,11 +1068,14 @@ async def import_character_card(http_request: Request, request: CardImportReques
         scenario=fields["scenario"],
         personality=fields["personality"],
         lorebook=fields["lorebook"],
+        voice_directive=fields["voice_directive"],
+        post_history_instructions=fields["post_history_instructions"],
     )
     try:
         save_custom_character(char)
     except Exception as e:
-        print(f"[CardImport] 落盘失败（内存已注册）: {e}")
+        print(f"[CardImport] 角色技能与元数据保存失败: {e}")
+        raise HTTPException(status_code=500, detail="角色保存失败，请检查存储目录后重试") from e
     persona_chat_config.characters[cid] = char
 
     print(f"[CardImport] 已导入角色卡 '{name}' (id={cid})，背景 {n_chunks} 块")
@@ -1081,7 +1092,7 @@ async def import_character_card(http_request: Request, request: CardImportReques
             location=char.location,
             is_custom=True,
             zone=char.zone,
-            first_mes=char.first_mes,
+            first_mes=resolve_persona_sections(char).first_mes,
         ),
         "chunks": n_chunks,
         "lorebook_entries": len(fields["lorebook"]),

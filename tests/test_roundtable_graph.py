@@ -22,6 +22,7 @@ from langchain_core.messages import AIMessageChunk
 
 from src.core.config import settings
 from framework import roundtable as rt
+from scenes.persona_chat.skill_loader import PersonaSections
 
 
 CHARS = {
@@ -105,6 +106,9 @@ def _install(monkeypatch, st, *, quota=None, max_calls=None, summary_enabled=Tru
     monkeypatch.setattr(rt, "ROUNDTABLE_SPEAKER_PAUSE", 0)
     monkeypatch.setattr(rt, "build_character_prompt",
                         lambda character, query=None, **kw: f"你是{character.name}。")
+    monkeypatch.setattr(rt, "resolve_persona_sections", lambda character: PersonaSections(
+        role_prompt=f"你是{character.name}。",
+    ))
     monkeypatch.setattr(
         rt.persona_chat_config, "characters",
         {cid: _fake_char(cid, n[0]) for cid, n in CHARS.items()},

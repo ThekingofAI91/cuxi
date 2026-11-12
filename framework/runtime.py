@@ -368,18 +368,10 @@ def build_direct_messages(
     这两条顺序别动，动了人设就会漂。
     """
     config = get_scene_config()
-    system_prompt = config.direct_response_system_prompt if config else (
-        "你是一个友好的AI助手。"
+    # 角色提示词已包含技能中的口吻要求，不再叠加共享人设覆盖它。
+    system_prompt = character_role_prompt or (
+        config.direct_response_system_prompt if config else "你是一个友好的AI助手。"
     )
-
-    # 注入角色人设
-    if character_role_prompt:
-        voice = getattr(config, "persona_voice_directive", "") if config else ""
-        system_prompt = f"""{character_role_prompt}
-
-{system_prompt}
-
-{voice}"""
 
     # 构建消息列表，注入对话历史
     messages = [("system", system_prompt)]

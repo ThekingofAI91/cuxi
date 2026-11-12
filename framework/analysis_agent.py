@@ -192,16 +192,10 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
 
             # 构建消息列表，注入角色人设和对话历史
             if character_role_prompt:
-                from scenes.persona_chat.config import persona_chat_config
-                _voice = getattr(persona_chat_config, "persona_voice_directive", "")
                 system_msg = f"""{character_role_prompt}
 
-请始终保持角色设定的语气、风格和知识边界来回答问题。
 如果问题超出你的知识范围，诚实说明。
-回答要简洁友好，使用Markdown格式。
-直接回答问题，不需要提及内部处理流程。
-
-{_voice}"""
+直接回答问题，不需要提及内部处理流程。"""
                 # 角色无资料时同样需要更长篇幅与更强差异化
                 llm = get_chat_llm(temperature=0.8, max_tokens=1500)
             else:
