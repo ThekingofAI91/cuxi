@@ -43,12 +43,10 @@ def _fake_char(cid: str, name: str):
 # 打桩：同一条 llm 工厂按参数分派三种用途
 # ============================================================
 class LLMState:
-    """四类用途的打桩队列：主持裁决已不再走模型（改为读投标），
-    bids 供投标调用消费，speeches 供发言消费，summary 供纪要消费。"""
+    """三类用途的打桩队列。主持裁决已不走模型（改为读投标），故没有 host 队列。"""
 
-    def __init__(self, hosts=None, speeches=None, bids=None,
+    def __init__(self, speeches=None, bids=None,
                  summary='{"clashes": [], "positions": [], "open": []}'):
-        self.hosts = list(hosts or [])
         self.speeches = list(speeches or [])
         self.bids = list(bids or [])
         self.summary = summary
@@ -59,9 +57,9 @@ class LLMState:
 
 
 class ScriptedLLM:
-    """roundtable 用一个 llm 工厂产出三种用途，靠参数区分：
+    """roundtable 用一个 llm 工厂产出三种用途，靠温度区分：
 
-    - 主持人决策：temperature=0.3（非流式，一行 JSON）
+    - 投标：temperature=_INTENT_TEMPERATURE（非流式，一个 JSON）
     - 发言：temperature=0.85（流式）
     - 纪要：temperature=0.2（非流式）
     """
@@ -75,10 +73,6 @@ class ScriptedLLM:
         if self.kind == "bid":
             return SimpleNamespace(
                 content=self.st.bids.pop(0) if self.st.bids else '{"want": false, "urgency": 1}'
-            )
-        if self.kind == "host":
-            return SimpleNamespace(
-                content=self.st.hosts.pop(0) if self.st.hosts else '{"converged": true}'
             )
         return SimpleNamespace(content=self.st.summary)
 
@@ -94,8 +88,6 @@ def _install(monkeypatch, st, *, quota=None, max_calls=None, summary_enabled=Tru
         temp = kwargs.get("temperature")
         if temp == rt._INTENT_TEMPERATURE:
             kind = "bid"
-        elif temp == 0.3:
-            kind = "host"
         elif temp == 0.85:
             kind = "speech"
         else:
@@ -192,38 +184,7 @@ def test_topology_is_host_centred_and_subagents_have_no_edges():
 
 
 # ============================================================
-# 2. 主持人决策解析
-# ============================================================
-def test_parse_host_decision_reads_plain_json():
-    d = rt.parse_host_decision(
-        '{"next_speaker_id": "b", "reason": "我要反驳方才那句", "converged": false}'
-    )
-    assert d == {"next_speaker_id": "b", "reason": "我要反驳方才那句", "converged": False}
-
-
-def test_parse_host_decision_recovers_from_prose_and_fences():
-    raw = '我的裁决如下：\n```json\n{"next_speaker_id": "a", "reason": "澄清我", "converged": false}\n```\n以上。'
-    d = rt.parse_host_decision(raw)
-    assert d["next_speaker_id"] == "a" and d["reason"] == "澄清我" and d["converged"] is False
-
-
-def test_parse_host_decision_falls_back_to_field_regex():
-    d = rt.parse_host_decision('next_speaker_id: "c", reason: "你曲解了我" converged: 否')
-    assert d["next_speaker_id"] == "c"
-    assert d["reason"] == "你曲解了我"
-    assert d["converged"] is False
-
-
-def test_parse_host_decision_reads_convergence_and_empty_input():
-    d = rt.parse_host_decision('{"next_speaker_id": "", "reason": "", "converged": true}')
-    assert d["converged"] is True
-    assert rt.parse_host_decision("") == {"next_speaker_id": "", "reason": "", "converged": False}
-    # 解析不出来返回空决策，由调用方规则兜底——主持人这一环失败不能让全场停摆
-    assert rt.parse_host_decision("我觉得应该让乙发言。")["next_speaker_id"] == ""
-
-
-# ============================================================
-# 3. agent 主持：完整一场
+# 2. agent 主持：完整一场
 # ============================================================
 def test_agent_host_runs_a_full_meeting_with_volunteer_reasons(monkeypatch):
     st = _install(
@@ -298,7 +259,7 @@ def test_end_payload_carries_the_authoritative_record(monkeypatch):
 
 
 # ============================================================
-# 4. 用户主持：挂起 + 跨请求恢复
+# 3. 用户主持：挂起 + 跨请求恢复
 # ============================================================
 def test_user_host_suspends_then_resumes_across_requests(monkeypatch):
     """挂起靠 checkpoint 落盘，恢复靠 Command(resume)——两次调用互不相干，现场不丢。"""
@@ -345,7 +306,7 @@ def test_user_host_suspends_then_resumes_across_requests(monkeypatch):
 
 
 def test_resume_on_finished_meeting_is_rejected(monkeypatch):
-    _install(monkeypatch, LLMState(hosts=['{"converged": true}'], speeches=["甲的开场", "乙的开场"]))
+    _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场"]))
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "t-done", picker="agent"))
     assert "end" in _types(events)
 
@@ -355,7 +316,7 @@ def test_resume_on_finished_meeting_is_rejected(monkeypatch):
 
 
 # ============================================================
-# 5. 兜底：坏输入不空转
+# 4. 兜底：坏输入不空转
 # ============================================================
 def test_abstaining_user_falls_back_to_host_rotation(monkeypatch):
     """用户弃权（回填空串）→ 主持人规则兜底挑一位，会议不停摆。"""
@@ -408,8 +369,7 @@ def test_bid_from_ineligible_character_is_filtered(monkeypatch):
 
 def test_host_can_declare_convergence(monkeypatch):
     """主持人宣布收敛 → 直接收场，不再选人。"""
-    _install(monkeypatch, LLMState(hosts=['{"next_speaker_id": "", "converged": true}'],
-                                   speeches=["甲的开场", "乙的开场"]))
+    _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场"]))
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 3, "t-hostconv", picker="agent"))
     types = _types(events)
 
@@ -419,7 +379,7 @@ def test_host_can_declare_convergence(monkeypatch):
 
 
 # ============================================================
-# 6. 数学收敛优先于模型
+# 5. 数学收敛优先于模型
 # ============================================================
 def test_quota_exhausted_converges_without_spending_host_calls(monkeypatch):
     """quota=1：开场就用完全部额度 → 一个交锋轮都不跑，且一次主持人调用都不花。"""
@@ -436,8 +396,7 @@ def test_llm_budget_caps_the_meeting(monkeypatch):
     """没有硬上限时，超预算会以 429 的形式暴露（表现为"某位角色静默失声"）。"""
     st = _install(
         monkeypatch,
-        LLMState(hosts=['{"next_speaker_id": "a", "reason": "有话要说", "converged": false}'] * 5,
-                 speeches=["甲的开场", "乙的开场", "甲的交锋", "不该出现", "不该出现"]),
+        LLMState(speeches=["甲的开场", "乙的开场", "甲的交锋", "不该出现", "不该出现"]),
         max_calls=4,
     )
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 3, "t-budget", picker="agent"))
@@ -509,7 +468,6 @@ def test_summary_degrades_without_extra_calls_when_it_keeps_overstepping(monkeyp
     st = _install(
         monkeypatch,
         LLMState(
-            hosts=['{"converged": true}'],
             speeches=["甲的开场立场陈述", "乙的开场立场陈述"],
             summary='{"positions": [{"name": "甲", "stance": "甲更有说服力"}]}',
         ),
@@ -527,7 +485,6 @@ def test_summary_carries_facts_not_scores(monkeypatch):
     _install(
         monkeypatch,
         LLMState(
-            hosts=['{"converged": true}'],
             speeches=["甲的开场", "乙的开场"],
             summary=(
                 '{"clashes": [{"a": "甲", "b": "乙", "point": "在『德可不可教』上撞上"}],'
@@ -553,7 +510,7 @@ def test_summary_carries_facts_not_scores(monkeypatch):
 def test_summary_can_be_switched_off(monkeypatch):
     _install(
         monkeypatch,
-        LLMState(hosts=['{"converged": true}'], speeches=["甲的开场", "乙的开场"]),
+        LLMState(speeches=["甲的开场", "乙的开场"]),
         summary_enabled=False,
     )
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "t-nosum", picker="agent"))

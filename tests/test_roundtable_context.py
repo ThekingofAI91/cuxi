@@ -114,18 +114,6 @@ def test_transcript_preserves_attribution_and_escaped_boundaries():
     assert rt._format_debate_so_far([]) == ""
 
 
-def test_host_receives_full_early_and_late_arguments():
-    transcript = [_turn("a", "首条发言" + "保留条件" * 500)]
-    transcript += [_turn("b", f"后续发言{i}", kind="rebuttal", round_index=i) for i in range(1, 10)]
-    messages = rt.build_host_messages(
-        topic="议题", roster=[], ledger={}, transcript=transcript,
-        round_index=3, total_rounds=3,
-    )
-    for turn in transcript:
-        assert turn["content"] in messages[-1][1]
-    assert "不表示各方已经达成一致" in messages[0][1]
-
-
 def test_graph_openings_are_blind_and_rebuttal_keeps_both_openings(monkeypatch, tmp_path):
     # 经过真实 host/speaker 调度验证，不能只靠直接构建 prompt 的单测。
     from test_roundtable_graph import LLMState, _install, _run
