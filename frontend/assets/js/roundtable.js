@@ -260,9 +260,14 @@ function _rtAskShow(candidates, timeout, defaultId) {
       btn.type = 'button';
       btn.className = 'rt-ask-item' + (c.id === defaultId ? ' suggested' : '');
       btn.dataset.id = c.id;
+      // 代班主持的候选人带请缨理由；用户主持的候选人只有发言次数，
+      // 就显示「已发言 N/M 次」——点将时最该看的就是谁还没说够。
+      const hint = c.reason || (c.quota != null
+        ? `已发言 ${c.speeches || 0}/${c.quota} 次`
+        : '有话要说');
       btn.innerHTML = `
         <span class="rt-ask-name">${escapeHtml(c.name)}</span>
-        <span class="rt-ask-reason">${escapeHtml(c.reason || '有话要说')}</span>`;
+        <span class="rt-ask-reason">${escapeHtml(hint)}</span>`;
       btn.addEventListener('click', () => _rtAskResolve(c.id));
       rtAskList.appendChild(btn);
     });
