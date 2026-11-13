@@ -130,9 +130,11 @@ def test_graph_openings_are_blind_and_rebuttal_keeps_both_openings(monkeypatch, 
     # 经过真实 host/speaker 调度验证，不能只靠直接构建 prompt 的单测。
     from test_roundtable_graph import LLMState, _install, _run
 
+    # 交锋轮两人都能投标；urgency 相同 → 按距上次发言最久（都说过开场）、再按 id 决胜，
+    # 结果确定地落到 a，不依赖并行请求的返回顺序。
     _install(monkeypatch, LLMState(
-        hosts=['{"next_speaker_id": "b", "reason": "澄清", "converged": false}'],
-        speeches=["甲的开场观点", "乙的独立开场观点", "乙的回应"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要澄清一点", "move": "clarify"}'] * 2,
+        speeches=["甲的开场观点", "乙的独立开场观点", "甲的回应"],
     ), quota=2, summary_enabled=False)
     monkeypatch.setattr(rt.settings, "roundtable_checkpoint_db_path", str(tmp_path / "roundtable.db"))
     observed = []
@@ -149,7 +151,7 @@ def test_graph_openings_are_blind_and_rebuttal_keeps_both_openings(monkeypatch, 
     monkeypatch.setattr(rt, "build_speaker_messages", record)
     monkeypatch.setattr(rt, "_retrieve_for_speaker", retrieve)
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "blind-opening", picker="agent"))
-    assert [item[:2] for item in observed] == [("a", True), ("b", True), ("b", False)]
+    assert [item[:2] for item in observed] == [("a", True), ("b", True), ("a", False)]
     for _, _, messages in observed[:2]:
         assert "甲的开场观点" not in str(messages)
         assert "乙的独立开场观点" not in str(messages)

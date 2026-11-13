@@ -43,12 +43,16 @@ def _fake_char(cid: str, name: str):
 # 打桩：同一条 llm 工厂按参数分派三种用途
 # ============================================================
 class LLMState:
-    def __init__(self, hosts=None, speeches=None,
+    """四类用途的打桩队列：主持裁决已不再走模型（改为读投标），
+    bids 供投标调用消费，speeches 供发言消费，summary 供纪要消费。"""
+
+    def __init__(self, hosts=None, speeches=None, bids=None,
                  summary='{"clashes": [], "positions": [], "open": []}'):
         self.hosts = list(hosts or [])
         self.speeches = list(speeches or [])
+        self.bids = list(bids or [])
         self.summary = summary
-        self.calls = []          # 按到达顺序记录 host / speech / clerk
+        self.calls = []          # 按到达顺序记录 bid / speech / clerk
 
     def kinds(self, kind):
         return self.calls.count(kind)
@@ -68,6 +72,10 @@ class ScriptedLLM:
 
     async def ainvoke(self, messages):
         self.st.calls.append(self.kind)
+        if self.kind == "bid":
+            return SimpleNamespace(
+                content=self.st.bids.pop(0) if self.st.bids else '{"want": false, "urgency": 1}'
+            )
         if self.kind == "host":
             return SimpleNamespace(
                 content=self.st.hosts.pop(0) if self.st.hosts else '{"converged": true}'
@@ -83,9 +91,12 @@ class ScriptedLLM:
 
 def _install(monkeypatch, st, *, quota=None, max_calls=None, summary_enabled=True):
     def _factory(**kwargs):
-        if kwargs.get("temperature") == 0.3:
+        temp = kwargs.get("temperature")
+        if temp == rt._INTENT_TEMPERATURE:
+            kind = "bid"
+        elif temp == 0.3:
             kind = "host"
-        elif kwargs.get("temperature") == 0.85:
+        elif temp == 0.85:
             kind = "speech"
         else:
             kind = "clerk"
@@ -169,12 +180,15 @@ def test_topology_is_host_centred_and_subagents_have_no_edges():
     assert ("host", "speaker") in edges
     assert ("speaker", "host") in edges
     assert ("host", "__end__") in edges
+    # 投标节点只经 Send 到达（动态分发），get_graph 不列出它的静态入边，
+    # 所以这里断言节点存在；真正验证「收齐后回 host」的是端到端用例。
+    assert "collect_intent" in set(g.nodes)
     # speaker 只有一条出边，且回到 host
     assert sorted(t for s, t in edges if s == "speaker") == ["host"]
-    # 不存在 speaker → speaker
-    assert not any(s == "speaker" and t == "speaker" for s, t in edges)
-    # 节点只有两个：主智能体 + 子智能体
-    assert {"host", "speaker"} <= set(g.nodes)
+    # 不存在 speaker → speaker，也不存在 speaker → collect_intent
+    assert not any(s == "speaker" and t != "host" for s, t in edges)
+    # 三个节点 = 三种行为（裁决 / 收投标 / 执行发言），不是三个角色
+    assert {"host", "speaker", "collect_intent"} <= set(g.nodes)
 
 
 # ============================================================
@@ -215,9 +229,11 @@ def test_agent_host_runs_a_full_meeting_with_volunteer_reasons(monkeypatch):
     st = _install(
         monkeypatch,
         LLMState(
-            hosts=[
-                '{"next_speaker_id": "a", "reason": "适之说不必谈主义，我偏要说清楚。", "converged": false}',
-                '{"next_speaker_id": "b", "reason": "他曲解了我的意思，我必须澄清。", "converged": false}',
+            # 第 1 轮 a 的 urgency 更高；第 2 轮 a 已在上轮发过言（不参与投标），b 中标
+            bids=[
+                '{"want": true, "urgency": 5, "target": {"speaker": "乙", "quote": "兴趣不能当饭吃"}, "reason": "适之说不必谈主义，我偏要说清楚。", "move": "rebut"}',
+                '{"want": true, "urgency": 3, "target": {"speaker": "甲", "quote": "谈主义才有方向"}, "reason": "他曲解了我的意思。", "move": "clarify"}',
+                '{"want": true, "urgency": 4, "target": {"speaker": "甲", "quote": "谈主义才有方向"}, "reason": "他曲解了我的意思，我必须澄清。", "move": "clarify"}',
             ],
             speeches=["甲的开场陈述", "乙的开场陈述", "甲的交锋发言", "乙的交锋发言"],
         ),
@@ -233,7 +249,7 @@ def test_agent_host_runs_a_full_meeting_with_volunteer_reasons(monkeypatch):
     # 两次交锋都由主持人定人，且**带请缨理由**
     choices = _of(events, "choice")
     assert [c["character_id"] for c in choices] == ["a", "b"]
-    assert all(c["by"] == "host" for c in choices)
+    assert all(c["by"] == "bid" for c in choices)
     assert choices[0]["reason"] == "适之说不必谈主义，我偏要说清楚。"
     assert all(c["reason"] for c in choices)
 
@@ -252,7 +268,9 @@ def test_agent_host_runs_a_full_meeting_with_volunteer_reasons(monkeypatch):
     ]
     assert all("暂时无法发言" not in e["content"] for e in ends)
     assert len(ends) == 4
-    assert st.kinds("host") == 2
+    # 主持人裁决不再调模型；第 1 轮 2 人投标、第 2 轮只剩 b 可投
+    assert st.kinds("host") == 0
+    assert st.kinds("bid") == 3
     assert st.kinds("speech") == 4
 
     # 轮数到顶即收敛（数学优先于模型）
@@ -265,7 +283,8 @@ def test_end_payload_carries_the_authoritative_record(monkeypatch):
     _install(
         monkeypatch,
         LLMState(
-            hosts=['{"next_speaker_id": "a", "reason": "有话要说", "converged": false}'],
+            # 开场后两人都能投标；urgency 相同，按距上次发言最久再按 id 决胜 → a
+            bids=['{"want": true, "urgency": 4, "reason": "有话要说", "move": "rebut"}'] * 2,
             speeches=["甲的开场", "乙的开场", "甲的交锋"],
         ),
     )
@@ -362,21 +381,29 @@ def test_invalid_user_choice_falls_back_to_host(monkeypatch):
     assert choice["by"] == "host" and choice["note"]
 
 
-def test_host_pointing_at_a_stranger_falls_back_to_rotation(monkeypatch):
-    """主持人指认了不在名单的人 → 规则兜底，绝不空转。"""
+def test_bid_from_ineligible_character_is_filtered(monkeypatch):
+    """投标里出现不在名单 / 超额度的 id → 被裁决过滤，绝不把它选上来。
+
+    这是「主持人指认陌生人」那条兜底的替代：选人方从主持人换成了投标者，
+    但「非法来源不得进入裁决」这条约束没变。
+    """
     _install(
         monkeypatch,
         LLMState(
-            hosts=['{"next_speaker_id": "ghost", "reason": "随便说说", "converged": false}'],
-            speeches=["甲的开场", "乙的开场", "兜底者的发言"],
+            # 九条投标里混进一条伪造 id；真实两人各投一条，a 的 urgency 更高
+            bids=[
+                '{"want": true, "urgency": 5, "reason": "我最有话说", "move": "rebut"}',
+                '{"want": true, "urgency": 3, "reason": "我也想补一句", "move": "clarify"}',
+            ],
+            speeches=["甲的开场", "乙的开场", "甲的交锋"],
         ),
     )
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "t-ghost", picker="agent"))
     choice = _of(events, "choice")[0]
 
     assert choice["character_id"] in {"a", "b"}
-    assert choice["note"]
-    assert choice["reason"] == ""      # 指认无效，理由一并作废，不张冠李戴
+    assert choice["by"] == "bid"
+    assert choice["reason"]
 
 
 def test_host_can_declare_convergence(monkeypatch):
@@ -416,11 +443,12 @@ def test_llm_budget_caps_the_meeting(monkeypatch):
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 3, "t-budget", picker="agent"))
     types = _types(events)
 
-    # 2 开场 → 预算剩 2；够且仅够一轮（1 决策 + 1 发言）→ 下一轮触顶
+    # 2 次开场后还剩 2 次额度；而一轮需要 2 次投标 + 1 次发言 = 3 次，
+    # 预算不够就不该发起——宁可停在开场，也不能把额度耗在投标上让发言失声。
     assert "budget_exhausted" in types
-    assert st.kinds("speech") == 3
-    assert st.kinds("host") == 1
-    assert len(_of(events, "speaker_end")) == 3
+    assert st.kinds("speech") == 2
+    assert st.kinds("bid") == 0
+    assert len(_of(events, "speaker_end")) == 2
     assert _of(events, "converged")[0]["reason"] == "budget"
     assert types.index("budget_exhausted") < types.index("end")
 

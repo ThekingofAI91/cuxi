@@ -290,14 +290,47 @@ function _rtAskResolve(id) {
 async function _rtSendChoice(id) {
   if (!rtState.sessionId) return;
   try {
-    await fetch('/persona/roundtable/' + encodeURIComponent(rtState.sessionId) + '/choice', {
+    const resp = await fetch('/persona/roundtable/' + encodeURIComponent(rtState.sessionId) + '/choice', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       // 空字符串 = 主动弃权，交给主持人代班（后端按"无人选择"处理）
       body: JSON.stringify({ character_id: id || '' }),
     });
+    if (!resp.ok) return;   // 409 = 会议已散场，静默收手
+    // 点将的响应体同样是 SSE：会议从 checkpoint 恢复后接着往下开。
+    // 不消费这条流，用户就只会看到自己点了一下、然后彻底安静。
+    await _rtConsumeStream(resp);
   } catch (err) {
     // 会议可能已经结束（或已被主持人接管），点将失败不影响观感，忽略
+  }
+}
+
+// 消费一条 SSE 流：逐条交给 handleRtEvent。
+// 「开始一场」和「点将恢复」返回的是同一种流（后者由 POST /choice 触发），
+// 所以解析必须共用——否则用户点完将，恢复后的后续事件会全部丢掉。
+async function _rtConsumeStream(resp) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop();
+    for (const line of parts) {
+      if (!line.startsWith('data: ')) continue;
+      let data;
+      try { data = JSON.parse(line.slice(6)); } catch (e) { continue; }
+      // 点将需要暂停消费、等用户点完再继续；因此这里必须 await
+      await handleRtEvent(data);
+    }
+  }
+  if (buffer.trim().startsWith('data: ')) {
+    try {
+      const data = JSON.parse(buffer.trim().slice(6));
+      await handleRtEvent(data);
+    } catch (e) { /* ignore */ }
   }
 }
 
@@ -339,29 +372,7 @@ async function startRoundtable() {
       const d = await resp.json().catch(() => ({}));
       throw new Error(d.detail || ('HTTP ' + resp.status));
     }
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop();
-      for (const line of parts) {
-        if (!line.startsWith('data: ')) continue;
-        let data;
-        try { data = JSON.parse(line.slice(6)); } catch (e) { continue; }
-        // 点将需要暂停消费、等用户点完再继续；因此这里必须 await
-        await handleRtEvent(data);
-      }
-    }
-    if (buffer.trim().startsWith('data: ')) {
-      try {
-        const data = JSON.parse(buffer.trim().slice(6));
-        await handleRtEvent(data);
-      } catch (e) { /* ignore */ }
-    }
+    await _rtConsumeStream(resp);
   } catch (err) {
     _rtFinalizeCurrent();
     _rtStageTeardown();
@@ -391,42 +402,48 @@ async function handleRtEvent(data) {
       _rtAppendDivider(data.phase, data.round, data.total);
       break;
 
-    case 'intent_start': {
-      _rtBarText('各位正在斟酌，此刻有没有非说不可的话…');
+    case 'bidding': {
+      _rtBarText(`第 ${data.round} 轮：各位在斟酌，此刻有没有非说不可的话…`);
       _rtStageEach(s => s.classList.remove('raised', 'candidate'));
       if (rtStage) rtStage.classList.remove('contention');
       _rtStageSetHost(false);
-      // 不在 eligible 名单里的 = 额度已用完，坐暗
-      const eligible = new Set((data.speakers || []).map(s => s.id));
-      _rtStageEach((s, id) => s.classList.toggle('spent', !eligible.has(id)));
+      // 不在候选名单里的 = 上轮刚说完或额度已用完，本轮不参与投标，坐暗
+      const bidders = new Set((data.candidates || []).map(c => c.id));
+      _rtStageEach((s, id) => s.classList.toggle('spent', !bidders.has(id)));
       break;
     }
 
     case 'intent': {
       // 只展示"想说话"的人：愿不愿意开口本身就是看点，沉默的人不占版面
-      if (data.speak) _rtBarChip(data.name, data.reason);
+      if (data.speak || data.want) _rtBarChip(data.name, data.reason);
       const seat = _rtSeat(data.character_id);
-      if (seat) seat.classList.toggle('raised', !!data.speak);
+      if (seat) seat.classList.toggle('raised', !!(data.want || data.speak));
       break;
     }
 
-    case 'contention': {
-      _rtBarText('多人同时要发言——你来点将。');
+    case 'choice_request': {
+      _rtBarText(`第 ${data.round} 轮：该你点将了。`);
       if (rtStage) rtStage.classList.add('contention');
       (data.candidates || []).forEach((c) => {
         const seat = _rtSeat(c.id);
         if (seat) seat.classList.add('candidate');
       });
       _rtStageSetHost(true);
+      // 后端在这里挂起且不设超时，但前端不该无限等——到点自动弃权，
+      // 由主持人按「说得最少」兜底，会议继续，用户可以接着看。
+      const least = (data.candidates || []).slice().sort(
+        (x, y) => (x.speeches || 0) - (y.speeches || 0))[0];
       const chosen = await _rtAskShow(
-        data.candidates || [], data.timeout || 25, data.moderator_default);
+        data.candidates || [], 30, least && least.id);
       await _rtSendChoice(chosen);
       break;
     }
 
     case 'choice': {
       const name = _rtNameOf(data.character_id);
-      const by = data.by === 'user' ? '你指定' : (data.by === 'auto' ? '自行举手' : '主持人代定');
+      const by = data.by === 'user' ? '你指定'
+        : data.by === 'bid' ? '请缨'
+          : (data.by === 'auto' ? '自行举手' : '主持人代定');
       _rtBarText(`本轮由 ${name} 发言（${by}${data.note ? ' · ' + data.note : ''}）`);
       _rtStageEach(s => s.classList.remove('raised', 'candidate'));
       if (rtStage) rtStage.classList.remove('contention');

@@ -1,18 +1,22 @@
 """
 圆桌会议（争鸣）—— LangGraph 主持人拓扑
 
-拓扑：主智能体反复决定"下一位谁发言"，子智能体只发言，**子智能体之间没有边**。
+拓扑：三个节点 = 三种**行为**（裁决 / 收投标 / 发言），不是三个角色。
+**子智能体之间没有边。**
 
-              ┌──────────────────────────────┐
-              │                              │
-    START → host ──(选定某人)──→ speaker ────┘
+    START → host ──(发起投标)──→ collect_intent × N（Send 并行）──(收齐)──→ host
               │
-              └─(收敛 / 配额耗尽 / 超预算)─→ END
+              ├──(按紧迫度定人)──→ speaker ──→ host
+              └──(全员弃权 / 配额耗尽 / 超预算)──→ END
 
-- **host 是主智能体**：唯一决定下一位谁发言，并给出**该角色主动请缨的理由**。前端据此
-  显示"某某主动请缨"，而不是"主持人点名"——理由由主持人以该角色口吻概括（见 HOST_DIRECTIVE
-  的"必须指出靶子"约束）。用户自己当主持人时（picker="user"），host 在决策点 `interrupt()`
-  挂起、等前端回填，**用户全权负责**，系统不代他点将。
+- **host 只做裁决**：不写任何发言内容。每轮交锋先经 `fan_out_bids` 把 collect_intent
+  并行实例化 N 次，向「有配额且上轮没发言」的角色收集请缨；收齐后按 urgency 降序、
+  平手比「距上次发言最久」定人。**请缨理由由角色自己写**，前端据此显示"某某主动请缨"。
+  用户自己当主持人时（picker="user"），host 在决策点 `interrupt()` 挂起、等前端回填，
+  **用户全权负责**，系统不代他点将。
+- **collect_intent 是并行工作单元，不是新角色**：身份随 `Send` payload 走（"我是谁"进
+  payload），广播信息写共享 state（"上轮选了谁、为什么"）——所以"向五位发言者广播"
+  在代码里只是一次 state 写入。单个角色投标失败只记 `intent_errors`，不拖垮整场。
 - **speaker 是子智能体**：每位与会者开口前由**代码强制**跑一遍全管线强检索（与一对一
   `retrieve_documents(strong=True)` 同一份实现），只查自己的语料库、不经模型自持的工具，
   再逐 token 流式。所有与会者**共用同一个 speaker 节点**，靠状态里的 `pending_speaker`
@@ -31,8 +35,13 @@
 事件流（前端据此渲染）：
   start         {session_id, topic, picker, host, speakers:[{id,name,avatar,theme,quota}]}
   round         {round, total, phase: "opening"|"rebuttal"}
-  choice        {character_id, name, by: "host"|"user", reason, candidates, note}
-                by=host 时 reason 是该角色的**请缨理由**；by=user 时是用户点将。
+  bidding       {round, total, candidates:[{id,name}]}
+                代班主持的每轮交锋先开投标：把「谁想说话」这件事并发问一遍。
+  intent        {character_id, name, want, urgency, move, reason}
+                单人投标的回执，随投标陆续到达；want=false 也会推（前端可只渲染 true）。
+  choice        {character_id, name, by: "bid"|"user"|"host", reason, candidates, note}
+                by=bid 是投标中标（reason 即该角色自己的请缨理由）；by=user 是用户点将；
+                by=host 只剩兜底（用户点将无效）一种来源。
   choice_request{round, total, candidates:[{id,name,speeches,quota}]}
                 用户主持时推送，会议在此**挂起**，前端需 POST 回填下一位发言人。
   speaker_start {character_id, name, avatar, theme, speeches, quota, reason}
@@ -47,8 +56,10 @@
   summary_start / summary {data:{clashes,positions,open,closing,applications,speeches,degraded}} / summary_error / summary_end
   error         {content}
 
-  与旧实现的差别：`intent_start` / `intent` 已删除（不再逐人问意愿，改由主持人一次决策）；
-  `contention` 被 `choice_request` 取代（用户主持不再靠内存 Event 等待，改为 checkpoint 挂起）。
+与旧实现的差别：`intent_start` / `intent` 曾因「改由主持人一次决策」删除，现在随投标
+机制回到事件流里，但语义变了——不再是「逐个串行问意愿」，而是**并行投标的回执**，
+且投标只决定「谁最有话说」，不决定「说什么」。`contention` 仍由 `choice_request` 取代
+（用户主持不靠内存 Event 等待，改为 checkpoint 挂起）。
   纪要仍在 `end` **之后**推送，属非阻塞旁路——纪要失败只是少一段纪要，会议结果已完整交付。
 """
 
@@ -64,7 +75,7 @@ from typing import Annotated, AsyncIterator, TypedDict
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 try:  # 导入位置在 langgraph 版本间搬过家
     from langgraph.config import get_stream_writer
@@ -104,6 +115,11 @@ ROUNDTABLE_SPEAKER_PAUSE = 4.0
 _SPEECH_MAX_TOKENS = 1600
 _HOST_MAX_TOKENS = 1600
 _SUMMARY_MAX_TOKENS = 1600
+# 投标只要一个 JSON 对象，给 400 足够；给大了模型反而开始长篇大论地论证自己该发言
+_INTENT_MAX_TOKENS = 400
+# 投标是「判断题」不是「创作题」，用低温度；同时刻意与主持人（0.3）、发言（0.85）
+# 都错开，测试打桩时可以按温度分派到不同用途。
+_INTENT_TEMPERATURE = 0.35
 
 # ---- 主持人决策 ----
 # 人数和发言轮数已有硬上限；完整记录保留论据和限定条件，避免截断误判分歧。
@@ -132,7 +148,125 @@ ROUNDTABLE_DEBATE_DIRECTIVE = """
 
 
 # ============================================================
-# 主持人（主智能体）：只定"下一位谁发言"，不做裁判
+# 投标：人物自己判断「此刻有没有非说不可的话」
+# ============================================================
+# 为什么不让主持人推断：主持人只能从记录里猜谁被冒犯，猜错了就是替人说话。
+# 投标把「相关性判断」放回每个角色自己手里，主持人只做排序与裁决。
+#
+# urgency 五档必须给具体锚点，并且要给「不说」一个正当出口——否则模型被问到
+# 「你要不要说」几乎总会答「要」，一场辩论会变成五个人抢麦。
+INTENT_DIRECTIVE = """
+你正在参加一场圆桌辩论。主持人现在收集下一轮的发言意愿。
+
+【你只需要判断一件事】此刻你有没有非说不可的话。
+
+【urgency 必须选一档，不要往上抬】
+5　有人直接曲解了你的核心概念，或把立场安到你头上，不澄清就是失职
+4　有人提出了与你明确冲突的具体主张，你手上有现成的反驳
+3　有人提到的点与你有关但没冲突，你可以补一个区分让讨论更清楚
+2　你有相关看法，但别人说也差不多，听着就行
+1　这一刻没什么非说不可的，不说话毫无损失
+
+选 1 或 2 是正常的。一场讨论里大多数人多数时候落在 1 到 3 之间，
+不要为了让场面热闹而抬高自己的档位。
+
+【决定要说，就交代三件事】
+· 回应谁的哪一句：quote 必须是他原话里连续的 8 到 15 个字，用「」括起来
+· 这句话为什么需要你出来：一句话，用第一人称，说清他错在哪或漏了什么
+· 你打算怎么处理：rebut（反驳）/ clarify（澄清被曲解）/ distinguish（提出区分）/ ask（追问）
+
+【只输出一个 JSON 对象，不要任何其他内容】
+要说：
+{"want": true, "urgency": 4, "target": {"speaker": "某位与会者", "quote": "原话片段"}, "reason": "第一人称一句话", "move": "rebut"}
+不说：
+{"want": false, "urgency": 1, "reason": "此刻没有非说不可的话"}
+""".strip()
+
+_INTENT_WANT_RE = re.compile(r"[\"']?want[\"']?\s*[:：]\s*(true|false|是|否)", re.I)
+_INTENT_URGENCY_RE = re.compile(r"[\"']?urgency[\"']?\s*[:：]\s*([1-5])")
+_INTENT_SPEAKER_RE = re.compile(r"[\"']?speaker[\"']?\s*[:：]\s*[\"']([^\"']{1,40})[\"']")
+_INTENT_QUOTE_RE = re.compile(r"[\"']?quote[\"']?\s*[:：]\s*[\"']([^\"']{2,80})[\"']")
+_INTENT_REASON_RE = re.compile(r"[\"']?reason[\"']?\s*[:：]\s*[\"']([^\"']{1,200})[\"']")
+_INTENT_MOVE_RE = re.compile(r"[\"']?move[\"']?\s*[:：]\s*[\"']?(\w+)")
+_INTENT_MOVES = ("rebut", "clarify", "distinguish", "ask")
+
+
+def parse_intent(raw: str) -> dict:
+    """把一次投标解析成结构化结果。
+
+    解析失败一律当成「不投标」——宁可少一个人发言，也不要因为格式坏掉让整场崩。
+    调用方可以从 ``parse_error`` 判断这是「真的不想说」还是「说出了但解析不了」。
+    """
+    blank = {"want": False, "urgency": 1, "reason": "", "target": {}, "move": "", "parse_error": ""}
+    if not raw or not raw.strip():
+        return {**blank, "parse_error": "空响应"}
+
+    obj = None
+    m = _JSON_OBJ_RE.search(raw)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+        except Exception:
+            obj = None
+    if isinstance(obj, dict):
+        want = obj.get("want")
+        if isinstance(want, str):
+            want = want.strip().lower() in ("true", "是", "yes", "1")
+        urgency = obj.get("urgency")
+        try:
+            urgency = int(urgency)
+        except (TypeError, ValueError):
+            urgency = 1
+        urgency = max(1, min(5, urgency))
+        target = obj.get("target") if isinstance(obj.get("target"), dict) else {}
+        move = str(obj.get("move") or "").strip().lower()
+        return {
+            "want": bool(want),
+            "urgency": urgency,
+            "reason": str(obj.get("reason") or "").strip()[:200],
+            "target": {
+                "speaker": str(target.get("speaker") or "").strip(),
+                "quote": str(target.get("quote") or "").strip(),
+            },
+            "move": move if move in _INTENT_MOVES else "",
+            "parse_error": "",
+        }
+
+    # JSON 坏了就用正则尽力捞
+    want_m = _INTENT_WANT_RE.search(raw)
+    if not want_m:
+        return {**blank, "parse_error": "未找到 want 字段"}
+    want = want_m.group(1).lower() in ("true", "是")
+    urgency_m = _INTENT_URGENCY_RE.search(raw)
+    move_m = _INTENT_MOVE_RE.search(raw)
+    speaker_m = _INTENT_SPEAKER_RE.search(raw)
+    quote_m = _INTENT_QUOTE_RE.search(raw)
+    reason_m = _INTENT_REASON_RE.search(raw)
+    return {
+        "want": want,
+        "urgency": int(urgency_m.group(1)) if urgency_m else 1,
+        "reason": (reason_m.group(1) if reason_m else "")[:200],
+        "target": {
+            "speaker": speaker_m.group(1) if speaker_m else "",
+            "quote": quote_m.group(1) if quote_m else "",
+        },
+        "move": (move_m.group(1) if move_m and move_m.group(1) in _INTENT_MOVES else ""),
+        "parse_error": "JSON 解析失败，已用正则兜底",
+    }
+
+
+def _row_of(ledger: dict, cid: str) -> dict:
+    return ledger.get(cid) or {}
+
+
+# ============================================================
+# 主持人模型调用（历史实现，已不在生产路径上）
+#
+# 优化一百三十之后，交锋轮不再让主持人"一次决策定人 + 代写请缨理由"，
+# 改为每个角色自己投标、主持人只排序。所以下面这组函数**当前没有调用方**：
+#   HOST_DIRECTIVE / build_host_messages / parse_host_decision / _HOST_MAX_TOKENS
+# 保留的原因只有一个：tests 仍覆盖 prompt 装配与解析容错，删掉会连带丢测试。
+# 读到这段代码时不要据此认为"主持人还在调模型"——请以 host_node 的实现为准。
 # ============================================================
 HOST_DIRECTIVE = """
 你是这场圆桌会议的主持人（主席）。与会者都是历史人物，各有立场。你的职责只有一件事：
@@ -235,9 +369,18 @@ class RoundtableState(TypedDict, total=False):
 
     round_index: int                # 已完成的交锋轮数
     pending_speaker: str            # host 选定、待 speaker 消费的角色 id
-    pending_kind: str               # "opening" | "rebuttal"
+    pending_kind: str               # "opening" | "rebuttal" | "bidding"
     pending_round: int
     pending_reason: str             # 请缨理由
+
+    # ---- 投标：愿不愿意发言由人物自己判断，主持人只做排序与裁决 ----
+    # bid_round 记「已发起投标的最大轮次」。host 靠它区分两件事：
+    #   本轮的投标还没开始（该发起） / 已经收齐（该裁决）。
+    # 用轮次而不是布尔量，是因为一次会议会反复进出投标阶段。
+    bid_round: int
+    intents: Annotated[list[dict], add]        # 投标记录，累加（并行写入必须用 reducer）
+    intent_errors: Annotated[list[dict], add]  # 投标失败记录：区分「不想说」与「没能说」
+    last_decision: dict             # 上一轮裁决（选中者 / 理由 / 被拒者），供下一轮投标参考
 
     converged: bool
     converge_reason: str            # "host" | "quota" | "rounds" | "budget"
@@ -366,6 +509,7 @@ async def build_speaker_messages(
     round_index: int,
     total_rounds: int,
     is_opening: bool,
+    assigned_task: dict | None = None,
 ) -> list[tuple[str, str]]:
     """拼装某发言者本轮的 LangChain 消息列表（system / user）。检索异步，故为 async。"""
     # 酒馆式装配：示例对话与世界书让发言者在交锋中也不丢自己的语气；
@@ -425,13 +569,191 @@ async def build_speaker_messages(
     messages.append(("user", "\n\n".join(data_parts)))
     after_history.append(ROUNDTABLE_DEBATE_DIRECTIVE)
     messages.append(("system", "\n\n".join(after_history)))
-    messages.append(("user", task))
+
+    # 中标任务紧贴生成时刻：它说明「这一轮你必须回应哪一句」。
+    # 最后那句括注是独立性出口——任务可以给方向，不能替人决定立场。
+    if assigned_task and str(assigned_task.get("reason") or "").strip():
+        move_label = {
+            "rebut": "反驳", "clarify": "澄清被曲解处",
+            "distinguish": "提出一个区分", "ask": "追问",
+        }.get(str(assigned_task.get("move") or ""), "回应")
+        lines = ["【主持人分配给你的任务】", f"类型：{move_label}"]
+        target = assigned_task.get("target") or {}
+        if target.get("speaker"):
+            lines.append(f"要回应的人：{target['speaker']}")
+        if target.get("quote"):
+            lines.append(f"他的原话：「{target['quote']}」")
+        lines.append(f"为什么是你：{assigned_task['reason']}")
+        lines += [
+            "",
+            "（这个任务按你的请缨分配。如果你认为主持人判断错了，"
+            "可以先说明这一点，再讲你真正想讲的。）",
+            "",
+            task,
+        ]
+        messages.append(("user", "\n\n".join(lines)))
+    else:
+        messages.append(("user", task))
     return messages
 
 
 # ============================================================
 # 构造主持人的决策 prompt
 # ============================================================
+# ============================================================
+# 投标：让每个角色自己判断「要不要发言」（并行执行）
+# ============================================================
+async def ask_intent(
+    *,
+    character,
+    topic: str,
+    transcript: list[dict],
+    my_last: dict | None,
+    last_decision: dict,
+    my_speeches: int,
+    quota: int,
+    round_index: int,
+) -> dict:
+    """问一个角色「此刻有没有非说不可的话」，返回结构化投标。
+
+    投标只用人设正文 + 性格 + 场景 + 口吻，不带世界书与示例对话——
+    判断「有没有被冒犯」用不上词条与示范语气，带上只是白烧 token。
+    """
+    role = build_character_prompt(
+        character, query=topic, include_lorebook=False, include_examples=False
+    )
+    messages: list[tuple[str, str]] = [("system", "\n\n".join([role, INTENT_DIRECTIVE]))]
+
+    data = [f"议题：{topic}", f"你是：{character.name}（character_id={character.id}）"]
+
+    if my_last:
+        data.append("【你上一次的发言】\n" + json.dumps(my_last, ensure_ascii=False))
+
+    last_selected = str(last_decision.get("selected") or "")
+    if last_selected:
+        who = last_decision.get("selected_name") or last_selected
+        if last_selected == character.id:
+            data.append(f"【上一轮主持人选了你】理由：{last_decision.get('reason', '')}")
+        else:
+            data.append(
+                f"【上一轮主持人选了 {who}】理由：{last_decision.get('reason', '')}\n"
+                "（没有选你。这一轮如果你也没有非说不可的话，就如实报低档。）"
+            )
+
+    history = _format_debate_so_far(transcript)
+    if history:
+        data.append("【完整发言记录】\n" + history)
+
+    data.append(f"【你的配额】已发言 {my_speeches} 次，上限 {quota} 次")
+    data.append(f"这是第 {round_index} 轮交锋。请给出你的投标 JSON。")
+    messages.append(("user", "\n\n".join(data)))
+
+    llm = get_chat_llm(temperature=_INTENT_TEMPERATURE, max_tokens=_INTENT_MAX_TOKENS)
+    resp = await ainvoke_nonempty(llm, messages, attempts=1)
+    bid = parse_intent(str(getattr(resp, "content", "") or ""))
+    bid["character_id"] = character.id
+    bid["name"] = character.name
+    bid["round"] = round_index
+    return bid
+
+
+async def collect_intent_node(payload: dict) -> dict:
+    """单个角色的投标（由 Send 并行分发）。
+
+    任何一个角色的投标失败都只记进 intent_errors，不抛给整场——
+    否则一个人撞上 429 就让整场辩论证停摆。
+    """
+    cid = str(payload.get("character_id") or "")
+    rnd = int(payload.get("round") or 0)
+    ch = persona_chat_config.characters.get(cid)
+    if ch is None:
+        return {"intent_errors": [{"character_id": cid, "round": rnd, "error": "角色不可用"}]}
+    try:
+        bid = await ask_intent(
+            character=ch,
+            topic=str(payload.get("topic") or ""),
+            transcript=list(payload.get("transcript") or []),
+            my_last=payload.get("my_last"),
+            last_decision=dict(payload.get("last_decision") or {}),
+            my_speeches=int(payload.get("my_speeches") or 0),
+            quota=int(payload.get("quota") or 2),
+            round_index=rnd,
+        )
+        # 投标回执立刻推给前端：并行分支陆续返回，谁先举手谁先亮灯。
+        # 这里必须自己兜异常——万一并行任务里取不到 custom 流，也不能让
+        # 一次「推事件失败」被外层 except 当成「投标失败」，把整份投标丢掉。
+        try:
+            _writer()({
+                "type": "intent",
+                "character_id": cid,
+                "name": ch.name,
+                "want": bool(bid.get("want")),
+                "urgency": int(bid.get("urgency") or 1),
+                "move": str(bid.get("move") or ""),
+                "reason": str(bid.get("reason") or ""),
+            })
+        except Exception:
+            pass
+        return {"intents": [bid]}
+    except Exception as e:  # 429 / 超时 / 解析异常都降级为「本轮不请缨」
+        print(f"[Bid] {cid} 投标失败: {type(e).__name__}: {str(e)[:100]}")
+        return {
+            "intent_errors": [{
+                "character_id": cid,
+                "round": rnd,
+                "error": f"{type(e).__name__}: {str(e)[:100]}",
+            }]
+        }
+
+
+def _last_spoke_round(transcript: list[dict], cid: str) -> int:
+    """某人最后一次发言在第几轮；从没说过返回 -1，排序时最优先。"""
+    for turn in reversed(transcript):
+        if turn.get("character_id") == cid:
+            return int(turn.get("round") or 0)
+    return -1
+
+
+def fan_out_bids(state: RoundtableState) -> list:
+    """把投标单并行发给每个可投标的人。
+
+    可投标 = 配额没用完 **且** 不是上一轮的发言者。
+    「上轮没说话的人才能投标」等于强制轮转：上一轮说完的人本轮必须闭嘴，
+    这样没人能占住话语权；代价是只剩他一个有配额时会直接收敛，哪怕他还有话。
+    """
+    roster = list(state.get("roster") or [])
+    ledger = state.get("ledger") or {}
+    quota = int(state.get("quota") or 2)
+    rnd = int(state.get("bid_round") or 0)
+    transcript = list(state.get("transcript") or [])
+    last_decision = dict(state.get("last_decision") or {})
+    last_speaker = str(last_decision.get("selected") or "")
+    topic = str(state.get("topic") or "")
+
+    sends: list = []
+    for entry in roster:
+        cid = str(entry.get("id") or "")
+        if not cid or cid == last_speaker:
+            continue
+        speeches = _speeches_of(ledger, cid)
+        if speeches >= quota:
+            continue
+        my_last = next(
+            (t for t in reversed(transcript) if t.get("character_id") == cid), None
+        )
+        sends.append(Send("collect_intent", {
+            "character_id": cid,
+            "round": rnd,
+            "topic": topic,
+            "transcript": transcript,
+            "my_last": my_last,
+            "last_decision": last_decision,
+            "my_speeches": speeches,
+            "quota": quota,
+        }))
+    return sends
+
+
 def build_host_messages(
     *,
     topic: str,
@@ -797,8 +1119,13 @@ async def host_node(state: RoundtableState) -> dict:
     eligible = [cid for cid in eligible if cid]
     if not eligible:
         return _converge("quota")
-    # 这一轮要花 1 次主持人决策 + 1 次发言，两次都要留在预算内
-    if llm_calls + 2 > max_calls:
+    # 一轮的消耗 = 每个可投标者一次投标 + 一次发言。
+    # 主持人裁决已经不调模型（读投标排序），所以不能再按「决策 + 发言 = 2」估。
+    # 估小了会把预算耗在投标上，轮到发言时没额度，表现成「某人静默失声」。
+    _last_speaker = str((state.get("last_decision") or {}).get("selected") or "")
+    _bidders = [c for c in eligible if c != _last_speaker]
+    _round_cost = (len(_bidders) if picker != "user" else 1) + 1
+    if llm_calls + _round_cost > max_calls:
         return _converge("budget")
 
     next_round = round_index + 1
@@ -807,6 +1134,8 @@ async def host_node(state: RoundtableState) -> dict:
     reason = ""
     note = ""
     cid = ""
+    round_bids: list[dict] = []      # 本轮有效投标（user 主持时为空，由点将决定）
+    winner: dict = {}                # 中标的那份投标（user 主持时为空）
 
     # ---- 3. 定人 ----
     if picker == "user":
@@ -834,40 +1163,54 @@ async def host_node(state: RoundtableState) -> dict:
             cid = _fallback_pick(ledger, eligible)
             by, reason, note = "host", "", "未收到有效点将，主持人兜底"
     else:
-        messages = build_host_messages(
-            topic=topic,
-            roster=roster,
-            ledger=ledger,
-            transcript=transcript,
-            round_index=next_round,
-            total_rounds=max_rounds,
-        )
-        llm_calls += 1
-        decision = {"next_speaker_id": "", "reason": "", "converged": False}
-        _host_prompt = _messages_chars(messages)
-        _t_host = time.perf_counter()
-        try:
-            llm = get_chat_llm(temperature=0.3, max_tokens=_HOST_MAX_TOKENS)
-            resp = await ainvoke_nonempty(llm, messages, attempts=1)
-            _raw = str(getattr(resp, "content", "") or "")
-            _host_out = len(_raw)
-            decision = parse_host_decision(_raw)
-        except Exception as e:
-            print(f"[Roundtable] 主持人决策失败: {e}")
-        _host_ms = (time.perf_counter() - _t_host) * 1000
+        # ---- 3A. 本轮投标还没发起：先并发收集意愿 ----
+        # bid_round 用来区分「该发起」与「已收齐」：发起时推到 next_round，
+        # 收齐后回到这里两者相等，说明该裁决了。
+        if int(state.get("bid_round") or 0) < next_round:
+            last_speaker = str((state.get("last_decision") or {}).get("selected") or "")
+            bidders = [c for c in eligible if c != last_speaker]
+            if not bidders:
+                # 只剩上一轮发言者还有配额。按「上轮说过的人本轮闭嘴」的规则，
+                # 没人能投标——这是规则的自然结果，不是故障，直接收场。
+                return _converge("quota")
+            write({
+                "type": "bidding",
+                "round": next_round,
+                "total": max_rounds,
+                "candidates": [{"id": c, "name": _name_of(state, c)} for c in bidders],
+            })
+            return {
+                "bid_round": next_round,
+                "pending_kind": "bidding",
+                "pending_speaker": "",
+                "pending_round": next_round,
+                "pending_reason": "",
+                "ended": False,
+                **_tfields(),
+            }
 
-        if decision.get("converged"):
-            out = _converge("host")
-            out["llm_calls"] = llm_calls
-            return out
+        # ---- 3B. 投标已收齐：urgency 高者优先，平手按距上次发言最久 ----
+        round_bids = [
+            i for i in (state.get("intents") or [])
+            if int(i.get("round") or 0) == next_round
+            and i.get("want")
+            and str(i.get("character_id") or "") in eligible
+        ]
+        if not round_bids:
+            # 无人请缨 = 真的没人有话说了。这比主持人推断「讨论已充分」可信。
+            print(f"[Roundtable] 第 {next_round} 轮无人请缨，收敛")
+            return _converge("host")
 
-        cid = str(decision.get("next_speaker_id") or "").strip()
-        reason = str(decision.get("reason") or "").strip().replace("\n", " ")[:_HOST_REASON_CHARS]
-        if cid not in eligible:
-            # 模型指认了不在名单 / 额度已满的人：规则兜底，别让会议空转
-            cid = _fallback_pick(ledger, eligible)
-            reason = ""
-            note = "主持人指认无效，改由规则兜底"
+        round_bids.sort(key=lambda i: (
+            -int(i.get("urgency") or 1),
+            _last_spoke_round(transcript, str(i.get("character_id") or "")),
+            str(i.get("character_id") or ""),
+        ))
+        winner = round_bids[0]
+        cid = str(winner.get("character_id") or "")
+        reason = str(winner.get("reason") or "").strip().replace(chr(10), " ")[:_HOST_REASON_CHARS]
+        by = "bid"
+        note = f"{len(round_bids)} 人竞争" if len(round_bids) > 1 else ""
 
     # ---- 4. 事件（放在定人之后，避免挂起重放时重复）----
     write({"type": "round", "round": next_round, "total": max_rounds, "phase": "rebuttal"})
@@ -881,11 +1224,30 @@ async def host_node(state: RoundtableState) -> dict:
         "note": note,
     })
 
+    # 裁决结果写进状态即等于广播：下一轮每个投标者被 Send 拉起时都会读到它，
+    # 从而知道「上一轮选了谁、为什么、我被跳过没有」。不需要点对点发消息。
+    last_decision = {
+        "selected": cid,
+        "selected_name": _name_of(state, cid),
+        "reason": reason,
+        "quote": str(((winner or {}).get("target") or {}).get("quote") or ""),
+        "target_speaker": str(((winner or {}).get("target") or {}).get("speaker") or ""),
+        "move": str((winner or {}).get("move") or ""),
+        "rejected": [
+            str(i.get("character_id") or "")
+            for i in (round_bids if picker != "user" else [])
+            if str(i.get("character_id") or "") != cid
+        ],
+        "round": next_round,
+        "by": by,
+    }
+
     return {
         "pending_speaker": cid,
         "pending_kind": "rebuttal",
         "pending_round": next_round,
         "pending_reason": reason,
+        "last_decision": last_decision,
         "llm_calls": llm_calls,
         "ended": False,
         **_tfields(),
@@ -932,6 +1294,19 @@ async def speaker_node(state: RoundtableState) -> dict:
         "reason": reason,
     })
 
+    # 中标任务来自上一轮 host 的裁决（last_decision）。开场轮没有任务。
+    _decision = dict(state.get("last_decision") or {})
+    _assigned = None
+    if not is_opening and str(_decision.get("selected") or "") == cid:
+        _assigned = {
+            "reason": _decision.get("reason") or "",
+            "move": _decision.get("move") or "",
+            "target": {
+                "speaker": _decision.get("target_speaker") or "",
+                "quote": _decision.get("quote") or "",
+            },
+        }
+
     messages = await build_speaker_messages(
         character=ch,
         topic=str(state.get("topic") or ""),
@@ -939,6 +1314,7 @@ async def speaker_node(state: RoundtableState) -> dict:
         round_index=rnd,
         total_rounds=int(state.get("max_rounds") or 1),
         is_opening=is_opening,
+        assigned_task=_assigned,
     )
 
     full = ""
@@ -989,10 +1365,16 @@ async def speaker_node(state: RoundtableState) -> dict:
 # ============================================================
 # 组装图
 # ============================================================
-def route_after_host(state: RoundtableState) -> str:
-    """主持人之后的唯一分叉：还有人要说话就去 speaker，否则收场。"""
+def route_after_host(state: RoundtableState):
+    """主持人之后的分叉：投标→并行分发，定完人→speaker，否则收场。
+
+    返回类型故意不标注成 str：LangGraph 的 Send 必须由路由函数**直接返回**，
+    不能塞进 add_conditional_edges 的映射表（那样会被当成未知节点名）。
+    """
     if state.get("ended") or state.get("converged"):
         return END
+    if str(state.get("pending_kind") or "") == "bidding":
+        return fan_out_bids(state)      # list[Send]：collect_intent 并行实例化 N 次
     if not str(state.get("pending_speaker") or ""):
         return END
     return "speaker"
@@ -1001,14 +1383,23 @@ def route_after_host(state: RoundtableState) -> str:
 def build_roundtable_graph(checkpointer=None):
     """编译圆桌图。传入 checkpointer 才能跨请求挂起/恢复。
 
-    拓扑：START→host，host→(speaker | END)，speaker→host。
-    注意 speaker 只连回 host —— 子智能体之间没有边，这是刻意的结构约束。
+    拓扑：
+        START → host → (bid | speaker | END)
+        bid   → collect_intent × N（Send 并行分发）→ host
+        speaker → host
+
+    三个节点，但 bid 会把 collect_intent 并行拉起 N 次——节点的数量是三种**行为**
+    （裁决 / 收投标 / 执行发言），不是三个角色。子智能体之间仍然没有边。
     """
     g = StateGraph(RoundtableState)
     g.add_node("host", host_node)
     g.add_node("speaker", speaker_node)
+    g.add_node("collect_intent", collect_intent_node)
     g.add_edge(START, "host")
+    # 映射表只声明字符串返回值的目标；路由函数返回 list[Send] 时 LangGraph 直接按
+    # Send 分发，不查这张表（把函数塞进映射值会被当成未知节点名而报错）。
     g.add_conditional_edges("host", route_after_host, {"speaker": "speaker", END: END})
+    g.add_edge("collect_intent", "host")
     g.add_edge("speaker", "host")
     return g.compile(checkpointer=checkpointer)
 
