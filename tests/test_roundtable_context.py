@@ -109,8 +109,9 @@ def test_transcript_preserves_attribution_and_escaped_boundaries():
         _turn("b", "乙的真实陈述"),
         _turn("a", "甲的补充", kind="rebuttal", round_index=2),
     ]
-    assert json.loads(rt._format_debate_so_far(transcript)) == transcript
-    assert json.loads(rt._format_debate_so_far(transcript, exclude_id="a")) == [transcript[1]]
+    normalized = rt.normalize_transcript(transcript)
+    assert json.loads(rt._format_debate_so_far(transcript)) == normalized
+    assert json.loads(rt._format_debate_so_far(transcript, exclude_id="a")) == [normalized[1]]
     assert rt._format_debate_so_far([]) == ""
 
 

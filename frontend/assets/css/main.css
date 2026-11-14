@@ -2441,6 +2441,16 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 }
 .rt-rule { font-size: 12.5px; line-height: 1.85; color: #8A857C; margin: 8px 0 0; }
 .rt-label-inline { align-self: center; margin-right: 4px; }
+.rt-round-help { margin: 0; font-size: 12px; line-height: 1.7; color: #6B6B66; }
+.rt-resume-entry, .rt-recovery {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  border: 1px solid #E6E3DA; border-radius: 10px; padding: 12px 14px; background: #FFFFFF;
+}
+.rt-resume-entry[hidden], .rt-recovery[hidden] { display: none; }
+.rt-resume-label { flex: 1 1 180px; min-width: 0; font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+.rt-recovery { flex: none; margin: 12px 22px 0; }
+.rt-recovery p { flex: 1 1 260px; margin: 0; font-size: 13px; line-height: 1.8; color: #6B6B66; }
+.rt-recovery-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 
 /* ---- 本轮公告条：把「谁想说话 / 最后谁发言」这个过程显性化 ---- */
 .rt-bar {
@@ -2462,7 +2472,7 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 }
 .rt-speaker-count { font-size: 11px; font-weight: 400; color: #8A857C; }
 
-/* ---- 点将弹层：多人同时举手时出现 ---- */
+/* ---- 点将弹层：完整请缨可滚动阅读，决定始终由用户作出 ---- */
 .rt-ask {
   position: absolute; inset: 0; z-index: 6;
   display: flex; align-items: center; justify-content: center; padding: 20px;
@@ -2470,7 +2480,8 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 }
 .rt-ask[hidden] { display: none; }
 .rt-ask-card {
-  width: 100%; max-width: 460px;
+  width: 100%; max-width: 620px;
+  max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
   background: #FFFFFF; border: 1px solid #E6E3DA; border-radius: 14px;
   padding: 20px 20px 16px; display: flex; flex-direction: column; gap: 12px;
 }
@@ -2478,26 +2489,40 @@ html.setup-open, html.setup-open body { overflow: hidden; }
   display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
   font-size: 14px; color: #161616;
 }
-.rt-ask-timer { font-size: 12px; color: #8A857C; font-variant-numeric: tabular-nums; }
-.rt-ask-list { display: flex; flex-direction: column; gap: 8px; }
+.rt-ask-list { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .rt-ask-item {
-  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  display: flex; flex-direction: column; gap: 8px; text-align: left; flex: none;
   background: #FAFAF7; border: 1px solid #E6E3DA; border-radius: 10px;
-  padding: 11px 14px; cursor: pointer; font-family: inherit;
-  transition: border-color .15s ease, background .15s ease;
+  padding: 14px; font-family: inherit; overflow-wrap: anywhere;
 }
-.rt-ask-item:hover { border-color: #161616; background: #FFFFFF; }
-.rt-ask-item.suggested { border-color: rgba(107,140,255,.55); }
+.rt-ask-item p { margin: 0; }
+.rt-ask-person { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .rt-ask-name { font-size: 14px; font-weight: 600; color: #161616; }
-.rt-ask-reason { font-size: 12.5px; line-height: 1.7; color: #6B6B66; }
+.rt-ask-status { flex: none; font-size: 11.5px; color: #6B6B66; }
+.rt-ask-meta, .rt-ask-target { font-size: 12px; line-height: 1.7; color: #6B6B66; }
+.rt-ask-reason { font-size: 13px; line-height: 1.85; color: #2B2B28; white-space: pre-wrap; }
+.rt-ask-quote {
+  margin: 0; padding: 8px 11px; border-left: 2px solid #B4AFA6;
+  background: #F1EFE8; font-size: 12.5px; line-height: 1.85; color: #6B6B66; white-space: pre-wrap;
+}
+.rt-ask-unavailable { background: #FFFFFF; border-style: dashed; }
+.rt-ask-error, .rt-ask-error-detail { margin: 0; font-size: 12px; line-height: 1.75; color: #9B4528; overflow-wrap: anywhere; }
+.rt-ask-select {
+  align-self: flex-start; min-height: 44px; padding: 9px 15px; border: 1px solid #161616;
+  border-radius: 8px; background: #161616; color: #FAFAF7; cursor: pointer; font: inherit; font-size: 12.5px;
+}
+.rt-ask-select:hover { background: #343430; }
+.rt-ask-select:focus-visible, .rt-ask-cancel:focus-visible { outline: 2px solid #6b8cff; outline-offset: 3px; }
+.rt-ask-select:disabled, .rt-ask-cancel:disabled { opacity: .5; cursor: default; }
+.rt-ask-select[hidden] { display: none; }
 .rt-ask-foot {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; flex: none;
   border-top: 1px solid #EFEDE5; padding-top: 12px;
 }
-.rt-ask-hint { font-size: 12px; color: #8A857C; }
+.rt-ask-hint { flex: 1 1 230px; font-size: 12px; line-height: 1.7; color: #6B6B66; }
 .rt-ask-cancel {
   background: transparent; border: 1px solid rgba(22,22,22,.22); color: #6B6B66;
-  border-radius: 999px; padding: 7px 15px; cursor: pointer; font-size: 12.5px;
+  border-radius: 999px; min-height: 44px; padding: 7px 15px; cursor: pointer; font-size: 12.5px;
   font-family: inherit; transition: all .15s ease;
 }
 .rt-ask-cancel:hover { border-color: #161616; color: #161616; }
@@ -2569,6 +2594,8 @@ html.setup-open, html.setup-open body { overflow: hidden; }
 
 @media (max-width: 900px) {
   .rt-subtitle { display: none; }
+  .rt-setup { max-height: calc(100vh - 64px); max-height: calc(100dvh - 64px); overflow-y: auto; }
+  .rt-recovery { margin: 10px 14px 0; }
   .rt-bar { padding: 9px 12px; }
   .rt-ask-card { padding: 16px 16px 14px; }
   .rt-ask-item { padding: 10px 12px; }

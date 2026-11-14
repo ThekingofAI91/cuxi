@@ -3,9 +3,8 @@
 
 这套测试守三件事：
 
-1. **投标解析必须容错**。模型吐 JSON 的频率远没有想象中高，包在解释里的、
-   用全角冒号的、字段少一个的都会出现。任何一次解析失败只能退化成「本轮弃权」，
-   不能让整场辩论崩掉。
+1. **投标必须可验证**。只接受完整合法 JSON，回应对象必须是他人的具体发言，
+   原话逐字匹配。格式或引用错误交给有限纠正重试，不能伪装成角色主动弃权。
 2. **裁决必须是可预测的**。urgency 高者优先；平手时距上次发言最久者优先；
    再平手按 id。**全程没有模型参与**，所以结果能复现。
 3. **谁不能投标是硬规则**。配额耗尽的人、上一轮的发言者都不进投标名单——
@@ -19,6 +18,7 @@ import asyncio
 import pytest
 
 from framework import roundtable as rt
+from framework.roundtable_intents import IntentValidationError, validate_intent
 
 
 # ============================================================
@@ -26,52 +26,30 @@ from framework import roundtable as rt
 # ============================================================
 
 def test_parse_clean_json():
-    bid = rt.parse_intent(
-        '{"want": true, "urgency": 4, "target": {"speaker": "阿德勒", "quote": "社会兴趣是后天习得的"},'
-        '"reason": "他抽掉了原型的先天基础", "move": "rebut"}'
+    bid = validate_intent(
+        '{"want": true, "urgency": 4, "target": {"speaker_id": "adler", "turn_id": "turn-1", "quote": "社会兴趣是后天习得的"},'
+        '"reason": "他抽掉了原型的先天基础", "move": "rebut"}',
+        transcript=[{"character_id": "adler", "name": "阿德勒", "content": "我认为社会兴趣是后天习得的。"}],
+        speaker_id="jung",
     )
     assert bid["want"] is True
     assert bid["urgency"] == 4
     assert bid["target"]["quote"] == "社会兴趣是后天习得的"
     assert bid["move"] == "rebut"
-    assert bid["parse_error"] == ""
+    assert bid["target"]["speaker"] == "阿德勒"
+    assert bid["target"]["speaker_id"] == "adler"
 
 
-def test_parse_json_wrapped_in_prose():
-    """包在解释里的 JSON 也要能捞出来。"""
-    bid = rt.parse_intent('好的，我的判断如下：{"want": false, "urgency": 1, "reason": "没什么非说不可"}')
-    assert bid["want"] is False
-    assert bid["urgency"] == 1
-
-
-def test_parse_broken_json_falls_back_to_regex():
-    """JSON 坏了（缺引号）走正则兜底，字段尽量保住，并标记解析降级。"""
-    bid = rt.parse_intent("want: true, urgency: 3, reason: '他漏了一点', move: clarify")
-    assert bid["want"] is True
-    assert bid["urgency"] == 3
-    assert bid["move"] == "clarify"
-    assert "正则" in bid["parse_error"]
-
-
-def test_parse_empty_and_garbage_become_abstain():
-    """空响应与完全无法解析的文本都退化成弃权，不抛异常。"""
-    for raw in ("", "   ", "我觉得可以说两句"):
-        bid = rt.parse_intent(raw)
-        assert bid["want"] is False
-        assert bid["urgency"] == 1
-        assert bid["parse_error"]
-
-
-def test_parse_urgency_is_clamped():
-    """urgency 越界要钳到 1–5，不能让它把排序搞乱。"""
-    assert rt.parse_intent('{"want": true, "urgency": 9}')["urgency"] == 5
-    assert rt.parse_intent('{"want": true, "urgency": 0}')["urgency"] == 1
-
-
-def test_parse_unknown_move_is_dropped():
-    """不在枚举里的 move 一律清空，避免下游用错标签。"""
-    bid = rt.parse_intent('{"want": true, "urgency": 3, "move": "attack"}')
-    assert bid["move"] == ""
+@pytest.mark.parametrize("raw", [
+    "", "   ", "我觉得可以说两句", "{}",
+    '好的，我的判断如下：{"want": false, "urgency": 1, "reason": "没什么非说不可"}',
+    "want: true, urgency: 3, reason: '他漏了一点', move: clarify",
+    '{"want": false, "urgency": 9, "reason": "旁听"}',
+    '{"want": false, "urgency": 0, "reason": "旁听"}',
+])
+def test_invalid_output_is_not_silently_treated_as_abstention(raw):
+    with pytest.raises(IntentValidationError):
+        validate_intent(raw, transcript=[], speaker_id="jung")
 
 
 # ============================================================
@@ -196,11 +174,11 @@ def test_no_bidder_left_converges(monkeypatch):
 # 五、单点失败不能拖垮整场
 # ============================================================
 
-def test_failed_bid_degrades_to_abstain(monkeypatch):
+def test_failed_bid_remains_a_visible_failure(monkeypatch):
     """某个角色投标抛异常（429 / 超时）→ 记进 intent_errors，不向上抛。
 
     网关突发即 429 是常态。如果这里让异常冒出去，一个角色撞上限流就会
-    让整场辩论证停摆；而正确行为是把他当成「本轮弃权」，其余人照常开。
+    让整场辩论停摆；失败要单独记账并展示，其余人仍可正常提交请缨。
     """
     async def boom(**kwargs):
         raise RuntimeError("429 Too Many Requests")
@@ -208,14 +186,18 @@ def test_failed_bid_degrades_to_abstain(monkeypatch):
     monkeypatch.setattr(rt, "ask_intent", boom)
     out = asyncio.run(rt.collect_intent_node({"character_id": "jung", "round": 1}))
 
-    assert not out.get("intents")
+    assert out["intents"][0]["status"] == "error"
+    assert out["intents"][0]["want"] is False
+    assert out["bid_usage"][0]["llm_calls"] == 1
     err = out["intent_errors"][0]
     assert err["character_id"] == "jung"
     assert "429" in err["error"]
 
 
-def test_unknown_character_degrades_to_abstain():
+def test_unknown_character_is_a_failure_without_spending_a_call():
     """角色 id 不在配置里（被删了 / 前端传错）同样只记错误，不抛。"""
     out = asyncio.run(rt.collect_intent_node({"character_id": "ghost", "round": 1}))
-    assert not out.get("intents")
+    assert out["intents"][0]["status"] == "error"
+    assert out["intents"][0]["want"] is False
+    assert out["bid_usage"][0]["llm_calls"] == 0
     assert out["intent_errors"][0]["error"] == "角色不可用"

@@ -6,17 +6,17 @@
 
     START → host ──(发起投标)──→ collect_intent × N（Send 并行）──(收齐)──→ host
               │
-              ├──(按紧迫度定人)──→ speaker ──→ host
-              └──(全员弃权 / 配额耗尽 / 超预算)──→ END
+              ├──(用户点将 / 按紧迫度定人)──→ speaker ──→ host
+              └──(用户结束 / 自动收场 / 配额耗尽 / 超预算)──→ END
 
 - **host 只做裁决**：不写任何发言内容。每轮交锋先经 `fan_out_bids` 把 collect_intent
   并行实例化 N 次，向「有配额且上轮没发言」的角色收集请缨；收齐后按 urgency 降序、
   平手比「距上次发言最久」定人。**请缨理由由角色自己写**，前端据此显示"某某主动请缨"。
-  用户自己当主持人时（picker="user"），host 在决策点 `interrupt()` 挂起、等前端回填，
-  **用户全权负责**，系统不代他点将。
+  用户自己当主持人时（picker="user"），host 收齐同一批投标后 `interrupt()` 挂起，
+  展示全部回执，等待用户点将或结束；只有一名候选也不代选。
 - **collect_intent 是并行工作单元，不是新角色**：身份随 `Send` payload 走（"我是谁"进
-  payload），广播信息写共享 state（"上轮选了谁、为什么"）——所以"向五位发言者广播"
-  在代码里只是一次 state 写入。单个角色投标失败只记 `intent_errors`，不拖垮整场。
+  payload），广播信息写共享 state（"上轮选了谁、为什么"）。单个角色投标失败记入
+  `intent_errors` 并展示失败回执，不拖垮其余投标。
 - **speaker 是子智能体**：每位与会者开口前由**代码强制**跑一遍全管线强检索（与一对一
   `retrieve_documents(strong=True)` 同一份实现），只查自己的语料库、不经模型自持的工具，
   再逐 token 流式。所有与会者**共用同一个 speaker 节点**，靠状态里的 `pending_speaker`
@@ -24,7 +24,7 @@
 - **开场轮是本场唯一的排班**（零 LLM）：先按名单各陈述一次亮明立场，之后才进主持人决策
   的交锋轮。去掉它会让首轮缺少对撞的靶子。
 - **收敛靠配额的数学，不靠提示词调参**：每人发言次数有上限，配额耗尽即自然散会；
-  主持人只能提前收敛，不能延长。另有全场的 LLM 调用硬上限。
+  主持人只能提前收场，不能延长。讨论阶段另有应用层模型调用预算。
 
 为什么这次值得上图（与一对一对话弃图的判据对照）：
   一对一那条链路每节点每请求最多进一次、可达路径仅 5 条且进入时即确定——路径是代码预定的，
@@ -36,21 +36,21 @@
   start         {session_id, topic, picker, host, speakers:[{id,name,avatar,theme,quota}]}
   round         {round, total, phase: "opening"|"rebuttal"}
   bidding       {round, total, candidates:[{id,name}]}
-                代班主持的每轮交锋先开投标：把「谁想说话」这件事并发问一遍。
-  intent        {character_id, name, want, urgency, move, reason}
-                单人投标的回执，随投标陆续到达；want=false 也会推（前端可只渲染 true）。
-  choice        {character_id, name, by: "bid"|"user"|"host", reason, candidates, note}
-                by=bid 是投标中标（reason 即该角色自己的请缨理由）；by=user 是用户点将；
-                by=host 只剩兜底（用户点将无效）一种来源。
-  choice_request{round, total, candidates:[{id,name,speeches,quota}]}
-                用户主持时推送，会议在此**挂起**，前端需 POST 回填下一位发言人。
+                两种主持都先并发收集发言意愿。
+  intent        {character_id, name, round, want, urgency, move, reason, target, status, error, parse_error}
+                单人回执陆续到达，包含请缨、弃权与失败。
+  choice        {character_id, name, by: "bid"|"user", reason, candidates, note}
+                两种选人方式都保留角色本人的请缨理由和任务。
+  choice_request{round, total, topic, can_end, intents,
+                 candidates:[{id,name,speeches,quota,urgency,move,reason,target}]}
+                用户主持时挂起；回填候选 id 或 __end__，空值与非法选择不代点。
   speaker_start {character_id, name, avatar, theme, speeches, quota, reason}
   token         {character_id, content}
   speaker_end   {character_id, content}
-  converged     {round, reason: "host"|"quota"|"rounds"}
+  converged     {round, reason: "host"|"user"|"quota"|"rounds"|"budget"}
   budget_exhausted{llm_calls}
   end           {session_id, topic, rounds, speakers, transcript, converge_reason,
-                 timings, prompt_chars, answer_chars, meeting_ms}
+                 llm_calls, timings, prompt_chars, answer_chars, meeting_ms}
                 —— 权威快照：续跑流不推 start，故 end 必须自带完整记录。
                 尾部四个字段是给 monitor 落库的用量统计（段耗时 / 输入输出字符 / 整场耗时）。
   summary_start / summary {data:{clashes,positions,open,closing,applications,speeches,degraded}} / summary_error / summary_end
@@ -69,13 +69,14 @@ import asyncio
 import json
 import re
 import time
+import uuid
 from operator import add
 from pathlib import Path
 from typing import Annotated, AsyncIterator, TypedDict
 
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, Send, interrupt
+from langgraph.types import Command, Overwrite, Send, interrupt
 
 try:  # 导入位置在 langgraph 版本间搬过家
     from langgraph.config import get_stream_writer
@@ -85,6 +86,11 @@ except Exception:  # pragma: no cover
 from src.core.config import settings
 from src.core.llm import ainvoke_nonempty, astream_nonempty, get_chat_llm
 from framework.supervisor_agent import retrieve_documents
+from framework.roundtable_intents import (
+    IntentValidationError, normalize_transcript, request_validated_intent, validate_intent,
+)
+from framework import roundtable_sessions as _sessions
+from framework.roundtable_sessions import RoundtableConflictError
 from scenes.persona_chat.config import persona_chat_config
 from scenes.persona_chat.prompt_builder import build_character_prompt
 from scenes.persona_chat.skill_loader import resolve_persona_sections
@@ -94,9 +100,10 @@ from scenes.persona_chat.skill_loader import resolve_persona_sections
 # 定 3 的依据（P(≥2 人同时有话要说) 随人数上升）：2 人偏静、4 人以上主持人每轮都要
 # 在更多人里挑，主席决策的准确率下降，且单场总调用数上升。3 人是有交锋感又不臃肿的上限。
 MAX_ROUNDTABLE_CHARS = 3
+ROUNDTABLE_END_CHOICE = "__end__"
 
 # 交锋轮数上限：钳制用户输入，避免超预算。
-_MAX_ROUNDS = 3
+_MAX_ROUNDS = 9
 
 # 发言间隔（秒）：每位发言结束后停顿，既给用户留出阅读上一段的时间，
 # 也把 LLM 调用频率压到网关可持续速率（突发即 429）以内。
@@ -114,8 +121,8 @@ ROUNDTABLE_SPEAKER_PAUSE = 4.0
 # 改**流式**读，凑齐一对花括号就断开，上游还没想完我们已经拿到答案。
 _SPEECH_MAX_TOKENS = 1600
 _SUMMARY_MAX_TOKENS = 1600
-# 投标只要一个 JSON 对象，给 400 足够；给大了模型反而开始长篇大论地论证自己该发言
-_INTENT_MAX_TOKENS = 400
+# 推理模型的思考与正文共享预算；短 JSON 也需要给思考留出空间。
+_INTENT_MAX_TOKENS = 4000
 # 投标是「判断题」不是「创作题」，用低温度；同时刻意与主持人（0.3）、发言（0.85）
 # 都错开，测试打桩时可以按温度分派到不同用途。
 _INTENT_TEMPERATURE = 0.35
@@ -170,97 +177,17 @@ INTENT_DIRECTIVE = """
 不要为了让场面热闹而抬高自己的档位。
 
 【决定要说，就交代三件事】
-· 回应谁的哪一句：quote 必须是他原话里连续的 8 到 15 个字，用「」括起来
+· 回应谁的哪一句：target.speaker_id 和 target.turn_id 必须照完整记录填写，quote 必须逐字来自那条原话，不加引号、不改写
 · 这句话为什么需要你出来：一句话，用第一人称，说清他错在哪或漏了什么
 · 你打算怎么处理：rebut（反驳）/ clarify（澄清被曲解）/ distinguish（提出区分）/ ask（追问）
 
 【只输出一个 JSON 对象，不要任何其他内容】
 要说：
-{"want": true, "urgency": 4, "target": {"speaker": "某位与会者", "quote": "原话片段"}, "reason": "第一人称一句话", "move": "rebut"}
+{"want": true, "urgency": 4, "target": {"speaker_id": "对方的character_id", "turn_id": "记录的turn_id", "quote": "原话片段"}, "reason": "第一人称一句话", "move": "rebut"}
 不说：
 {"want": false, "urgency": 1, "reason": "此刻没有非说不可的话"}
 """.strip()
 
-_INTENT_WANT_RE = re.compile(r"[\"']?want[\"']?\s*[:：]\s*(true|false|是|否)", re.I)
-_INTENT_URGENCY_RE = re.compile(r"[\"']?urgency[\"']?\s*[:：]\s*([1-5])")
-_INTENT_SPEAKER_RE = re.compile(r"[\"']?speaker[\"']?\s*[:：]\s*[\"']([^\"']{1,40})[\"']")
-_INTENT_QUOTE_RE = re.compile(r"[\"']?quote[\"']?\s*[:：]\s*[\"']([^\"']{2,80})[\"']")
-_INTENT_REASON_RE = re.compile(r"[\"']?reason[\"']?\s*[:：]\s*[\"']([^\"']{1,200})[\"']")
-_INTENT_MOVE_RE = re.compile(r"[\"']?move[\"']?\s*[:：]\s*[\"']?(\w+)")
-_INTENT_MOVES = ("rebut", "clarify", "distinguish", "ask")
-
-
-def parse_intent(raw: str) -> dict:
-    """把一次投标解析成结构化结果。
-
-    解析失败一律当成「不投标」——宁可少一个人发言，也不要因为格式坏掉让整场崩。
-    调用方可以从 ``parse_error`` 判断这是「真的不想说」还是「说出了但解析不了」。
-    """
-    blank = {"want": False, "urgency": 1, "reason": "", "target": {}, "move": "", "parse_error": ""}
-    if not raw or not raw.strip():
-        return {**blank, "parse_error": "空响应"}
-
-    obj = None
-    m = _JSON_OBJ_RE.search(raw)
-    if m:
-        try:
-            obj = json.loads(m.group(0))
-        except Exception:
-            obj = None
-    if isinstance(obj, dict):
-        want = obj.get("want")
-        if isinstance(want, str):
-            want = want.strip().lower() in ("true", "是", "yes", "1")
-        urgency = obj.get("urgency")
-        try:
-            urgency = int(urgency)
-        except (TypeError, ValueError):
-            urgency = 1
-        urgency = max(1, min(5, urgency))
-        target = obj.get("target") if isinstance(obj.get("target"), dict) else {}
-        move = str(obj.get("move") or "").strip().lower()
-        return {
-            "want": bool(want),
-            "urgency": urgency,
-            "reason": str(obj.get("reason") or "").strip()[:200],
-            "target": {
-                "speaker": str(target.get("speaker") or "").strip(),
-                "quote": str(target.get("quote") or "").strip(),
-            },
-            "move": move if move in _INTENT_MOVES else "",
-            "parse_error": "",
-        }
-
-    # JSON 坏了就用正则尽力捞
-    want_m = _INTENT_WANT_RE.search(raw)
-    if not want_m:
-        return {**blank, "parse_error": "未找到 want 字段"}
-    want = want_m.group(1).lower() in ("true", "是")
-    urgency_m = _INTENT_URGENCY_RE.search(raw)
-    move_m = _INTENT_MOVE_RE.search(raw)
-    speaker_m = _INTENT_SPEAKER_RE.search(raw)
-    quote_m = _INTENT_QUOTE_RE.search(raw)
-    reason_m = _INTENT_REASON_RE.search(raw)
-    return {
-        "want": want,
-        "urgency": int(urgency_m.group(1)) if urgency_m else 1,
-        "reason": (reason_m.group(1) if reason_m else "")[:200],
-        "target": {
-            "speaker": speaker_m.group(1) if speaker_m else "",
-            "quote": quote_m.group(1) if quote_m else "",
-        },
-        "move": (move_m.group(1) if move_m and move_m.group(1) in _INTENT_MOVES else ""),
-        "parse_error": "JSON 解析失败，已用正则兜底",
-    }
-
-
-def _row_of(ledger: dict, cid: str) -> dict:
-    return ledger.get(cid) or {}
-
-
-# ============================================================
-# 主持人收束（纪要）：保留分歧，不评分
-# ============================================================
 CLERK_DIRECTIVE = """
 你负责这场圆桌会议结束后的主持人总结：如实整理各方主张、仍存的分歧，以及发言中有依据的适用条件。
 讨论可以在各方仍坚持自己的意见时结束。你的任务不要求达成一致，也不要求得到令所有人满意的答案。
@@ -312,10 +239,12 @@ class RoundtableState(TypedDict, total=False):
     """一场圆桌会议的全部可变状态。键名与前端无关，前端只认下面的事件流。"""
 
     session_id: str
+    run_id: str                     # 同一 session_id 再开会时也不能复用旧决策
+    decision_revision: str          # 旧协议重新收请缨时作废原令牌
     topic: str
-    picker: str                     # "user"=用户当主持人；"agent"=主持人（LLM）自己决定
+    picker: str                     # "user"=查看请缨后点将；"agent"=按规则选择请缨者
     max_rounds: int                 # 交锋轮上限
-    max_calls: int                  # 全场 LLM 调用硬上限
+    max_calls: int                  # 讨论阶段的应用层模型调用预算（开场 / 投标 / 发言）
     quota: int                      # 每人发言次数上限（含开场）
 
     roster: list[dict]              # 静态名单 [{id,name,avatar,theme,quota}]，只为渲染/取名
@@ -337,16 +266,18 @@ class RoundtableState(TypedDict, total=False):
     bid_round: int
     intents: Annotated[list[dict], add]        # 投标记录，累加（并行写入必须用 reducer）
     intent_errors: Annotated[list[dict], add]  # 投标失败记录：区分「不想说」与「没能说」
+    bid_usage: Annotated[list[dict], add]      # 并行节点只累加增量，避免争写整场计数
+    accounted_bid_usage: int                 # host 已合并的增量数；interrupt 重放不重复计账
     last_decision: dict             # 上一轮裁决（选中者 / 理由 / 被拒者），供下一轮投标参考
 
     converged: bool
-    converge_reason: str            # "host" | "quota" | "rounds" | "budget"
+    converge_reason: str            # "host" | "user" | "quota" | "rounds" | "budget"
     llm_calls: int
     ended: bool
 
     # ---- 用量/耗时统计（供 monitor 落库，随 checkpoint 一起持久化）----
     started_at: float               # 会议起点（epoch 秒）——整场耗时以它为准，跨请求续跑也不丢
-    timings: dict                   # {host_ms, speaker_ms} 累积的 LLM 段耗时（毫秒）
+    timings: dict                   # {intent_ms, speaker_ms} 累积的模型段耗时（毫秒）
     prompt_chars: int               # 全场 LLM 调用的输入字符累计（monitor 估 token 用）
     answer_chars: int               # 全场 LLM 输出的字符累计
 
@@ -397,18 +328,6 @@ def _speeches_of(ledger: dict, cid: str) -> int:
     return int((ledger.get(cid) or {}).get("speeches", 0))
 
 
-def _fallback_pick(ledger: dict, eligible: list[str]) -> str:
-    """规则兜底：在仍有额度的人里选**说得最少**的那位（min 稳定 → 平票按名单顺序）。
-
-    这不是裁判——它只决定下一个谁说话，不对任何内容做评价。模型指认了不合法的人
-    （不在名单/额度已满）或用户点将无效时用它，保证会议不会因为一次坏输出空转。
-    """
-    return min(eligible, key=lambda cid: _speeches_of(ledger, cid))
-
-
-# ============================================================
-# 检索：每位发言者强制走强检索，只查自己的知识库
-# ============================================================
 async def _retrieve_for_speaker(collection_name: str, query: str) -> str:
     """检索某发言者**自己**的知识库，作为其发言的依据。
 
@@ -442,10 +361,12 @@ def _format_debate_so_far(transcript: list[dict], exclude_id: str | None = None)
     if not transcript:
         return ""
     records = []
-    for turn in transcript:
+    for turn in normalize_transcript(transcript):
         if exclude_id and turn.get("character_id") == exclude_id:
             continue
         records.append({
+            "turn_id": turn["turn_id"],
+            "speaker_id": turn["speaker_id"],
             "character_id": turn.get("character_id", ""),
             "name": turn.get("name", "发言人"),
             "kind": turn.get("kind", ""),
@@ -469,6 +390,7 @@ async def build_speaker_messages(
     assigned_task: dict | None = None,
 ) -> list[tuple[str, str]]:
     """拼装某发言者本轮的 LangChain 消息列表（system / user）。检索异步，故为 async。"""
+    transcript = normalize_transcript(transcript)
     # 酒馆式装配：示例对话与世界书让发言者在交锋中也不丢自己的语气；
     # topic 用于世界书关键词命中（开场轮与交锋轮都用议题本身匹配）。
     sections = resolve_persona_sections(character)
@@ -570,12 +492,14 @@ async def ask_intent(
     my_speeches: int,
     quota: int,
     round_index: int,
+    max_attempts: int = 3,
 ) -> dict:
     """问一个角色「此刻有没有非说不可的话」，返回结构化投标。
 
     投标只用人设正文 + 性格 + 场景 + 口吻，不带世界书与示例对话——
     判断「有没有被冒犯」用不上词条与示范语气，带上只是白烧 token。
     """
+    transcript = normalize_transcript(transcript)
     role = build_character_prompt(
         character, query=topic, include_lorebook=False, include_examples=False
     )
@@ -605,12 +529,23 @@ async def ask_intent(
     data.append(f"这是第 {round_index} 轮交锋。请给出你的投标 JSON。")
     messages.append(("user", "\n\n".join(data)))
 
-    llm = get_chat_llm(temperature=_INTENT_TEMPERATURE, max_tokens=_INTENT_MAX_TOKENS)
-    resp = await ainvoke_nonempty(llm, messages, attempts=1)
-    bid = parse_intent(str(getattr(resp, "content", "") or ""))
+    async def invoke(attempt_messages, *, max_tokens):
+        llm = get_chat_llm(temperature=_INTENT_TEMPERATURE, max_tokens=_INTENT_MAX_TOKENS)
+        return await ainvoke_nonempty(llm, attempt_messages, attempts=0)
+
+    result = await request_validated_intent(
+        messages=messages, transcript=transcript, speaker_id=character.id,
+        invoke=invoke, max_attempts=max_attempts,
+    )
+    bid = result["bid"] or {"want": False, "urgency": 1, "reason": "", "target": {}, "move": ""}
+    bid["status"] = "ok" if result["bid"] is not None else "error"
+    bid["error"] = result["error"]
+    bid["parse_error"] = result["error"]
+    bid["attempt_errors"] = result["errors"]
     bid["character_id"] = character.id
     bid["name"] = character.name
     bid["round"] = round_index
+    bid["_usage"] = result["usage"]
     return bid
 
 
@@ -623,44 +558,51 @@ async def collect_intent_node(payload: dict) -> dict:
     cid = str(payload.get("character_id") or "")
     rnd = int(payload.get("round") or 0)
     ch = persona_chat_config.characters.get(cid)
+    started = time.perf_counter()
     if ch is None:
-        return {"intent_errors": [{"character_id": cid, "round": rnd, "error": "角色不可用"}]}
-    try:
-        bid = await ask_intent(
-            character=ch,
-            topic=str(payload.get("topic") or ""),
-            transcript=list(payload.get("transcript") or []),
-            my_last=payload.get("my_last"),
-            last_decision=dict(payload.get("last_decision") or {}),
-            my_speeches=int(payload.get("my_speeches") or 0),
-            quota=int(payload.get("quota") or 2),
-            round_index=rnd,
-        )
-        # 投标回执立刻推给前端：并行分支陆续返回，谁先举手谁先亮灯。
-        # 这里必须自己兜异常——万一并行任务里取不到 custom 流，也不能让
-        # 一次「推事件失败」被外层 except 当成「投标失败」，把整份投标丢掉。
+        bid = {"status": "error", "error": "角色不可用", "_usage": {"llm_calls": 0}}
+    else:
         try:
-            _writer()({
-                "type": "intent",
-                "character_id": cid,
-                "name": ch.name,
-                "want": bool(bid.get("want")),
-                "urgency": int(bid.get("urgency") or 1),
-                "move": str(bid.get("move") or ""),
-                "reason": str(bid.get("reason") or ""),
-            })
-        except Exception:
-            pass
-        return {"intents": [bid]}
-    except Exception as e:  # 429 / 超时 / 解析异常都降级为「本轮不请缨」
-        print(f"[Bid] {cid} 投标失败: {type(e).__name__}: {str(e)[:100]}")
-        return {
-            "intent_errors": [{
-                "character_id": cid,
-                "round": rnd,
-                "error": f"{type(e).__name__}: {str(e)[:100]}",
-            }]
-        }
+            bid = await ask_intent(
+                character=ch,
+                topic=str(payload.get("topic") or ""),
+                transcript=list(payload.get("transcript") or []),
+                my_last=payload.get("my_last"),
+                last_decision=dict(payload.get("last_decision") or {}),
+                my_speeches=int(payload.get("my_speeches") or 0),
+                quota=int(payload.get("quota") or 4),
+                round_index=rnd,
+                max_attempts=int(payload.get("max_attempts", 3)),
+            )
+        except Exception as e:
+            bid = {"status": "error", "error": f"{type(e).__name__}: {str(e)[:100]}"}
+
+    usage = dict(bid.pop("_usage", {}) or {})
+    usage.setdefault("llm_calls", 1)
+    usage.setdefault("intent_ms", (time.perf_counter() - started) * 1000)
+    receipt = {
+        "character_id": cid, "name": ch.name if ch else cid, "round": rnd,
+        "want": bool(bid.get("want")) and bid.get("status") != "error",
+        "urgency": int(bid.get("urgency") or 1),
+        "move": str(bid.get("move") or ""), "reason": str(bid.get("reason") or ""),
+        "target": dict(bid.get("target") or {}),
+        "status": str(bid.get("status") or "ok"),
+        "error": str(bid.get("error") or ""),
+        "parse_error": str(bid.get("parse_error") or ""),
+        "attempt_errors": list(bid.get("attempt_errors") or []),
+    }
+    # 每位的成功、弃权与失败都能看到；推送故障不能丢掉已经收到的投标。
+    try:
+        _writer()({"type": "intent", **receipt})
+    except Exception:
+        pass
+    out = {"intents": [receipt], "bid_usage": [usage]}
+    if receipt["status"] == "error":
+        print(f"[Bid] {cid} 投标失败: {receipt['error']}")
+        out["intent_errors"] = [{
+            "character_id": cid, "round": rnd, "error": receipt["error"],
+        }]
+    return out
 
 
 def _last_spoke_round(transcript: list[dict], cid: str) -> int:
@@ -680,12 +622,16 @@ def fan_out_bids(state: RoundtableState) -> list:
     """
     roster = list(state.get("roster") or [])
     ledger = state.get("ledger") or {}
-    quota = int(state.get("quota") or 2)
+    quota = int(state.get("quota") or 4)
     rnd = int(state.get("bid_round") or 0)
-    transcript = list(state.get("transcript") or [])
+    transcript = normalize_transcript(list(state.get("transcript") or []))
     last_decision = dict(state.get("last_decision") or {})
     last_speaker = str(last_decision.get("selected") or "")
     topic = str(state.get("topic") or "")
+    bidder_count = sum(1 for e in roster if e.get("id") and e["id"] != last_speaker
+                       and _speeches_of(ledger, e["id"]) < quota)
+    available = int(state.get("max_calls") or 24) - int(state.get("llm_calls") or 0) - 1
+    max_attempts = min(3, max(0, available // bidder_count)) if bidder_count else 0
 
     sends: list = []
     for entry in roster:
@@ -707,6 +653,7 @@ def fan_out_bids(state: RoundtableState) -> list:
             "last_decision": last_decision,
             "my_speeches": speeches,
             "quota": quota,
+            "max_attempts": max_attempts,
         }))
     return sends
 
@@ -934,7 +881,7 @@ async def host_node(state: RoundtableState) -> dict:
     """主持人节点。两种模式：
 
     · 开场阶段：按名单轮转（零 LLM、零决策）——本场唯一的排班，用来保证首轮有靶子。
-    · 交锋阶段：用户主持则 `interrupt()` 挂起等回填；否则一次 LLM 决策定人 + 写请缨理由。
+    · 交锋阶段：先并发收齐投标，再由用户点将或代码按紧迫度排序。
 
     **不要在 interrupt 之前 writer() 推任何事件**：节点在恢复时会从头重跑，
     挂起前推过的事件会被重放一遍，前端就会收到重复的 round/choice。
@@ -945,26 +892,32 @@ async def host_node(state: RoundtableState) -> dict:
     transcript = list(state.get("transcript") or [])
     opened = set(state.get("opening_done") or [])
     max_rounds = int(state.get("max_rounds") or 1)
-    quota = int(state.get("quota") or 2)
+    quota = int(state.get("quota") or 4)
     max_calls = int(state.get("max_calls") or 24)
     llm_calls = int(state.get("llm_calls") or 0)
     round_index = int(state.get("round_index") or 0)
     picker = str(state.get("picker") or "user")
     topic = str(state.get("topic") or "")
 
-    # 本次 host 调用（可能零 LLM：开场排班 / 收敛闸门）的用量与耗时增量
-    _host_ms = 0.0
-    _host_prompt = 0
-    _host_out = 0
+    # 并行分支只追加用量，host 串行合并。挂起前的返回值不会落盘，因此重放时
+    # 仍按同一游标计算一次；只有真正完成裁决/结束时才推进游标，不会重复记账。
+    usage = list(state.get("bid_usage") or [])
+    new_usage = usage[int(state.get("accounted_bid_usage") or 0):]
+    llm_calls += sum(int(u.get("llm_calls") or 0) for u in new_usage)
 
     def _tfields() -> dict:
-        """把本次 host 调用的耗时/字符增量并入 state（无 LLM 的路径下返回空 dict）。"""
-        if not (_host_ms or _host_prompt or _host_out or state.get("timings")):
-            return {}
+        """把尚未记账的投标用量并入串行计数；无需并行写共享数字。"""
         return {
-            "timings": _merge_timings(state.get("timings"), host_ms=_host_ms),
-            "prompt_chars": int(state.get("prompt_chars") or 0) + _host_prompt,
-            "answer_chars": int(state.get("answer_chars") or 0) + _host_out,
+            "llm_calls": llm_calls,
+            "accounted_bid_usage": len(usage),
+            "timings": _merge_timings(
+                state.get("timings"),
+                intent_ms=sum(float(u.get("intent_ms") or 0) for u in new_usage),
+            ),
+            "prompt_chars": int(state.get("prompt_chars") or 0)
+            + sum(int(u.get("prompt_chars") or 0) for u in new_usage),
+            "answer_chars": int(state.get("answer_chars") or 0)
+            + sum(int(u.get("answer_chars") or 0) for u in new_usage),
         }
 
     # ---- 1. 开场轮：固定排班，零 LLM ----
@@ -1003,98 +956,71 @@ async def host_node(state: RoundtableState) -> dict:
     eligible = [cid for cid in eligible if cid]
     if not eligible:
         return _converge("quota")
-    # 一轮的消耗 = 每个可投标者一次投标 + 一次发言。
-    # 主持人裁决已经不调模型（读投标排序），所以不能再按「决策 + 发言 = 2」估。
-    # 估小了会把预算耗在投标上，轮到发言时没额度，表现成「某人静默失声」。
-    _last_speaker = str((state.get("last_decision") or {}).get("selected") or "")
-    _bidders = [c for c in eligible if c != _last_speaker]
-    _round_cost = (len(_bidders) if picker != "user" else 1) + 1
-    if llm_calls + _round_cost > max_calls:
-        return _converge("budget")
-
     next_round = round_index + 1
-    candidates: list[dict] = []
-    by = "host"
-    reason = ""
-    note = ""
-    cid = ""
-    round_bids: list[dict] = []      # 本轮有效投标（user 主持时为空，由点将决定）
-    winner: dict = {}                # 中标的那份投标（user 主持时为空）
-
-    # ---- 3. 定人 ----
-    if picker == "user":
-        # 用户全权负责：挂起等前端回填，系统不代他点将（也不设超时——挂起不占进程，
-        # 用户完全可以过一会儿、甚至明天再回来点；checkpoint 已落盘）。
-        candidates = [
-            {
-                "id": c,
-                "name": _name_of(state, c),
-                "speeches": _speeches_of(ledger, c),
-                "quota": int((ledger.get(c) or {}).get("quota", quota)),
-            }
-            for c in eligible
-        ]
-        chosen = interrupt({
-            "round": next_round,
-            "total": max_rounds,
-            "topic": topic,
-            "candidates": candidates,
+    # ---- 3A. 两种主持方式都先收投标；分发前预留所有投标和一次发言 ----
+    if int(state.get("bid_round") or 0) < next_round:
+        last_speaker = str((state.get("last_decision") or {}).get("selected") or "")
+        bidders = [c for c in eligible if c != last_speaker]
+        if not bidders:
+            return _converge("quota")
+        if llm_calls + len(bidders) + 1 > max_calls:
+            return _converge("budget")
+        write({
+            "type": "bidding", "round": next_round, "total": max_rounds,
+            "candidates": [{"id": c, "name": _name_of(state, c)} for c in bidders],
         })
-        cid = str(chosen or "").strip()
-        if cid in eligible:
-            by, reason, note = "user", "", ""
-        else:
-            cid = _fallback_pick(ledger, eligible)
-            by, reason, note = "host", "", "未收到有效点将，主持人兜底"
+        return {
+            "bid_round": next_round, "pending_kind": "bidding", "pending_speaker": "",
+            "pending_round": next_round, "pending_reason": "", "ended": False,
+            **_tfields(),
+        }
+
+    # 投标已花费、已计入上面的增量；此时只需检查尚未执行的一次发言。
+    if llm_calls + 1 > max_calls:
+        return _converge("budget")
+    receipts = [i for i in (state.get("intents") or []) if int(i.get("round") or 0) == next_round]
+    round_bids = [
+        i for i in receipts if i.get("want") and i.get("status") != "error"
+        and str(i.get("character_id") or "") in eligible
+    ]
+    round_bids.sort(key=lambda i: (
+        -int(i.get("urgency") or 1),
+        _last_spoke_round(transcript, str(i.get("character_id") or "")),
+        str(i.get("character_id") or ""),
+    ))
+    candidates = [{
+        "id": str(i["character_id"]), "name": _name_of(state, str(i["character_id"])),
+        "speeches": _speeches_of(ledger, str(i["character_id"])), "quota": quota,
+        "urgency": int(i.get("urgency") or 1), "move": str(i.get("move") or ""),
+        "reason": str(i.get("reason") or ""), "target": dict(i.get("target") or {}),
+    } for i in round_bids]
+
+    # ---- 3B. 用户看全部回执后亲自决定；0 人或 1 人请缨也不会自动代选 ----
+    if picker == "user":
+        request = {
+            "round": next_round, "total": max_rounds, "topic": topic,
+            "decision_id": f"{state.get('run_id') or state.get('session_id')}:{next_round}"
+            + (f":{state['decision_revision']}" if state.get("decision_revision") else ""),
+            "candidates": candidates, "intents": receipts, "can_end": True,
+        }
+        while True:
+            chosen = str(interrupt(request) or "").strip()
+            if chosen == ROUNDTABLE_END_CHOICE:
+                return _converge("user")
+            winner = next((i for i in round_bids if i["character_id"] == chosen), None)
+            if winner is not None:
+                break
+            # 对直接 Command(resume=...) 的防御。无效选择只重新挂起，绝不兜底点人。
+            request = {**request, "error": "请选择本轮请缨者，或结束讨论。"}
+        by = "user"
     else:
-        # ---- 3A. 本轮投标还没发起：先并发收集意愿 ----
-        # bid_round 用来区分「该发起」与「已收齐」：发起时推到 next_round，
-        # 收齐后回到这里两者相等，说明该裁决了。
-        if int(state.get("bid_round") or 0) < next_round:
-            last_speaker = str((state.get("last_decision") or {}).get("selected") or "")
-            bidders = [c for c in eligible if c != last_speaker]
-            if not bidders:
-                # 只剩上一轮发言者还有配额。按「上轮说过的人本轮闭嘴」的规则，
-                # 没人能投标——这是规则的自然结果，不是故障，直接收场。
-                return _converge("quota")
-            write({
-                "type": "bidding",
-                "round": next_round,
-                "total": max_rounds,
-                "candidates": [{"id": c, "name": _name_of(state, c)} for c in bidders],
-            })
-            return {
-                "bid_round": next_round,
-                "pending_kind": "bidding",
-                "pending_speaker": "",
-                "pending_round": next_round,
-                "pending_reason": "",
-                "ended": False,
-                **_tfields(),
-            }
-
-        # ---- 3B. 投标已收齐：urgency 高者优先，平手按距上次发言最久 ----
-        round_bids = [
-            i for i in (state.get("intents") or [])
-            if int(i.get("round") or 0) == next_round
-            and i.get("want")
-            and str(i.get("character_id") or "") in eligible
-        ]
         if not round_bids:
-            # 无人请缨 = 真的没人有话说了。这比主持人推断「讨论已充分」可信。
-            print(f"[Roundtable] 第 {next_round} 轮无人请缨，收敛")
             return _converge("host")
-
-        round_bids.sort(key=lambda i: (
-            -int(i.get("urgency") or 1),
-            _last_spoke_round(transcript, str(i.get("character_id") or "")),
-            str(i.get("character_id") or ""),
-        ))
         winner = round_bids[0]
-        cid = str(winner.get("character_id") or "")
-        reason = str(winner.get("reason") or "").strip().replace(chr(10), " ")[:_HOST_REASON_CHARS]
         by = "bid"
-        note = f"{len(round_bids)} 人竞争" if len(round_bids) > 1 else ""
+    cid = str(winner["character_id"])
+    reason = str(winner.get("reason") or "").strip().replace(chr(10), " ")[:_HOST_REASON_CHARS]
+    note = f"{len(round_bids)} 人竞争" if len(round_bids) > 1 else ""
 
     # ---- 4. 事件（放在定人之后，避免挂起重放时重复）----
     write({"type": "round", "round": next_round, "total": max_rounds, "phase": "rebuttal"})
@@ -1115,11 +1041,13 @@ async def host_node(state: RoundtableState) -> dict:
         "selected_name": _name_of(state, cid),
         "reason": reason,
         "quote": str(((winner or {}).get("target") or {}).get("quote") or ""),
+        "target_turn_id": str(((winner or {}).get("target") or {}).get("turn_id") or ""),
+        "target_speaker_id": str(((winner or {}).get("target") or {}).get("speaker_id") or ""),
         "target_speaker": str(((winner or {}).get("target") or {}).get("speaker") or ""),
         "move": str((winner or {}).get("move") or ""),
         "rejected": [
             str(i.get("character_id") or "")
-            for i in (round_bids if picker != "user" else [])
+            for i in round_bids
             if str(i.get("character_id") or "") != cid
         ],
         "round": next_round,
@@ -1174,7 +1102,7 @@ async def speaker_node(state: RoundtableState) -> dict:
         "avatar": ch.avatar or "🎭",
         "theme": ch.theme or "original",
         "speeches": int(entry.get("speeches", 0)) + 1,
-        "quota": int(entry.get("quota", state.get("quota") or 2)),
+        "quota": int(entry.get("quota", state.get("quota") or 4)),
         "reason": reason,
     })
 
@@ -1187,6 +1115,8 @@ async def speaker_node(state: RoundtableState) -> dict:
             "move": _decision.get("move") or "",
             "target": {
                 "speaker": _decision.get("target_speaker") or "",
+                "speaker_id": _decision.get("target_speaker_id") or "",
+                "turn_id": _decision.get("target_turn_id") or "",
                 "quote": _decision.get("quote") or "",
             },
         }
@@ -1226,6 +1156,8 @@ async def speaker_node(state: RoundtableState) -> dict:
 
     out: dict = {
         "transcript": [{
+            "turn_id": f"turn-{len(state.get('transcript') or []) + 1}",
+            "speaker_id": ch.id,
             "character_id": ch.id,
             "name": ch.name,
             "content": full,
@@ -1294,10 +1226,11 @@ def build_roundtable_graph(checkpointer=None):
 class _DriveOutcome:
     """记录本次驱动是"跑完了"还是"挂起等点将"——决定要不要推 end + 纪要。"""
 
-    __slots__ = ("finished",)
+    __slots__ = ("finished", "failed")
 
     def __init__(self) -> None:
         self.finished = False
+        self.failed = False
 
 
 def _ckpt_path() -> str:
@@ -1309,9 +1242,8 @@ def _ckpt_path() -> str:
 def _rt_config(session_id: str) -> dict:
     return {
         "configurable": {"thread_id": session_id},
-        # 保险丝：host→speaker 交替，实测 3 开场 + 3 交锋约 15 个 super-step。
-        # 写 25 是主动收紧——万一路由被改出环，宁可中止也不要无限跑。
-        "recursion_limit": 25,
+        # 3 次开场与最多 9 次交锋；每次交锋含投标/裁决/发言，仍保留有限保险丝。
+        "recursion_limit": 64,
     }
 
 
@@ -1343,7 +1275,7 @@ async def _drive_graph(graph, graph_input, config: dict, outcome: _DriveOutcome)
     except Exception as e:
         print(f"[Roundtable] 图执行异常: {e}")
         yield {"type": "error", "content": str(e)}
-        outcome.finished = True
+        outcome.failed = True
         return
 
     snap = await graph.aget_state(config)
@@ -1379,6 +1311,7 @@ async def _tail_events(graph, config: dict, session_id: str) -> AsyncIterator[di
         "timings": dict(values.get("timings") or {}),
         "prompt_chars": int(values.get("prompt_chars") or 0),
         "answer_chars": int(values.get("answer_chars") or 0),
+        "llm_calls": int(values.get("llm_calls") or 0),
         "meeting_ms": _meeting_ms,
     }
 
@@ -1425,12 +1358,13 @@ def _resolve_speakers(character_ids: list[str]) -> list:
     return out
 
 
-async def stream_roundtable(
+async def _stream_roundtable_owned(
     topic: str,
     character_ids: list[str],
     rounds: int,
     session_id: str,
     picker: str = "user",
+    run_id: str = "",
 ) -> AsyncIterator[dict]:
     """圆桌会议主流程：开场陈述 → 主持人逐轮定人 → 纪要。
 
@@ -1451,7 +1385,7 @@ async def stream_roundtable(
     rounds = max(1, min(int(rounds), _MAX_ROUNDS))
     picker = "agent" if str(picker).lower() == "agent" else "user"
     max_calls = max(4, int(getattr(settings, "roundtable_max_llm_calls", 24) or 24))
-    quota = max(1, int(getattr(settings, "roundtable_max_speeches_per_speaker", 2) or 2))
+    quota = max(1, int(getattr(settings, "roundtable_max_speeches_per_speaker", 4) or 4))
 
     roster = [
         {
@@ -1466,6 +1400,7 @@ async def stream_roundtable(
 
     initial: RoundtableState = {
         "session_id": session_id,
+        "run_id": run_id,
         "topic": topic,
         "picker": picker,
         "max_rounds": rounds,
@@ -1490,6 +1425,12 @@ async def stream_roundtable(
         "timings": {},
         "prompt_chars": 0,
         "answer_chars": 0,
+        "bid_round": 0,
+        "intents": [],
+        "intent_errors": [],
+        "bid_usage": [],
+        "accounted_bid_usage": 0,
+        "last_decision": {},
     }
 
     config = _rt_config(session_id)
@@ -1526,7 +1467,48 @@ async def stream_roundtable(
                 yield evt
 
 
-async def resume_roundtable(session_id: str, character_id: str) -> AsyncIterator[dict]:
+def _pending_choice_payload(snap) -> dict | None:
+    """从 checkpoint 读取正在等待的点将请求，不把运行中的其他节点当成挂起。"""
+    for task in snap.tasks or []:
+        for intr in getattr(task, "interrupts", ()) or ():
+            val = getattr(intr, "value", None)
+            if isinstance(val, dict):
+                payload = dict(val)
+                if not payload.get("decision_id"):
+                    values = dict(snap.values or {})
+                    run_id = values.get("run_id") or values.get("session_id")
+                    rnd = int(payload.get("round") or int(values.get("round_index") or 0) + 1)
+                    # 更早的用户主持尚未收请缨；旧选择只启动新投标，不能消费新请缨的令牌。
+                    phase = "legacy:" if int(values.get("bid_round") or 0) < rnd else ""
+                    payload["decision_id"] = f"{run_id}:{phase}{rnd}"
+                return payload
+    return None
+
+
+def _needs_bid_refresh(values: dict, pending: dict | None) -> bool:
+    """旧协议回执不能因恢复会议而绕过新的原话/结构验证。"""
+    if not pending:
+        return False
+    rnd = int(pending.get("round") or 0)
+    if int(values.get("bid_round") or 0) < rnd:
+        return True
+    receipts = [i for i in values.get("intents") or [] if int(i.get("round") or 0) == rnd]
+    if not receipts:
+        return True
+    for receipt in receipts:
+        if receipt.get("status") == "error":
+            continue
+        raw = {key: receipt[key] for key in ("want", "urgency", "reason", "move", "target") if key in receipt}
+        try:
+            validate_intent(json.dumps(raw, ensure_ascii=False),
+                            transcript=list(values.get("transcript") or []),
+                            speaker_id=str(receipt.get("character_id") or ""))
+        except IntentValidationError:
+            return True
+    return False
+
+
+async def _resume_roundtable_owned(session_id: str, character_id: str, decision_id: str) -> AsyncIterator[dict]:
     """用户点将后恢复会议：把选择作为 `Command(resume=...)` 喂回挂起的 host 节点。
 
     这是跨请求恢复——即便点将的请求被负载均衡打到了另一个 worker，只要连的是同一个
@@ -1540,8 +1522,21 @@ async def resume_roundtable(session_id: str, character_id: str) -> AsyncIterator
         if not list(snap.next):
             yield {"type": "error", "content": "这场会议已经结束了（或不存在）。"}
             return
+        pending = _pending_choice_payload(snap)
+        if pending is None:
+            yield {"type": "error", "content": "这场会议当前没有等待点将。"}
+            return
+        if str(pending.get("decision_id") or "") != decision_id:
+            yield {"type": "error", "code": "stale_decision", "content": "这份请缨已经过期，请刷新会议。"}
+            return
+        chosen = str(character_id or "").strip()
+        candidates = {str(c.get("id") or "") for c in pending.get("candidates") or []}
+        if chosen != ROUNDTABLE_END_CHOICE and (not chosen or chosen not in candidates):
+            yield {"type": "error", "code": "invalid_choice", "content": "请选择本轮请缨者，或结束讨论。"}
+            yield {"type": "choice_request", "session_id": session_id, **pending}
+            return
         async for evt in _drive_graph(
-            graph, Command(resume=str(character_id or "")), config, outcome
+            graph, Command(resume=chosen), config, outcome
         ):
             yield evt
         if outcome.finished:
@@ -1552,6 +1547,7 @@ async def resume_roundtable(session_id: str, character_id: str) -> AsyncIterator
 async def drop_roundtable_checkpoint(session_id: str) -> None:
     """删除一场会议的图现场（历史记录删除时一并清掉，避免 checkpoint 越积越多）。"""
     try:
+        await _sessions.stop_and_delete(_ckpt_path(), session_id)
         async with AsyncSqliteSaver.from_conn_string(_ckpt_path()) as saver:
             if hasattr(saver, "adelete_thread"):
                 await saver.adelete_thread(session_id)
@@ -1565,17 +1561,218 @@ async def roundtable_pending_choice(session_id: str) -> dict | None:
     前端刷新页面后靠它把点将弹窗找回来——挂起状态在 SQLite 里，不在内存里。
     """
     try:
-        config = _rt_config(session_id)
-        async with AsyncSqliteSaver.from_conn_string(_ckpt_path()) as saver:
-            graph = build_roundtable_graph(checkpointer=saver)
-            snap = await graph.aget_state(config)
-            if not list(snap.next):
-                return None
-            for task in snap.tasks or []:
-                for intr in getattr(task, "interrupts", ()) or ():
-                    val = getattr(intr, "value", None)
-                    if isinstance(val, dict):
-                        return {"session_id": session_id, **val}
+        snapshot = await roundtable_snapshot(session_id)
+        return (snapshot or {}).get("choice_request")
     except Exception as e:
         print(f"[Roundtable] 查询挂起失败 {session_id}: {e}")
     return None
+
+
+async def roundtable_snapshot(session_id: str) -> dict | None:
+    """完整、可重建前端的会议快照；正文来自 checkpoint，纪要来自执行记录。"""
+    path = _ckpt_path()
+    run = await _sessions.read_run(path, session_id)
+    config = _rt_config(session_id)
+    async with AsyncSqliteSaver.from_conn_string(path) as saver:
+        snap = await build_roundtable_graph(checkpointer=saver).aget_state(config)
+    values = dict(snap.values or {})
+    if not run and not values:
+        return None
+    if not run and values:
+        legacy_choice = _pending_choice_payload(snap)
+        legacy_status = ("interrupted" if _needs_bid_refresh(values, legacy_choice)
+                         else "waiting" if legacy_choice else "interrupted" if list(snap.next) else "completed")
+        run = await _sessions.adopt_checkpoint(
+            path, session_id, run_id=str(values.get("run_id") or session_id), status=legacy_status,
+            decision_id=str((legacy_choice or {}).get("decision_id") or ""),
+            payload={"topic": values.get("topic") or "", "picker": values.get("picker") or "user",
+                     "rounds": int(values.get("max_rounds") or 1),
+                     "character_ids": [e["id"] for e in values.get("roster") or []]},
+        )
+    if run and (values.get("run_id") or values.get("session_id")) != run["run_id"]:
+        values = {}  # 新一场尚未写入初始 checkpoint，不能显示同 id 上一场的正文。
+    start = json.loads(run["start_payload"]) if run else {}
+    status = str((run or {}).get("status") or ("waiting" if list(snap.next) else "completed"))
+    if status == "running" and float((run or {}).get("lease_until") or 0) <= time.time():
+        status = "interrupted"
+    if status == "waiting" and _needs_bid_refresh(values, _pending_choice_payload(snap)):
+        await _sessions.invalidate_waiting(path, session_id, run["run_id"])
+        status = "interrupted"
+    choice = _pending_choice_payload(snap) if status == "waiting" else None
+    if choice is not None:
+        choice = {"session_id": session_id, **choice}
+    roster = list(values.get("roster") or [])
+    if not roster and start.get("character_ids"):
+        roster = [{"id": ch.id, "name": ch.name, "avatar": ch.avatar or "🎭", "theme": ch.theme or "original"}
+                  for ch in _resolve_speakers(start["character_ids"])]
+    summary_raw = (run or {}).get("summary")
+    return {
+        "session_id": session_id,
+        "topic": str(values.get("topic") or start.get("topic") or ""),
+        "picker": str(values.get("picker") or start.get("picker") or "user"),
+        "rounds": int(values.get("max_rounds") or start.get("rounds") or 1),
+        "round_index": int(values.get("round_index") or 0),
+        "speakers": roster, "ledger": dict(values.get("ledger") or {}),
+        "transcript": normalize_transcript(list(values.get("transcript") or [])),
+        "status": status, "pending": choice is not None, "choice_request": choice,
+        "summary": json.loads(summary_raw) if summary_raw else None,
+        "converge_reason": str(values.get("converge_reason") or ""),
+        "llm_calls": int(values.get("llm_calls") or 0)
+        + sum(int(u.get("llm_calls") or 0) for u in list(values.get("bid_usage") or [])[int(values.get("accounted_bid_usage") or 0):]),
+    }
+
+
+async def _prepare_roundtable_start(topic: str, character_ids: list[str], rounds: int,
+                                   session_id: str, picker: str = "user", *, on_complete=None) -> AsyncIterator[dict]:
+    """在返回 SSE 订阅前原子接受新会议；之后断开订阅不会取消执行段。"""
+    speakers = _resolve_speakers(character_ids)
+    if not 2 <= len(speakers) <= MAX_ROUNDTABLE_CHARS:
+        raise RoundtableConflictError("invalid_roster", f"请选择 2 到 {MAX_ROUNDTABLE_CHARS} 位有效人物。")
+    payload = {
+        "topic": topic, "character_ids": [ch.id for ch in speakers],
+        "rounds": max(1, min(int(rounds), _MAX_ROUNDS)),
+        "picker": "agent" if str(picker).lower() == "agent" else "user",
+    }
+    await roundtable_snapshot(session_id)  # 先登记旧 checkpoint，不能覆盖尚未结束的旧会议。
+    row = await _sessions.claim_start(_ckpt_path(), session_id, payload)
+    return _sessions.launch(
+        _ckpt_path(), row,
+        lambda: _stream_roundtable_owned(**payload, session_id=session_id, run_id=row["run_id"]),
+        lambda: roundtable_snapshot(session_id), on_complete,
+    )
+
+
+async def _prepare_roundtable_choice(session_id: str, character_id: str, decision_id: str,
+                                    *, on_complete=None) -> AsyncIterator[dict]:
+    """验证决策版本并原子消费；重复与迟到选择在创建 StreamingResponse 前被拒绝。"""
+    snapshot = await roundtable_snapshot(session_id)
+    pending = (snapshot or {}).get("choice_request")
+    if not pending:
+        raise RoundtableConflictError("decision_unavailable", "这场会议当前没有等待点将，请刷新会议。")
+    if not decision_id or decision_id != pending.get("decision_id"):
+        raise RoundtableConflictError("stale_decision", "这份请缨已经过期，请查看当前一轮。")
+    chosen = str(character_id or "").strip()
+    candidates = {str(c.get("id") or "") for c in pending.get("candidates") or []}
+    if chosen != ROUNDTABLE_END_CHOICE and (not chosen or chosen not in candidates):
+        raise RoundtableConflictError("invalid_choice", "请选择本轮请缨者，或结束讨论。")
+    row = await _sessions.claim_choice(_ckpt_path(), session_id, decision_id, chosen)
+    return _sessions.launch(
+        _ckpt_path(), row, lambda: _resume_roundtable_owned(session_id, chosen, decision_id),
+        lambda: roundtable_snapshot(session_id), on_complete,
+    )
+
+
+async def _continue_roundtable_owned(row: dict) -> AsyncIterator[dict]:
+    session_id = row["session_id"]
+    config, outcome = _rt_config(session_id), _DriveOutcome()
+    async with AsyncSqliteSaver.from_conn_string(_ckpt_path()) as saver:
+        graph = build_roundtable_graph(checkpointer=saver)
+        snap = await graph.aget_state(config)
+        values = dict(snap.values or {})
+        if not values or (values.get("run_id") or values.get("session_id")) != row["run_id"]:
+            initial = json.loads(row["start_payload"])
+        else:
+            initial = None
+            pending = _pending_choice_payload(snap)
+            graph_input = None
+            if _needs_bid_refresh(values, pending):
+                rnd = int(values.get("round_index") or 0)
+                await graph.aupdate_state(config, {
+                    "bid_round": rnd, "pending_kind": "", "pending_speaker": "",
+                    "decision_revision": uuid.uuid4().hex,
+                    "intents": Overwrite([i for i in values.get("intents") or []
+                                          if int(i.get("round") or 0) <= rnd]),
+                }, as_node="speaker")
+                snap = await graph.aget_state(config)
+            elif pending and pending.get("decision_id") == row.get("accepted_decision_id"):
+                graph_input = Command(resume=row["accepted_choice"])
+            if list(snap.next):
+                async for event in _drive_graph(graph, graph_input, config, outcome):
+                    yield event
+            else:
+                outcome.finished = True
+            if outcome.finished:
+                async for event in _tail_events(graph, config, session_id):
+                    yield event
+    if initial is not None:
+        async for event in _stream_roundtable_owned(**initial, session_id=session_id, run_id=row["run_id"]):
+            yield event
+
+
+async def _continue_roundtable(session_id: str, *, on_complete=None) -> AsyncIterator[dict]:
+    """先发完整快照；订阅运行中的执行段，或接管租约过期的 checkpoint 继续生成。"""
+    snapshot = await roundtable_snapshot(session_id)
+    if snapshot is None:
+        raise RoundtableConflictError("session_missing", "这场会议不存在。")
+    stream = _sessions.subscribe_running(_ckpt_path(), session_id)
+    if stream is None:
+        row = await _sessions.claim_continue(_ckpt_path(), session_id)
+        if row is not None:
+            stream = _sessions.launch(_ckpt_path(), row, lambda: _continue_roundtable_owned(row),
+                                      lambda: roundtable_snapshot(session_id), on_complete)
+            snapshot = await roundtable_snapshot(session_id)
+
+    async def events():
+        yield {"type": "snapshot", "data": snapshot}
+        if stream is not None:
+            async for event in stream:
+                yield event
+    return events()
+
+
+_preparing_tasks: set[asyncio.Task] = set()
+
+
+async def _finish_preparation(coroutine):
+    """请求在 SQLite claim 与 Task launch 之间断开，也要完成已接受执行段的启动。"""
+    task = asyncio.create_task(coroutine)
+    _preparing_tasks.add(task)
+
+    def settled(completed):
+        _preparing_tasks.discard(completed)
+        if not completed.cancelled():
+            completed.exception()  # 已断开的调用者不会再取异常，避免无人回收的 Task 警告。
+
+    task.add_done_callback(settled)
+    return await asyncio.shield(task)
+
+
+async def prepare_roundtable_start(topic: str, character_ids: list[str], rounds: int,
+                                   session_id: str, picker: str = "user", *, on_complete=None) -> AsyncIterator[dict]:
+    return await _finish_preparation(_prepare_roundtable_start(
+        topic, character_ids, rounds, session_id, picker, on_complete=on_complete))
+
+
+async def prepare_roundtable_choice(session_id: str, character_id: str, decision_id: str,
+                                    *, on_complete=None) -> AsyncIterator[dict]:
+    return await _finish_preparation(_prepare_roundtable_choice(
+        session_id, character_id, decision_id, on_complete=on_complete))
+
+
+async def continue_roundtable(session_id: str, *, on_complete=None) -> AsyncIterator[dict]:
+    return await _finish_preparation(_continue_roundtable(session_id, on_complete=on_complete))
+
+
+async def stream_roundtable(topic: str, character_ids: list[str], rounds: int, session_id: str,
+                            picker: str = "user") -> AsyncIterator[dict]:
+    """兼容生成器入口；API 使用 prepare_* 在响应头发送前处理冲突。"""
+    try:
+        stream = await prepare_roundtable_start(topic, character_ids, rounds, session_id, picker)
+    except RoundtableConflictError as exc:
+        yield {"type": "error", "code": exc.code, "content": exc.content}
+        return
+    async for event in stream:
+        yield event
+
+
+async def resume_roundtable(session_id: str, character_id: str, decision_id: str = "") -> AsyncIterator[dict]:
+    try:
+        stream = await prepare_roundtable_choice(session_id, character_id, decision_id)
+    except RoundtableConflictError as exc:
+        yield {"type": "error", "code": exc.code, "content": exc.content}
+        snapshot = await roundtable_snapshot(session_id)
+        if snapshot and snapshot.get("choice_request"):
+            yield {"type": "choice_request", **snapshot["choice_request"]}
+        return
+    async for event in stream:
+        yield event

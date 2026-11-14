@@ -24,10 +24,13 @@ from framework.runtime import (
 )
 from framework.roundtable import (
     MAX_ROUNDTABLE_CHARS,
+    RoundtableConflictError,
+    continue_roundtable,
     drop_roundtable_checkpoint,
-    resume_roundtable,
+    prepare_roundtable_choice,
+    prepare_roundtable_start,
     roundtable_pending_choice,
-    stream_roundtable,
+    roundtable_snapshot,
 )
 from framework.legend import MAX_ACTION_CHARS as LEGEND_MAX_ACTION_CHARS
 from framework.legend import StatePatchFilter as LegendStatePatchFilter
@@ -1473,7 +1476,7 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
     speaker_end / converged / budget_exhausted / end /
     summary_start / summary / summary_end / error。
 
-    picker="agent" 时主持人是 LLM：每轮它自己决定下一位谁发言并给出请缨理由。
+    picker="agent" 时按角色提交的有效请缨排序选人。
     picker="user" 时用户当主持人：遇到决策点会推 `choice_request` 并**挂起**这条流
     （不会再收到 end）。前端随后 POST .../choice 继续，那条请求返回的是续流的 SSE。
     """
@@ -1535,10 +1538,16 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
         )
 
     t0 = time.time()
+    try:
+        events = await prepare_roundtable_start(
+            topic, valid_ids, rounds, session_id, picker=picker, on_complete=_persist_roundtable_result,
+        )
+    except RoundtableConflictError as exc:
+        raise HTTPException(status_code=409, detail=exc.content) from exc
 
     async def event_stream():
         async for chunk in _roundtable_sse(
-            stream_roundtable(topic, valid_ids, rounds, session_id, picker=picker),
+            events,
             session_id=session_id,
             logger=logger,
             client_ip=client_ip,
@@ -1558,85 +1567,40 @@ async def persona_roundtable_endpoint(http_request: Request, request: "Roundtabl
 
 
 async def _roundtable_sse(agen, *, session_id: str, logger, client_ip: str, t0: float):
-    """把圆桌编排产出的事件流转成 SSE 行，并在正常收场时落库。
-
-    两条边界要分清：
-    · **收场**：收到 `end`。此时 `end` 里带着权威的完整记录（roster/transcript），
-      直接用它落库——不能靠累积前面逐个事件，因为点将恢复出来的那条流不发 `start`。
-    · **挂起**：收到 `choice_request` 后流就结束了（没有 `end`）。这时不落库：
-      会议还没开完，等恢复后收场时再写，否则历史里会出现一条"半场"记录。
-    """
-    summary: dict = {}
-    end_payload: dict = {}
-    t0_local = t0
-    _summary_t0 = 0.0     # 纪要旁路的起止（纪要耗时只能在这里观测——
-    _summary_ms = 0.0     # end 事件先于纪要发出，end 的 payload 里拿不到）
+    """只负责传输事件；会议运行和最终落库由后台任务负责，不依赖订阅连接存活。"""
     try:
         async for evt in agen:
             yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
-            et = evt.get("type")
-            if et == "end":
-                end_payload = evt
-            elif et == "summary_start":
-                _summary_t0 = time.time()
-            elif et == "summary":
-                summary = evt.get("data", {}) or {}
-                if _summary_t0:
-                    _summary_ms = (time.time() - _summary_t0) * 1000
-            elif et in ("summary_end", "summary_error"):
-                if _summary_t0 and not _summary_ms:
-                    _summary_ms = (time.time() - _summary_t0) * 1000
-    except Exception as e:
-        logger.exception("roundtable_error ip=%s", client_ip)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(e)})}\n\n"
-        yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
-        return
+    except Exception as exc:
+        logger.exception("roundtable_stream_error session=%s ip=%s", session_id, client_ip)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)}, ensure_ascii=False)}\n\n"
 
-    if not end_payload:
-        # 挂起等点将：不落库、也不记 monitor——会议还没开完，等恢复收场时再写，
-        # 否则监控里会出现一条"半场"记录（调用数与耗时都只有一半）。
-        return
 
-    try:
-        _get_session_store().save_roundtable(
-            session_id=session_id,
-            topic=end_payload.get("topic") or "",
-            speakers=end_payload.get("speakers") or [],
-            rounds=int(end_payload.get("rounds") or 0),
-            transcript=end_payload.get("transcript") or [],
-            summary=summary,
-        )
-    except Exception:
-        logger.exception("roundtable_save_failed session=%s", session_id)
-
-    # ---- 圆桌接入 monitor：整场记一条（与一对一同样的 usage_log / 延迟瀑布口径）----
-    # 段耗时来自图状态（host 决策 / 各次发言），纪要耗时在这里补上；
-    # latency 用 meeting_ms（整场，含挂起前的部分），而非本次请求时长。
-    _stages: dict = {}
-    try:
-        _stages = dict(end_payload.get("timings") or {})
-        if _summary_ms:
-            _stages["summary_ms"] = round(_summary_ms, 1)
-        _meeting_ms = int(end_payload.get("meeting_ms") or 0) or int((time.time() - t0_local) * 1000)
-        _stages["total_ms"] = _meeting_ms
-        get_monitor().record(
-            request_id=f"rt:{session_id}",
-            character="roundtable",
-            prompt_chars=int(end_payload.get("prompt_chars") or 0),
-            answer_chars=int(end_payload.get("answer_chars") or 0),
-            latency_ms=_meeting_ms,
-            stages=_stages,
-        )
-    except Exception:
-        logger.exception("roundtable_monitor_failed session=%s", session_id)
-
-    logger.info(
-        "done ip=%s elapsed_ms=%d transcript_len=%d stages=%s",
-        client_ip,
-        int((time.time() - t0_local) * 1000),
-        len(end_payload.get("transcript") or []),
-        _stages,
+async def _persist_roundtable_result(end_payload: dict, summary: dict):
+    """每次正常完场由拥有执行权的后台任务调用一次，断线或多订阅不会重复落库。"""
+    session_id = str(end_payload.get("session_id") or "")
+    logger = get_logger("persona.roundtable")
+    _get_session_store().save_roundtable(
+        session_id=session_id,
+        topic=end_payload.get("topic") or "",
+        speakers=end_payload.get("speakers") or [],
+        rounds=int(end_payload.get("rounds") or 0),
+        transcript=end_payload.get("transcript") or [],
+        summary=summary or {},
     )
+    stages = dict(end_payload.get("timings") or {})
+    meeting_ms = int(end_payload.get("meeting_ms") or 0)
+    stages["total_ms"] = meeting_ms
+    get_monitor().record(
+        request_id=f"rt:{session_id}",
+        character="roundtable",
+        prompt_chars=int(end_payload.get("prompt_chars") or 0),
+        answer_chars=int(end_payload.get("answer_chars") or 0),
+        latency_ms=meeting_ms,
+        stages=stages,
+    )
+    logger.info("done session=%s transcript_len=%d stages=%s",
+                session_id, len(end_payload.get("transcript") or []), stages)
 
 
 @router.post("/persona/roundtable/{session_id}/choice")
@@ -1648,24 +1612,27 @@ async def roundtable_choice_endpoint(session_id: str, request: "RoundtableChoice
     `Command(resume=...)` 交给 LangGraph，从 checkpoint 恢复现场。所以点将请求可以
     落在任意一个 worker 上，也不会因进程重启而丢——只要连的是同一个 checkpoint 库。
 
-    character_id 传空字符串表示**弃权**：由主持人规则兜底挑一位（按"说得最少"轮转），
-    会议不会卡死。会议已经结束则返回 409。
+    character_id 必须是本轮请缨候选，或显式传 __end__ 结束讨论。
+    空值与无效选择返回 400，保留挂起现场，不代替用户选人。会议已经结束则返回 409。
     """
     cid = (request.character_id or "").strip()
-    pending = await roundtable_pending_choice(session_id)
-    if pending is None:
-        raise HTTPException(status_code=409, detail="这场会议已经结束了")
-    if cid:
-        allowed = {str(c.get("id")) for c in (pending.get("candidates") or [])}
-        if allowed and cid not in allowed:
-            raise HTTPException(status_code=400, detail="该人物此刻不可被点将")
+    decision_id = (request.decision_id or "").strip()
+    if not cid or not decision_id:
+        raise HTTPException(status_code=400, detail="点将必须包含当前轮次的决定标识和所选人物")
+    try:
+        events = await prepare_roundtable_choice(
+            session_id, cid, decision_id, on_complete=_persist_roundtable_result,
+        )
+    except RoundtableConflictError as exc:
+        status = 400 if exc.code == "invalid_choice" else 409
+        raise HTTPException(status_code=status, detail=exc.content) from exc
 
     logger = get_logger("persona.roundtable")
     t0 = time.time()
 
     async def event_stream():
         async for chunk in _roundtable_sse(
-            resume_roundtable(session_id, cid),
+            events,
             session_id=session_id,
             logger=logger,
             client_ip="choice",
@@ -1686,7 +1653,7 @@ async def roundtable_choice_endpoint(session_id: str, request: "RoundtableChoice
 
 @router.get("/persona/roundtable/{session_id}/pending")
 async def roundtable_pending_endpoint(session_id: str):
-    """查这场会议此刻是否挂在"等点将"，是则返回候选人。
+    """查这场会议此刻是否挂在"等点将"，是则返回全部请缨回执与可选候选人。
 
     用途：用户当主持人时挂起了会议，前端刷新/断线重连后靠它把点将弹窗找回来。
     挂起状态落在 SQLite 的 checkpoint 里，所以换进程、隔一段时间回来都还在。
@@ -1695,6 +1662,31 @@ async def roundtable_pending_endpoint(session_id: str):
     if pending is None:
         return {"pending": False}
     return {"pending": True, **pending}
+
+
+@router.get("/persona/roundtable/{session_id}/snapshot")
+async def roundtable_snapshot_endpoint(session_id: str):
+    """恢复整场会议的权威快照，包含已完成正文、配额与当前点将状态。"""
+    snapshot = await roundtable_snapshot(session_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="圆桌会议记录不存在")
+    return snapshot
+
+
+@router.post("/persona/roundtable/{session_id}/continue")
+async def roundtable_continue_endpoint(session_id: str):
+    """继续已保存的会议；先返回完整快照，运行中的会议不重复发起点将。"""
+    try:
+        events = await continue_roundtable(session_id, on_complete=_persist_roundtable_result)
+    except RoundtableConflictError as exc:
+        status = 404 if exc.code in ("not_found", "session_missing") else 409
+        raise HTTPException(status_code=status, detail=exc.content) from exc
+    logger = get_logger("persona.roundtable")
+    return StreamingResponse(
+        _roundtable_sse(events, session_id=session_id, logger=logger, client_ip="continue", t0=time.time()),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel-Buffering": "no"},
+    )
 
 
 # ============================================================
@@ -1731,13 +1723,14 @@ class RoundtableRequest(BaseModel):
     rounds: int = 1
     session_id: Optional[str] = None
     # 谁当主持人：user = 用户自己（遇决策点挂起等他点将，他全权负责）；
-    #             agent = 主持人 agent（每轮自己决定下一位谁发言并给出请缨理由）
+    #             agent = 代班主持（从同一批角色请缨中按规则选人）
     picker: str = "user"
 
 
 class RoundtableChoiceRequest(BaseModel):
-    """用户在争用点上的点将选择（空字符串 = 弃权，交主持人代班）"""
+    """当前决定标识与选择共同提交；重复或过期标识不能再次消费。"""
     character_id: str = ""
+    decision_id: str = ""
 
 
 @router.post("/persona/upload")

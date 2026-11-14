@@ -3,8 +3,7 @@
 // 状态
 // ============================================================
 // 争鸣人数上限：3 是有交锋感又不累人的上限。
-// 依据 P(≥2 人同时举手) = 1-(1-p)^N - N·p·(1-p)^(N-1)：p=0.7 时 2 人 49%、3 人 78%、
-// 4 人 92% —— 4 人以上几乎每轮都要用户点将，玩法从"观赏"变成"操作"。
+// 用户主持时每次都亲自点将，三位以内的请缨与立场更容易并排读清。
 const RT_MAX = 3;
 const state = {
   sessionId: crypto.randomUUID(),
@@ -105,7 +104,6 @@ const rtSetup = document.querySelector('.rt-setup');
 const rtEmpty = document.getElementById('rtEmpty');
 const rtAsk = document.getElementById('rtAsk');
 const rtAskList = document.getElementById('rtAskList');
-const rtAskTimer = document.getElementById('rtAskTimer');
 const rtAskCancel = document.getElementById('rtAskCancel');
 const rtSummary = document.getElementById('rtSummary');
 // 注：「争鸣」没有独立按钮（旧 roundtableBtn / introRoundtableBtn 已随首页分区层改造移除）——

@@ -14,7 +14,7 @@
 <meta property="og:title" content="促膝 · 隔空促膝，如面而谈">
 <meta property="og:description" content="与荣格、阿德勒、王阳明等历史智者对话。AI 仿真角色，内容仅供学习与参考。">
 <title>促膝 · 隔空促膝，如面而谈</title>
-<link rel="stylesheet" href="/assets/css/main.css?v=2026111101" />
+<link rel="stylesheet" href="/assets/css/main.css?v=2026111402" />
 <link rel="stylesheet" href="/assets/css/premium.css?v=1792844354" />
 </head>
 <body data-theme="original">
@@ -167,7 +167,11 @@
     <div class="rt-intro">
       <p class="rt-brand">促膝</p>
       <p class="rt-tagline">与智者，促膝长谈；让思想，同台交锋。</p>
-      <p class="rt-rule">谁开口，由他们自己决定——有人要反驳、要澄清，才会举手。</p>
+      <p class="rt-rule">各位先说明为何请缨。你来主持，就由你点将或结束；代班主持按请缨紧迫度安排。</p>
+    </div>
+    <div class="rt-resume-entry" id="rtResumeEntry" hidden>
+      <span class="rt-resume-label" id="rtResumeLabel">上次会议已保留</span>
+      <button class="rt-ask-select" id="rtResumeBtn" type="button">继续会议</button>
     </div>
     <div class="rt-setup-row">
       <span class="rt-label">与会者（至少 2 位，最多 <span id="rtMax">3</span> 位）</span>
@@ -179,10 +183,10 @@
     </div>
     <div class="rt-controls">
       <div class="rt-rounds" id="rtRounds">
-        <span class="rt-label rt-label-inline">交锋轮数</span>
-        <button class="rt-round-btn active" data-rounds="1" type="button">1 轮</button>
-        <button class="rt-round-btn" data-rounds="2" type="button">2 轮</button>
-        <button class="rt-round-btn" data-rounds="3" type="button">3 轮</button>
+        <span class="rt-label rt-label-inline">全场交锋上限</span>
+        <button class="rt-round-btn active" data-rounds="3" type="button">3 次</button>
+        <button class="rt-round-btn" data-rounds="6" type="button">6 次</button>
+        <button class="rt-round-btn" data-rounds="9" type="button">9 次</button>
       </div>
       <div class="rt-rounds" id="rtPicker">
         <span class="rt-label rt-label-inline">主持</span>
@@ -191,32 +195,42 @@
       </div>
       <button class="rt-start" id="rtStartBtn" type="button" disabled>开始争鸣</button>
     </div>
+    <p class="rt-round-help">每人最多发言 4 次，包含开场。交锋次数是全场总数，每次由一人发言。</p>
   </div>
 
   <!-- 围坐圆桌舞台：会议进行中，谁发言谁起身 -->
   <div class="rt-stage" id="rtStage" hidden></div>
+  <div class="rt-recovery" id="rtRecovery" hidden>
+    <p id="rtRecoveryText" role="status"></p>
+    <div class="rt-recovery-actions">
+      <button class="rt-ask-cancel" id="rtRefreshBtn" type="button">刷新进度</button>
+      <button class="rt-ask-select" id="rtContinueBtn" type="button" hidden>继续生成</button>
+    </div>
+  </div>
 
   <div class="rt-transcript" id="rtTranscript">
     <div class="rt-empty" id="rtEmpty">
       请两三位智者同桌，抛出一个议题，<br>让他们各自判断要不要开口。<br><br>
-      多人同时要发言时，由你点将；你不想管，就让主持人代班。<br>
+      你来主持：每轮查看完整请缨，亲自点将或结束讨论，不会自动代选。<br>
+      代班主持：按请缨紧迫度安排发言。<br>
       发言结束后，主持人整理各方观点、分歧与适用条件。可以各持己见，不判胜负。
     </div>
   </div>
 
   <div class="rt-summary" id="rtSummary" hidden></div>
 
-  <!-- 点将弹层：多人同时举手时出现 -->
+  <!-- 点将弹层：收齐本轮请缨后，等待用户亲自点将或结束 -->
   <div class="rt-ask" id="rtAsk" hidden>
-    <div class="rt-ask-card" role="dialog" aria-modal="true" aria-label="选择下一位发言者">
+    <div class="rt-ask-card" role="dialog" aria-modal="true" aria-labelledby="rtAskTitle">
       <div class="rt-ask-head">
-        <span>多位同时要发言，你想先听谁？</span>
-        <span class="rt-ask-timer" id="rtAskTimer"></span>
+        <span id="rtAskTitle">请缨已齐，你想先听谁？</span>
+        <button class="rt-ask-cancel" id="rtAskLeaveBtn" type="button">稍后继续</button>
       </div>
       <div class="rt-ask-list" id="rtAskList"></div>
+      <p class="rt-ask-error" id="rtAskError" role="alert" hidden></p>
       <div class="rt-ask-foot">
-        <span class="rt-ask-hint">不选的话，主持人会替你安排。</span>
-        <button class="rt-ask-cancel" id="rtAskCancel" type="button">让主持人定</button>
+        <span class="rt-ask-hint" id="rtAskHint">阅读后点将，或结束讨论。不会自动选择。</span>
+        <button class="rt-ask-cancel" id="rtAskCancel" type="button">结束讨论</button>
       </div>
     </div>
   </div>
@@ -524,13 +538,13 @@
     <p class="setup-note">配置写在服务端 <code>data/user_config.json</code>（已加入 .gitignore）。也可以改用项目根目录的 .env，两者填一个即可。</p>
   </div>
 </div>
-<script src="/assets/js/core.js?v=1792844354"></script>
+<script src="/assets/js/core.js?v=2026111402"></script>
 <script src="/assets/js/storage.js?v=1792844354"></script>
 <script src="/assets/js/home.js?v=1792844354"></script>
 <script src="/assets/js/conversations.js?v=1792844354"></script>
 <script src="/assets/js/chat.js?v=1792844354"></script>
 <script src="/assets/js/create.js?v=1792844354"></script>
-<script src="/assets/js/roundtable.js?v=2026111301"></script>
+<script src="/assets/js/roundtable.js?v=2026111402"></script>
   <script src="/assets/js/legend.js?v=1792844354"></script>
 <script src="/assets/js/feedback.js?v=1792844354"></script>
 <script src="/assets/js/auth.js?v=1792844354"></script>

@@ -15,6 +15,8 @@ LLM 与检索全部打桩，不触真实 API，不碰 ChromaDB。
 """
 
 import asyncio
+import json
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +53,7 @@ class LLMState:
         self.bids = list(bids or [])
         self.summary = summary
         self.calls = []          # 按到达顺序记录 bid / speech / clerk
+        self.bid_outputs = []
 
     def kinds(self, kind):
         return self.calls.count(kind)
@@ -71,9 +74,24 @@ class ScriptedLLM:
     async def ainvoke(self, messages):
         self.st.calls.append(self.kind)
         if self.kind == "bid":
-            return SimpleNamespace(
-                content=self.st.bids.pop(0) if self.st.bids else '{"want": false, "urgency": 1}'
-            )
+            # 调度测试的短写 fixture 补成真实记录引用；无效 JSON/引文由独立严格契约测试覆盖。
+            obj = json.loads(self.st.bids.pop(0) if self.st.bids else
+                             '{"want": false, "urgency": 1, "reason": "此刻没有补充"}')
+            obj.setdefault("reason", "此刻没有补充")
+            if obj.get("want"):
+                data = next(text for role, text in messages if role == "user" and "【完整发言记录】" in text)
+                records, _ = json.JSONDecoder().raw_decode(data.split("【完整发言记录】\n", 1)[1])
+                current = re.search(r"character_id=([^）]+)", data).group(1)
+                others = [turn for turn in records if turn["speaker_id"] != current]
+                old_target = obj.get("target") or {}
+                target = next((turn for turn in others if turn["name"] == old_target.get("speaker")), others[0])
+                quote = old_target.get("quote") or ""
+                obj["target"] = {"speaker_id": target["speaker_id"], "turn_id": target["turn_id"],
+                                 "quote": quote if quote and quote in target["content"] else target["content"][:12]}
+                obj.setdefault("move", "rebut")
+            raw = json.dumps(obj, ensure_ascii=False)
+            self.st.bid_outputs.append(raw)
+            return SimpleNamespace(content=raw)
         return SimpleNamespace(content=self.st.summary)
 
     async def astream(self, messages):
@@ -83,7 +101,7 @@ class ScriptedLLM:
             yield AIMessageChunk(content=ch)
 
 
-def _install(monkeypatch, st, *, quota=None, max_calls=None, summary_enabled=True):
+def _install(monkeypatch, st, *, quota=2, max_calls=None, summary_enabled=True):
     def _factory(**kwargs):
         temp = kwargs.get("temperature")
         if temp == rt._INTENT_TEMPERATURE:
@@ -158,6 +176,14 @@ def _types(events):
 
 def _of(events, type_):
     return [e for e in events if e["type"] == type_]
+
+
+async def _resume(session_id, character_id, decision_id=None):
+    if decision_id is None:
+        pending = await rt.roundtable_pending_choice(session_id)
+        decision_id = (pending or {}).get("decision_id", "")
+    async for event in rt.resume_roundtable(session_id, character_id, decision_id):
+        yield event
 
 
 # ============================================================
@@ -263,10 +289,24 @@ def test_end_payload_carries_the_authoritative_record(monkeypatch):
 # ============================================================
 def test_user_host_suspends_then_resumes_across_requests(monkeypatch):
     """挂起靠 checkpoint 落盘，恢复靠 Command(resume)——两次调用互不相干，现场不丢。"""
-    _install(
+    st = _install(
         monkeypatch,
-        LLMState(speeches=["甲的开场", "乙的开场", "被点将者的发言"]),
+        LLMState(
+            speeches=["甲的开场", "乙的开场", "被点将者的发言"],
+            bids=[
+                '{"want": true, "urgency": 4, "reason": "我要反驳乙", "move": "rebut", "target": {"speaker": "乙", "quote": "乙的开场"}}',
+                '{"want": true, "urgency": 3, "reason": "我要澄清甲", "move": "clarify", "target": {"speaker": "甲", "quote": "甲的开场"}}',
+            ],
+        ), max_calls=5, summary_enabled=False,
     )
+    original_ask = rt.ask_intent
+
+    async def measured_ask(**kwargs):
+        bid = await original_ask(**kwargs)
+        bid["_usage"]["intent_ms"] = 12.5
+        return bid
+
+    monkeypatch.setattr(rt, "ask_intent", measured_ask)
     sid = "t-suspend"
 
     # ---- 第一次「请求」：开场跑完，到决策点挂起 ----
@@ -280,6 +320,11 @@ def test_user_host_suspends_then_resumes_across_requests(monkeypatch):
     req = _of(first, "choice_request")[0]
     assert req["round"] == 1 and req["total"] == 1
     assert {c["id"] for c in req["candidates"]} == {"a", "b"}
+    assert len(req["intents"]) == 2
+    assert all({"urgency", "reason", "move", "target", "speeches", "quota"} <= c.keys()
+               for c in req["candidates"])
+    assert req["can_end"] is True
+    assert st.kinds("bid") == 2
     assert types.index("choice_request") == len(types) - 1   # 挂起事件是这一流的最后一条
 
     # ---- 挂起状态在库里，能查回来（前端刷新页面靠它找回弹窗）----
@@ -287,19 +332,22 @@ def test_user_host_suspends_then_resumes_across_requests(monkeypatch):
     assert pending and {c["id"] for c in pending["candidates"]} == {"a", "b"}
 
     # ---- 第二次「请求」：点将 b，从 checkpoint 续跑 ----
-    second = _run(rt.resume_roundtable(sid, "b"))
+    second = _run(_resume(sid, "b"))
     stypes = _types(second)
 
     assert "start" not in stypes                    # 续跑不重发 start
     choices = _of(second, "choice")
     assert len(choices) == 1
     assert choices[0]["by"] == "user" and choices[0]["character_id"] == "b"
-    assert choices[0]["reason"] == ""               # 用户点将不是请缨
+    assert choices[0]["reason"] == "我要澄清甲"    # 点将保留本人提交的请缨任务
     assert "end" in stypes
 
     # 恢复后的 end 里是**整场**的完整记录，包含挂起前那两次开场
     end = _of(second, "end")[0]
     assert [t["character_id"] for t in end["transcript"]] == ["a", "b", "b"]
+    assert st.kinds("bid") == 2                    # interrupt 重放不能重复投标
+    assert end["llm_calls"] == len(st.calls) == 5   # 精确用完预算，未重复计账/预留
+    assert end["timings"]["intent_ms"] == 25.0     # 两份用量在挂起恢复后各累计一次
 
     # 恢复后不再挂起
     assert asyncio.run(rt.roundtable_pending_choice(sid)) is None
@@ -310,7 +358,7 @@ def test_resume_on_finished_meeting_is_rejected(monkeypatch):
     events = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "t-done", picker="agent"))
     assert "end" in _types(events)
 
-    resumed = _run(rt.resume_roundtable("t-done", "a"))
+    resumed = _run(_resume("t-done", "a"))
     assert _types(resumed) == ["error"]
     assert asyncio.run(rt.roundtable_pending_choice("t-done")) is None
 
@@ -318,28 +366,84 @@ def test_resume_on_finished_meeting_is_rejected(monkeypatch):
 # ============================================================
 # 4. 兜底：坏输入不空转
 # ============================================================
-def test_abstaining_user_falls_back_to_host_rotation(monkeypatch):
-    """用户弃权（回填空串）→ 主持人规则兜底挑一位，会议不停摆。"""
-    _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场", "兜底者的发言"]))
+def test_empty_user_choice_keeps_the_meeting_suspended(monkeypatch):
+    """空串不代表授权点将：必须仍等待用户明确选择或结束。"""
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲的开场", "乙的开场", "不该出现"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 2,
+    ))
     sid = "t-abstain"
     _run(rt.stream_roundtable("议题", ["a", "b"], 1, sid, picker="user"))
 
-    second = _run(rt.resume_roundtable(sid, ""))
-    choice = _of(second, "choice")[0]
-    assert choice["by"] == "host"
-    assert choice["note"]                       # 说明是兜底
-    assert choice["character_id"] == "a"        # 平票按名单顺序
-    assert "end" in _types(second)
+    second = _run(_resume(sid, ""))
+    assert _types(second) == ["error", "choice_request"]
+    assert _of(second, "error")[0]["code"] == "invalid_choice"
+    assert st.kinds("speech") == 2 and st.kinds("bid") == 2
+    assert asyncio.run(rt.roundtable_pending_choice(sid)) is not None
 
 
-def test_invalid_user_choice_falls_back_to_host(monkeypatch):
-    _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场", "兜底者的发言"]))
+def test_invalid_user_choice_keeps_the_meeting_suspended(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲的开场", "乙的开场", "不该出现"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}', '{"want": false, "urgency": 1}'],
+    ))
     sid = "t-badcid"
     _run(rt.stream_roundtable("议题", ["a", "b"], 1, sid, picker="user"))
 
-    second = _run(rt.resume_roundtable(sid, "zzz"))
-    choice = _of(second, "choice")[0]
-    assert choice["by"] == "host" and choice["note"]
+    for invalid in ("zzz", "b"):
+        second = _run(_resume(sid, invalid))
+        assert _types(second) == ["error", "choice_request"]
+        assert _of(second, "choice_request")[0]["candidates"][0]["id"] == "a"
+    assert st.kinds("speech") == 2 and st.kinds("bid") == 2
+
+
+def test_single_volunteer_still_requires_user_click(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲的开场", "乙的开场", "甲的回应"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}', '{"want": false, "urgency": 1, "reason": "暂时旁听"}'],
+    ), summary_enabled=False)
+    sid = "t-single-bid"
+    first = _run(rt.stream_roundtable("议题", ["a", "b"], 1, sid, picker="user"))
+    req = _of(first, "choice_request")[0]
+    assert [c["id"] for c in req["candidates"]] == ["a"]
+    assert len(req["intents"]) == 2
+    assert not _of(first, "choice") and not _of(first, "end")
+    assert st.kinds("speech") == 2
+    second = _run(_resume(sid, "a"))
+    assert _of(second, "choice")[0]["by"] == "user"
+    assert _of(second, "end")[0]["llm_calls"] == 5
+
+
+def test_user_can_end_after_reading_all_abstentions(monkeypatch):
+    st = _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场"]), summary_enabled=False)
+    sid = "t-end-by-user"
+    first = _run(rt.stream_roundtable("议题", ["a", "b"], 3, sid, picker="user"))
+    req = _of(first, "choice_request")[0]
+    assert req["candidates"] == [] and len(req["intents"]) == 2
+    assert all(not i["want"] and i["status"] == "ok" for i in req["intents"])
+    assert not _of(first, "end")
+    second = _run(_resume(sid, rt.ROUNDTABLE_END_CHOICE))
+    end = _of(second, "end")[0]
+    assert end["converge_reason"] == "user"
+    assert end["llm_calls"] == len(st.calls) == 4
+    assert len(end["transcript"]) == 2
+    assert asyncio.run(rt.roundtable_pending_choice(sid)) is None
+
+
+def test_failed_bids_are_visible_but_cannot_be_selected(monkeypatch):
+    _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场"]), summary_enabled=False)
+
+    async def failed(**kwargs):
+        raise TimeoutError("投标超时")
+
+    monkeypatch.setattr(rt, "ask_intent", failed)
+    first = _run(rt.stream_roundtable("议题", ["a", "b"], 1, "t-failed-bids", picker="user"))
+    req = _of(first, "choice_request")[0]
+    assert req["candidates"] == []
+    assert len(req["intents"]) == 2
+    assert all(i["status"] == "error" and "TimeoutError" in i["error"] for i in req["intents"])
+    assert len(_of(first, "intent")) == 2
+    assert not _of(first, "end")
 
 
 def test_bid_from_ineligible_character_is_filtered(monkeypatch):
@@ -410,6 +514,42 @@ def test_llm_budget_caps_the_meeting(monkeypatch):
     assert len(_of(events, "speaker_end")) == 2
     assert _of(events, "converged")[0]["reason"] == "budget"
     assert types.index("budget_exhausted") < types.index("end")
+
+
+@pytest.mark.parametrize("picker", ["agent", "user"])
+def test_bid_usage_is_charged_before_the_next_round(monkeypatch, picker):
+    """3 开场 + 3 投标 + 1 发言恰好用完 7 次，下一轮不能漏掉投标继续跑。"""
+    bid = '{"want": true, "urgency": 4, "reason": "我有话说", "move": "rebut"}'
+    st = _install(monkeypatch, LLMState(bids=[bid] * 9, speeches=["S"] * 6),
+                  max_calls=7, summary_enabled=False)
+    sid = f"t-cumulative-budget-{picker}"
+    events = _run(rt.stream_roundtable("议题", ["a", "b", "c"], 3, sid, picker=picker))
+    if picker == "user":
+        assert _of(events, "choice_request")
+        events += _run(_resume(sid, "a"))
+    end = _of(events, "end")[0]
+    assert st.kinds("bid") == 3 and st.kinds("speech") == 4
+    assert len(st.calls) == end["llm_calls"] == 7
+    assert end["converge_reason"] == "budget"
+    assert _of(events, "budget_exhausted")[0]["llm_calls"] == 7
+    assert end["answer_chars"] == 4 + sum(map(len, st.bid_outputs))
+    assert end["timings"]["intent_ms"] > 0
+
+
+def test_multiple_user_interrupts_do_not_double_charge_or_repeat_bids(monkeypatch):
+    bid = '{"want": true, "urgency": 4, "reason": "我有话说"}'
+    st = _install(monkeypatch, LLMState(bids=[bid] * 6, speeches=["S"] * 6),
+                  max_calls=12, summary_enabled=False)
+    sid = "t-multiple-user-rounds"
+    current = _run(rt.stream_roundtable("议题", ["a", "b", "c"], 3, sid, picker="user"))
+    for cid in ("a", "b", "c"):
+        assert _of(current, "choice_request")
+        current = _run(_resume(sid, cid))
+    end = _of(current, "end")[0]
+    assert len(st.calls) == end["llm_calls"] == 12
+    assert st.kinds("bid") == st.kinds("speech") == 6
+    assert end["answer_chars"] == 6 + sum(map(len, st.bid_outputs))
+    assert end["converge_reason"] == "rounds"
 
 
 def test_rounds_are_clamped(monkeypatch):
@@ -538,4 +678,304 @@ def test_reopening_a_suspended_session_is_refused(monkeypatch):
 
     again = _run(rt.stream_roundtable("议题", ["a", "b"], 1, sid, picker="user"))
     assert _types(again) == ["error"]
-    assert "还在等待点将" in again[0]["content"]
+    assert again[0]["code"] == "session_active"
+
+
+async def _collect(gen):
+    return [event async for event in gen]
+
+
+def test_parallel_choices_consume_one_decision_once(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 2,
+        speeches=["甲的开场", "乙的开场", "唯一一次交锋"],
+    ), summary_enabled=False)
+
+    async def scenario():
+        first = await _collect(rt.stream_roundtable("议题", ["a", "b"], 1, "parallel-choice"))
+        token = _of(first, "choice_request")[0]["decision_id"]
+
+        async def choose():
+            try:
+                stream = await rt.prepare_roundtable_choice("parallel-choice", "a", token)
+            except rt.RoundtableConflictError as exc:
+                return exc.code
+            return await _collect(stream)
+
+        results = await asyncio.gather(choose(), choose())
+        assert sum(isinstance(result, list) for result in results) == 1
+        assert sum(isinstance(result, str) for result in results) == 1
+        assert st.kinds("speech") == 3
+        snap = await rt.roundtable_snapshot("parallel-choice")
+        assert snap["status"] == "completed"
+        assert len(snap["transcript"]) == 3
+
+    asyncio.run(scenario())
+
+
+def test_old_decision_cannot_choose_a_later_round_or_reopened_meeting(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 20,
+        speeches=["一条实际发言"] * 12,
+    ), summary_enabled=False)
+
+    async def scenario():
+        sid = "stale-round"
+        first = await _collect(rt.stream_roundtable("议题", ["a", "b", "c"], 3, sid))
+        old = _of(first, "choice_request")[0]["decision_id"]
+        second = await _collect(await rt.prepare_roundtable_choice(sid, "a", old))
+        current = _of(second, "choice_request")[0]["decision_id"]
+        assert current != old
+        calls = list(st.calls)
+        with pytest.raises(rt.RoundtableConflictError, match="过期"):
+            await rt.prepare_roundtable_choice(sid, "c", old)
+        assert st.calls == calls
+        assert (await rt.roundtable_snapshot(sid))["choice_request"]["decision_id"] == current
+        await _collect(await rt.prepare_roundtable_choice(sid, rt.ROUNDTABLE_END_CHOICE, current))
+        again = await _collect(rt.stream_roundtable("新议题", ["a", "b"], 1, sid))
+        reopened = _of(again, "choice_request")[0]["decision_id"]
+        assert reopened != old
+        with pytest.raises(rt.RoundtableConflictError):
+            await rt.prepare_roundtable_choice(sid, "a", old)
+        await _collect(await rt.prepare_roundtable_choice(sid, rt.ROUNDTABLE_END_CHOICE, reopened))
+
+    asyncio.run(scenario())
+
+
+def test_snapshot_restores_transcript_bids_and_final_summary(monkeypatch):
+    _install(monkeypatch, LLMState(
+        speeches=["甲的完整开场", "乙的完整开场"],
+        summary='{"clashes": [], "positions": [{"name": "甲", "stance": "保留自己的观点"}], "open": []}',
+    ))
+
+    async def scenario():
+        sid = "snapshot-state"
+        await _collect(rt.stream_roundtable("一个议题", ["a", "b"], 2, sid))
+        waiting = await rt.roundtable_snapshot(sid)
+        assert waiting["status"] == "waiting" and waiting["pending"]
+        assert waiting["topic"] == "一个议题" and waiting["picker"] == "user"
+        assert waiting["rounds"] == 2 and waiting["round_index"] == 0
+        assert [t["content"] for t in waiting["transcript"]] == ["甲的完整开场", "乙的完整开场"]
+        assert len(waiting["choice_request"]["intents"]) == 2
+        assert {r["speeches"] for r in waiting["ledger"].values()} == {1}
+        events = await _collect(await rt.continue_roundtable(sid))
+        assert events == [{"type": "snapshot", "data": waiting}]
+        token = waiting["choice_request"]["decision_id"]
+        await _collect(await rt.prepare_roundtable_choice(sid, rt.ROUNDTABLE_END_CHOICE, token))
+        final = await rt.roundtable_snapshot(sid)
+        assert final["status"] == "completed" and not final["pending"]
+        assert final["converge_reason"] == "user"
+        assert final["summary"]["positions"][0]["stance"] == "保留自己的观点"
+        assert final["transcript"] == waiting["transcript"]
+
+    asyncio.run(scenario())
+
+
+def test_disconnected_start_keeps_running_to_the_next_choice(monkeypatch):
+    st = _install(monkeypatch, LLMState(speeches=["甲的开场", "乙的开场"]), summary_enabled=False)
+
+    async def scenario():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def retrieve(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return ""
+
+        monkeypatch.setattr(rt, "_retrieve_for_speaker", retrieve)
+        sid = "detach-start"
+        stream = await rt.prepare_roundtable_start("议题", ["a", "b"], 1, sid)
+        assert (await anext(stream))["type"] == "start"
+        await asyncio.wait_for(entered.wait(), 5)
+        task = rt._sessions._jobs[rt._sessions._key(rt._ckpt_path(), sid)].task
+        await stream.aclose()
+        assert not task.done()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        snapshot = await rt.roundtable_snapshot(sid)
+        assert snapshot["status"] == "waiting"
+        assert [turn["content"] for turn in snapshot["transcript"]] == ["甲的开场", "乙的开场"]
+        assert st.kinds("speech") == 2 and st.kinds("bid") == 2
+        await _collect(await rt.prepare_roundtable_choice(
+            sid, rt.ROUNDTABLE_END_CHOICE, snapshot["choice_request"]["decision_id"]))
+
+    asyncio.run(scenario())
+
+
+def test_disconnected_accepted_choice_finishes_and_archives_once(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲开场", "乙开场", "断线后完整发言"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 2,
+    ), summary_enabled=False)
+
+    async def scenario():
+        sid, archived = "detach-choice", []
+        first = await _collect(rt.stream_roundtable("议题", ["a", "b"], 1, sid))
+        token = _of(first, "choice_request")[0]["decision_id"]
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def retrieve(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            return ""
+
+        async def archive(end, summary):
+            archived.append((end, summary))
+
+        monkeypatch.setattr(rt, "_retrieve_for_speaker", retrieve)
+        stream = await rt.prepare_roundtable_choice(sid, "a", token, on_complete=archive)
+        await anext(stream)
+        await asyncio.wait_for(entered.wait(), 5)
+        task = rt._sessions._jobs[rt._sessions._key(rt._ckpt_path(), sid)].task
+        await stream.aclose()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(task), 5)
+        restored = await _collect(await rt.continue_roundtable(sid, on_complete=archive))
+        assert restored[0]["data"]["status"] == "completed"
+        assert restored[0]["data"]["transcript"][-1]["content"] == "断线后完整发言"
+        assert len(archived) == 1 and st.kinds("speech") == 3
+
+    asyncio.run(scenario())
+
+
+def test_interrupted_accepted_choice_can_continue_without_reclaiming_decision(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲开场", "乙开场", "恢复后的完整发言"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 2,
+    ), summary_enabled=False)
+
+    async def scenario():
+        sid = "continue-interrupted"
+        first = await _collect(rt.stream_roundtable("议题", ["a", "b"], 1, sid))
+        token = _of(first, "choice_request")[0]["decision_id"]
+
+        async def unavailable(*args, **kwargs):
+            raise RuntimeError("临时检索故障")
+
+        monkeypatch.setattr(rt, "_retrieve_for_speaker", unavailable)
+        failed = await _collect(await rt.prepare_roundtable_choice(sid, "a", token))
+        assert _of(failed, "error") and not _of(failed, "end")
+        assert (await rt.roundtable_snapshot(sid))["status"] == "interrupted"
+
+        async def restored(*args, **kwargs):
+            return ""
+
+        monkeypatch.setattr(rt, "_retrieve_for_speaker", restored)
+        events = await _collect(await rt.continue_roundtable(sid))
+        assert events[0]["type"] == "snapshot"
+        assert _of(events, "end")[0]["transcript"][-1]["content"] == "恢复后的完整发言"
+        assert st.kinds("speech") == 3 and st.kinds("bid") == 2
+        with pytest.raises(rt.RoundtableConflictError):
+            await rt.prepare_roundtable_choice(sid, "a", token)
+
+    asyncio.run(scenario())
+
+
+def test_nine_rebuttals_allow_four_total_speeches_per_character(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["有效发言"] * 12,
+        bids=['{"want": true, "urgency": 4, "reason": "我要继续回应"}'] * 30,
+    ), quota=4, max_calls=100, summary_enabled=False)
+    events = _run(rt.stream_roundtable("议题", ["a", "b", "c"], 9, "nine-rounds", picker="agent"))
+    end = _of(events, "end")[0]
+    assert len(end["transcript"]) == st.kinds("speech") == 12
+    assert len([turn for turn in end["transcript"] if turn["kind"] == "rebuttal"]) == 9
+    assert all(sum(turn["character_id"] == cid for turn in end["transcript"]) == 4 for cid in ("a", "b", "c"))
+    assert end["converge_reason"] == "rounds"
+    assert len({turn["turn_id"] for turn in end["transcript"]}) == 12
+
+
+def test_legacy_checkpoint_is_adopted_without_overwriting_its_body(monkeypatch):
+    _install(monkeypatch, LLMState(speeches=["旧会议的甲", "旧会议的乙"]), summary_enabled=False)
+
+    async def scenario():
+        sid = "legacy-checkpoint"
+        await _collect(rt._stream_roundtable_owned("议题", ["a", "b"], 1, sid))
+        assert await rt._sessions.read_run(rt._ckpt_path(), sid) is None
+        snapshot = await rt.roundtable_snapshot(sid)
+        assert snapshot["status"] == "waiting"
+        assert [t["content"] for t in snapshot["transcript"]] == ["旧会议的甲", "旧会议的乙"]
+        decision = snapshot["choice_request"]["decision_id"]
+        assert decision == f"{sid}:1"
+        with pytest.raises(rt.RoundtableConflictError):
+            await rt.prepare_roundtable_start("新会议", ["a", "b"], 1, sid)
+        await _collect(await rt.prepare_roundtable_choice(sid, rt.ROUNDTABLE_END_CHOICE, decision))
+        assert (await rt.roundtable_snapshot(sid))["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_legacy_unverified_bids_require_fresh_strict_bids_before_selection(monkeypatch):
+    _install(monkeypatch, LLMState(
+        speeches=["旧甲发言", "旧乙发言", "新协议下发言"],
+        bids=['{"want": true, "urgency": 4, "reason": "重新核对后回应"}'] * 2,
+    ), summary_enabled=False)
+    strict_ask = rt.ask_intent
+
+    async def legacy_ask(**kwargs):
+        return {"want": True, "urgency": 4, "reason": "旧版请缨", "move": "rebut",
+                "target": {"speaker": "不存在的人物", "quote": "从未说过的原话"}, "status": "ok"}
+
+    async def scenario():
+        sid = "legacy-invalid-bids"
+        monkeypatch.setattr(rt, "ask_intent", legacy_ask)
+        old_events = await _collect(rt._stream_roundtable_owned("议题", ["a", "b"], 1, sid))
+        old_token = _of(old_events, "choice_request")[0]["decision_id"]
+        old_body = _of(old_events, "speaker_end")
+        snapshot = await rt.roundtable_snapshot(sid)
+        assert snapshot["status"] == "interrupted"
+        assert snapshot["choice_request"] is None
+        with pytest.raises(rt.RoundtableConflictError):
+            await rt.prepare_roundtable_choice(sid, "a", old_token)
+        monkeypatch.setattr(rt, "ask_intent", strict_ask)
+        fresh = await _collect(await rt.continue_roundtable(sid))
+        request = _of(fresh, "choice_request")[0]
+        assert request["decision_id"] != old_token
+        assert all({"speaker_id", "turn_id", "quote"} <= c["target"].keys() for c in request["candidates"])
+        assert not _of(fresh, "speaker_end")
+        restored = await rt.roundtable_snapshot(sid)
+        assert [t["content"] for t in restored["transcript"]] == [e["content"] for e in old_body]
+        await _collect(await rt.prepare_roundtable_choice(sid, "a", request["decision_id"]))
+        assert (await rt.roundtable_snapshot(sid))["status"] == "completed"
+
+    asyncio.run(scenario())
+
+
+def test_disconnect_between_claim_and_launch_does_not_strand_the_choice(monkeypatch):
+    st = _install(monkeypatch, LLMState(
+        speeches=["甲开场", "乙开场", "断线后继续"],
+        bids=['{"want": true, "urgency": 4, "reason": "我要回应"}'] * 2,
+    ), summary_enabled=False)
+
+    async def scenario():
+        sid = "claim-launch-disconnect"
+        first = await _collect(rt.stream_roundtable("议题", ["a", "b"], 1, sid))
+        token = _of(first, "choice_request")[0]["decision_id"]
+        claimed, release = asyncio.Event(), asyncio.Event()
+        real_claim = rt._sessions.claim_choice
+
+        async def paused_claim(*args):
+            row = await real_claim(*args)
+            claimed.set()
+            await release.wait()
+            return row
+
+        monkeypatch.setattr(rt._sessions, "claim_choice", paused_claim)
+        http_task = asyncio.create_task(rt.prepare_roundtable_choice(sid, "a", token))
+        await asyncio.wait_for(claimed.wait(), 5)
+        preparation = next(iter(rt._preparing_tasks))
+        http_task.cancel()
+        await asyncio.gather(http_task, return_exceptions=True)
+        release.set()
+        orphan_subscription = await asyncio.wait_for(asyncio.shield(preparation), 5)
+        # 没有任何订阅者消费流，执行也会完成；再关掉未使用的订阅。
+        job = rt._sessions._jobs.get(rt._sessions._key(rt._ckpt_path(), sid))
+        if job:
+            await asyncio.wait_for(asyncio.shield(job.task), 5)
+        await orphan_subscription.aclose()
+        snapshot = await rt.roundtable_snapshot(sid)
+        assert snapshot["status"] == "completed"
+        assert snapshot["transcript"][-1]["content"] == "断线后继续"
+        assert st.kinds("speech") == 3
+
+    asyncio.run(scenario())

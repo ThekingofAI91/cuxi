@@ -5,6 +5,7 @@ API 集成测试：SSE 流式 / 缓存命中 / 限流 / 敏感拦截 / 会话持
 """
 
 import os
+import asyncio
 import json
 import sys
 import time
@@ -96,6 +97,174 @@ def test_query_streams_result(client):
     result = [e for e in events if e.get("type") == "result"]
     assert result and result[0]["content"] == "测试回答：荣格认为这是好事儿。"
     assert fake.calls == 1
+
+
+@pytest.mark.parametrize("candidates", [[], [{"id": "jung", "name": "荣格"}]])
+@pytest.mark.parametrize("choice", ["", "   ", "adler"])
+def test_roundtable_rejects_non_bidder_without_resuming(client, monkeypatch, candidates, choice):
+    c, _ = client
+    prepared = []
+
+    async def prepare(session_id, character_id, decision_id, **kwargs):
+        prepared.append((session_id, character_id, decision_id))
+        assert character_id not in {item["id"] for item in candidates}
+        raise routes.RoundtableConflictError("invalid_choice", "请选择本轮请缨者")
+
+    monkeypatch.setattr(routes, "prepare_roundtable_choice", prepare)
+    response = c.post("/persona/roundtable/awaiting/choice",
+                      json={"character_id": choice, "decision_id": "decision-1"})
+    assert response.status_code == 400
+    assert len(prepared) == (1 if choice.strip() else 0)
+
+
+def test_roundtable_start_preserves_client_session_id_for_early_disconnect_recovery(client, monkeypatch):
+    c, _ = client
+    prepared = []
+
+    async def events(session_id):
+        yield {"type": "start", "session_id": session_id}
+
+    async def prepare(topic, character_ids, rounds, session_id, picker="user", **kwargs):
+        prepared.append((character_ids, rounds, session_id, picker))
+        assert kwargs["on_complete"] is routes._persist_roundtable_result
+        return events(session_id)
+
+    monkeypatch.setattr(routes, "prepare_roundtable_start", prepare)
+    response = c.post("/persona/roundtable", json={
+        "topic": "理解与行动", "character_ids": ["jung", "adler"], "rounds": 6,
+        "picker": "user", "session_id": "client-saved-before-start",
+    })
+    assert response.status_code == 200
+    assert prepared == [(["jung", "adler"], 6, "client-saved-before-start", "user")]
+    assert _sse_events(response)[0]["session_id"] == "client-saved-before-start"
+
+
+@pytest.mark.parametrize("choice", ["jung", "__end__"])
+def test_roundtable_explicit_choice_preserves_resumed_sse(client, monkeypatch, choice):
+    c, _ = client
+    resumed = []
+
+    async def resume(session_id, character_id):
+        yield {"type": "converged", "reason": "user" if character_id == "__end__" else "rounds"}
+        yield {"type": "end", "session_id": session_id, "transcript": []}
+
+    async def prepare(session_id, character_id, decision_id, **kwargs):
+        resumed.append((session_id, character_id, decision_id))
+        assert kwargs["on_complete"] is routes._persist_roundtable_result
+        return resume(session_id, character_id)
+
+    monkeypatch.setattr(routes, "prepare_roundtable_choice", prepare)
+    response = c.post("/persona/roundtable/awaiting/choice",
+                      json={"character_id": choice, "decision_id": "decision-1"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert resumed == [("awaiting", choice, "decision-1")]
+    assert [event["type"] for event in _sse_events(response)] == ["converged", "end"]
+
+
+def test_roundtable_pending_preserves_all_bid_details(client, monkeypatch):
+    c, _ = client
+    payload = {
+        "round": 1, "total": 2, "can_end": True,
+        "candidates": [{"id": "jung", "urgency": 4, "reason": "需要澄清", "move": "clarify",
+                        "target": {"speaker": "阿德勒", "quote": "原话片段"}, "speeches": 1, "quota": 2}],
+        "intents": [{"character_id": "jung", "want": True},
+                    {"character_id": "adler", "want": False, "reason": "此刻没有补充"}],
+    }
+
+    async def pending(session_id):
+        return payload
+
+    monkeypatch.setattr(routes, "roundtable_pending_choice", pending)
+    response = c.get("/persona/roundtable/awaiting/pending")
+    assert response.status_code == 200
+    assert response.json() == {"pending": True, **payload}
+
+
+def test_roundtable_choice_requires_current_decision_id(client, monkeypatch):
+    c, _ = client
+
+    async def unexpected_prepare(*args, **kwargs):
+        pytest.fail("没有决定标识的请求不能启动会议")
+
+    monkeypatch.setattr(routes, "prepare_roundtable_choice", unexpected_prepare)
+    assert c.post("/persona/roundtable/awaiting/choice", json={"character_id": "jung"}).status_code == 400
+
+
+@pytest.mark.parametrize("code", ["stale_decision", "already_claimed"])
+def test_roundtable_choice_conflict_returns_409_before_stream(client, monkeypatch, code):
+    c, _ = client
+
+    async def conflict(*args, **kwargs):
+        raise routes.RoundtableConflictError(code, "该轮点将已经处理，请刷新会议")
+
+    monkeypatch.setattr(routes, "prepare_roundtable_choice", conflict)
+    response = c.post("/persona/roundtable/awaiting/choice",
+                      json={"character_id": "jung", "decision_id": "old-decision"})
+    assert response.status_code == 409
+    assert not response.headers["content-type"].startswith("text/event-stream")
+
+
+def test_roundtable_snapshot_preserves_transcript_and_pending_decision(client, monkeypatch):
+    c, _ = client
+    snapshot = {"session_id": "awaiting", "status": "waiting", "pending": True,
+                "transcript": [{"turn_id": "turn-1", "character_id": "jung", "content": "完整原文"}],
+                "ledger": {"jung": {"speeches": 1, "quota": 4}},
+                "choice_request": {"decision_id": "current-decision", "candidates": [{"id": "jung"}]}}
+
+    async def get_snapshot(session_id):
+        return snapshot if session_id == "awaiting" else None
+
+    monkeypatch.setattr(routes, "roundtable_snapshot", get_snapshot)
+    assert c.get("/persona/roundtable/awaiting/snapshot").json() == snapshot
+    assert c.get("/persona/roundtable/missing/snapshot").status_code == 404
+
+
+def test_roundtable_continue_uses_saved_run_and_returns_snapshot_first(client, monkeypatch):
+    c, _ = client
+
+    async def events():
+        yield {"type": "snapshot", "data": {"session_id": "awaiting", "status": "waiting"}}
+
+    async def continue_saved(session_id, **kwargs):
+        assert session_id == "awaiting"
+        assert kwargs["on_complete"] is routes._persist_roundtable_result
+        return events()
+
+    monkeypatch.setattr(routes, "continue_roundtable", continue_saved)
+    response = c.post("/persona/roundtable/awaiting/continue", json={})
+    assert response.status_code == 200
+    assert _sse_events(response) == [{"type": "snapshot", "data": {"session_id": "awaiting", "status": "waiting"}}]
+
+
+def test_roundtable_archive_is_independent_of_stream_subscriptions(client):
+    # 两条订阅都读到 end 也不能各记一次消耗；唯一的后台完成回调负责持久化。
+    c, _ = client
+    payload = {"type": "end", "session_id": "background-result", "topic": "议题", "rounds": 3,
+               "speakers": [{"id": "jung", "name": "荣格", "quota": 4}],
+               "transcript": [{"turn_id": "turn-1", "character_id": "jung", "content": "已完成的发言"}],
+               "prompt_chars": 120, "answer_chars": 30, "meeting_ms": 100,
+               "timings": {"intent_ms": 20.0, "speaker_ms": 80.0}}
+
+    async def events():
+        yield payload
+
+    async def deliver_and_archive():
+        for _ in range(2):
+            chunks = [chunk async for chunk in routes._roundtable_sse(
+                events(), session_id="background-result", logger=routes.get_logger("test"),
+                client_ip="test", t0=0,
+            )]
+            assert chunks
+        assert monitor_mod.get_monitor().summary(0)["requests"] == 0
+        await routes._persist_roundtable_result(payload, {"closing": "已结束"})
+
+    asyncio.run(deliver_and_archive())
+    assert monitor_mod.get_monitor().summary(0)["requests"] == 1
+    response = c.get("/persona/roundtable/background-result")
+    assert response.status_code == 200
+    assert response.json()["transcript"] == payload["transcript"]
+    assert response.json()["summary"] == {"closing": "已结束"}
 
 
 @pytest.mark.parametrize("partial_output", [False, True])
