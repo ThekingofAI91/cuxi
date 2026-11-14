@@ -3,9 +3,9 @@
 与人物对话的 AI 应用。荣格、阿德勒、王阳明、峰哥、张雪峰五个人物各有独立人设、知识库与界面主题(依次为纸墨 / 夜航 / 印刷 / 街头 / 直播数据台)。首页三个入口:**促膝**(与五位人物一对一,选人页按「问道 · 言必有据 / 会心 · 不设防」两种气质分组)、**争鸣**(多人物圆桌交锋)、**传奇**(用户扮主角推进剧情)。开源,Apache-2.0。
 
 ```
-忠实度 8.94 / 相关性 9.75 / 口吻一致性 8.74   自建 166 题 LLM-as-Judge 五维评测
-寒暄首字 ~2s / 检索端到端 ~2.4s / 重复提问 0.05s   单机 CPU 实测
-pytest 659 个用例   覆盖编排 / 检索 / 状态隔离 / 异常处理
+忠实度 8.94 / 相关性 9.75 / 口吻一致性 8.74   历史 166 题 LLM-as-Judge 五维评测（0–10 分）
+寒暄首字 ~2s / 文本检索中位 1.90s / 重复提问精排 0.05s   历史单机 CPU 实测
+pytest 659 项 / 前端圆桌 28 项   覆盖编排 / 检索 / 状态隔离 / 异常处理 / 断线恢复
 ```
 
 一次由评测驱动的修复:首轮评测王阳明忠实度 4.25,归因是传记语料缺失而非检索问题,补语料后 4.25 → 9.54。详见[评测](#评测)一节。
@@ -24,18 +24,22 @@ pytest 659 个用例   覆盖编排 / 检索 / 状态隔离 / 异常处理
 
 环境要求:Python 3.10+
 
+原始语料需自行准备，放到 `scenes/persona_chat/characters/` 各角色定义的 `data_source` 目录。入库支持 `.md`、`.pdf`、`.txt`，递归扫描子目录；人设技能包已随仓库提供。
+
 ```bash
 # 1. 安装依赖
-uv sync --extra dev          # 或 pip install -e ".[dev]"
+uv sync --extra dev
 
-# 2. 初始化语料(解析 md/pdf → 分块 → 向量化 → 写入 ChromaDB)
-python init_persona_data.py
+# 2. 初始化语料(解析 md/pdf/txt → 分块 → 向量化 → 写入 ChromaDB)
+uv run python init_persona_data.py
 
 # 3. 启动服务
-python main.py               # 默认 http://localhost:8000
+uv run python main.py        # 默认 http://localhost:8000
 ```
 
-**配置模型 API**:本项目不内置任何 Key。推荐浏览器里填——启动后打开首页,首次访问弹出配置页(内置 DeepSeek / 百炼 / 智谱 / Kimi 预设,可先测试连接);无头部署用 `cp .env.example .env` 填三个变量。
+使用 pip 时，先创建并激活虚拟环境，再执行 `python -m pip install -r requirements.txt -r requirements-dev.txt`，后续命令直接用 `python` 运行。只检查语料解析和分块，可运行 `uv run python init_persona_data.py --dry-run`；只重建某位角色，加 `--character 角色id`。
+
+**配置模型 API**:本项目不内置任何 Key。推荐浏览器里填——启动后打开首页,未配置时弹出配置页(内置 DeepSeek / 百炼 / 智谱 / Kimi 预设,可先测试连接);无头部署复制 `.env.example` 为 `.env`，填写 `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`。浏览器配置保存在 `data/user_config.json`，优先于 `.env`。
 
 启动后:对话页 `/`、API 文档 `/docs`、管理后台 `/admin`(用量与延迟瀑布 / 角色排行 / 图谱状态 / 自定义角色 / 圆桌 / 反馈,上线前设置 `MONITOR_TOKEN`)。
 
@@ -82,6 +86,7 @@ flowchart TD
     Tools --> Chroma
     Tools --> Graph
     API --> SQLite
+    Roundtable -->|checkpoint + 执行状态| SQLite
 
     LLM[LLM API<br/>主 / 备自动降级]
     Sup -->|流式| LLM
@@ -95,20 +100,22 @@ flowchart TD
 |---|---|---|
 | 编排 | 自研 asyncio,无状态图 | LangGraph,图上有环 |
 | 谁决定下一步 | 模型决定查不查、查多深(工具参数 `strong`) | 角色先投标；用户查看请缨后点将，或由代班主持按紧迫度裁决 |
-| 挂起 | 不需要,请求级无状态 | `interrupt()` + SQLite checkpoint,重启可恢复 |
+| 挂起 | 不需要图级挂起 | `interrupt()` + SQLite checkpoint,重启可恢复 |
 | 结束 | 单次回答即结束 | 用户明确结束，或代班主持在无人请缨时收场；两种模式都受配额、轮数与调用预算约束 |
 
-争鸣的开场各自独立生成,只看议题、人设和本人的知识库资料。两种主持模式在每轮交锋前都会并发问每位**还有配额、且上轮没发言**的角色「此刻有没有非说不可的话」,各自提交紧迫度(1-5)、请缨理由、回应对象与原话,以及反驳、澄清、区分或追问的意图。代班主持按紧迫度排序,平手时让最久没开口的人先说；「我来主持」展示本轮全部回执,由用户从请缨者中选择。只有一人请缨也要点击,没有倒计时或自动代选；无人请缨时可查看弃权、失败信息并点击结束讨论。
+争鸣每场选择 2–3 位人物，开场按名单依次发言，各自独立生成，只看议题、人设和本人的知识库资料。两种主持模式在每轮交锋前都会并发问每位**还有配额、且上一轮交锋没发言**的角色「此刻有没有非说不可的话」,各自提交紧迫度(1-5)、请缨理由、回应对象与原话,以及反驳、澄清、区分或追问的意图。代班主持按紧迫度排序,平手时让最久没开口的人先说；「我来主持」展示本轮全部回执及已发言次数,由用户从请缨者中选择。只有一人请缨也要点击,没有倒计时或自动代选；无人请缨时可查看弃权、失败信息并点击结束讨论。
 
-每人最多发言 **4 次（含开场）**，总交锋可选 3、6、9 次，仍受调用预算约束。每次投标尝试都累计调用、输入输出字符和耗时；校验失败的纠正重试也计费。投标前为后续发言预留额度，剩余预算决定每人最多可尝试几次。投标输出上限为 4000 token。预算统计应用层调用，不等同于 SDK 网络重试、备用模型和纪要旁路的物理请求总数。
+每人默认最多发言 **4 次（含开场）**，由 `ROUNDTABLE_MAX_SPEECHES_PER_SPEAKER` 配置。全场交锋次数可选 3、6、9 次，每次一人发言、不含开场；配额或预算不足时会提前结束。讨论阶段默认最多 **24 次应用层模型调用**（`ROUNDTABLE_MAX_LLM_CALLS`），包含开场、投标及纠正重试、后续发言。
+
+每次投标尝试都累计调用、输入输出字符和耗时；校验失败的纠正重试也计入预算。投标前为后续发言预留额度，剩余预算决定每人最多可尝试几次。投标输出上限为 4000 token。预算统计应用层调用，不等同于 SDK 网络重试、备用模型和纪要旁路的物理请求总数。
 
 请缨必须输出完整 JSON。代码校验字段类型，并用 `target.speaker_id`、`target.turn_id` 和 `target.quote` 核对发言者、具体发言及连续原文，拒绝自引、虚构人物、改写或拼接引文。格式或匹配失败时，仅向该角色反馈错误并重试，最多首次加两次纠正；最终失败显示为失败回执，不伪装成主动弃权。
 
-用户点将同时提交当前 `decision_id`。后端以 SQLite 原子占用保证同一次决定只被接受一次，旧轮次选择不能用于下一轮。浏览器保留最近一场活动会议的入口，刷新或离开后可点击「继续会议」：先恢复完整发言、台账和当前请缨，再点将。已接受的会议任务在连接断开后继续运行到挂起或结束，运行中的会议可以刷新进度；断线不会再次提交刚才的选择。
+用户点将同时提交当前 `decision_id`。后端以 SQLite 原子占用保证同一次决定只被接受一次，旧轮次选择不能用于下一轮。浏览器保留最近一场会议的入口，刷新或离开后可点击「继续会议」：先恢复完整发言、台账和当前请缨，再点将；已结束的会议显示为「查看上次会议」。已接受的会议任务在连接断开后继续运行到挂起或结束，运行中的会议可以刷新进度；断线不会再次提交刚才的选择。服务进程中断后从最近 checkpoint 接续，尚未完成的节点可能重新调用模型。
 
 后续发言、投标和结束总结都读取完整发言记录,保留每位人物的署名、轮次和正文；发言者另有自己的开场立场可供对照,并收到本轮被选中的请缨任务。资料与记录作为引用数据传入,固定规则放在 system 消息中。每轮检索仍从原议题查询本人知识库,避免对手的说法直接引导证据召回。
 
-发言结束不等于达成共识。主持人总结各方主张、仍存的分歧和待核查问题,仅在发言提供依据时整理观点的适用条件,不判胜负、不强行折中。独立性探针可用 `.venv/Scripts/python.exe scripts/eval_roundtable_independence.py` 检查提示词;加 `--live` 才启用实际检索和 8 次模型生成。探针用于审查顺序影响和错误观点干扰,不提供未经验证的防污染分数。实现与验证记录见[工程笔记](docs/engineering-notes.md#roundtable-independence)。
+发言结束不等于达成共识。主持人总结各方主张、仍存的分歧和待核查问题,仅在发言提供依据时整理观点的适用条件,不判胜负、不强行折中。设置 `ROUNDTABLE_SUMMARY_ENABLED=0` 可关闭纪要，只保留发言记录。独立性探针可用 `uv run python scripts/eval_roundtable_independence.py` 检查提示词;加 `--live` 才启用实际检索和 8 次模型生成。探针用于审查顺序影响和错误观点干扰,不提供未经验证的防污染分数。实现与验证记录见[工程笔记](docs/engineering-notes.md#roundtable-independence)。
 
 `strong` 是检索深度分档,不是开关:`true` 走完整管线出 6 条带来源,`false` 只取向量+BM25 top-3 作"模糊印象"。选择权在模型——工具描述里写清什么情况用哪档。
 
@@ -186,13 +193,30 @@ flowchart TD
 
 ### 失分模式
 
-按角色的忠实度:王阳明 9.28 / 阿德勒 8.97 / 荣格 8.94 / 张雪峰 8.53 / 峰哥 8.47。三类集中问题:语料覆盖不到时模型补训练知识(峰哥最低,语料截止 2024)、来源加权与概念覆盖的冲突(阿德勒)、术语检索精度。RAGAS 三维(53 题)作对照诊断,与 LLM-as-Judge 不能横比,原因与原始数据见 [docs/eval-report.md](docs/eval-report.md)。
+按角色的忠实度:王阳明 9.28 / 阿德勒 8.97 / 荣格 8.94 / 张雪峰 8.53 / 峰哥 8.47。三类集中问题:语料覆盖不到时模型补训练知识(峰哥最低,语料截止 2024)、来源加权与概念覆盖的冲突(阿德勒)、术语检索精度。RAGAS 三维(53 题)作对照诊断,与 LLM-as-Judge 不能横比,原因见[工程笔记](docs/engineering-notes.md#ragas-对照为什么不能与五维横比)。
 
 ### 一次评测驱动的修复
 
 首轮评测王阳明忠实度仅 4.25。逐题查看发现检索精度与其他角色持平——是传记语料缺失,不是检索坏了。补语料重测,原 0 分题升到满分,该角色 4.25 → 9.54。这件事定了后来的方法论:**先归因,再动手;该修语料时别动检索**。
 
 评测集 = 内置 12 题 + 扩充 154 题(带角色字段),扩充题按「词条在语料里的出现次数」筛过,语料里查不到的概念已换题。
+
+### 本地验证
+
+2026-11-14 核对：pytest 收集到 **659 项**测试；前端圆桌测试 **28/28 通过**，覆盖显式点将、全部回执展示、重复提交、断线恢复和纪要渲染。
+
+```bash
+# 检查 Python 测试数量与导入
+uv run --extra dev python -m pytest tests/ --collect-only -q
+
+# 执行 Python 测试
+uv run --extra dev python -m pytest tests/ -q
+
+# 前端圆桌测试（需安装 Node.js）
+node --test tests/frontend_roundtable_choice.test.cjs tests/frontend_roundtable_summary.test.cjs
+```
+
+完整 pytest 包含实际检索与模型调用用例，需要本地语料和可用 API 配置。上述 659 项是本次收集数量；最近一次完整执行的结果见[工程笔记](docs/engineering-notes.md)。
 
 ---
 
@@ -215,8 +239,8 @@ flowchart TD
 | 后端 | FastAPI;一对一自研 async 编排,争鸣 LangGraph |
 | 检索 | ChromaDB + bge-small-zh-v1.5 / rank-bm25 / bge-reranker-base(int8 量化) |
 | 前端 | 原生 HTML/CSS/JS,零构建 |
-| 持久化 | SQLite(会话/账号/用量/反馈)+ ChromaDB + 图谱 JSON |
-| 评估 | 166 题 LLM-as-Judge 五维 + RAGAS 对照 + pytest 659 用例 |
+| 持久化 | SQLite(会话/账号/用量/反馈/圆桌 checkpoint 与执行状态)+ ChromaDB + 图谱 JSON |
+| 评估 | LLM-as-Judge 五维(当前 1–5 分) + RAGAS 对照 + pytest + Node.js 内置测试 |
 
 ---
 
@@ -230,10 +254,10 @@ flowchart TD
 ├── src/api/                       # REST + SSE 路由 / 限流鉴权 / 评测端点
 ├── src/core/                      # 配置 / LLM 客户端 / 会话 / 监控
 ├── src/retrieval/                 # 嵌入 / 分块 / 混合检索 / 重排 / 图谱 / 块尾续接
-├── data/persona_chat/             # 各人物语料(不进仓库,见合规)
+├── data/persona_chat/             # 人设技能包(随仓库) / 原始语料(自行准备)
 ├── frontend/                      # 零构建前端
 ├── scripts/                       # 建图战役 / RAGAS / 压测等脚本
-└── tests/                         # 551 个用例
+└── tests/                         # Python 测试 / 前端圆桌测试 / 评测脚本与数据
 ```
 
 更多工程细节(检索参数三次推演、分块实测、上游故障排查、并发原始数据)在 [`docs/engineering-notes.md`](docs/engineering-notes.md)。
@@ -244,8 +268,8 @@ flowchart TD
 
 ```bash
 # 重灌某个人物 + 失效其 BM25 磁盘缓存
-python -c "import init_persona_data; init_persona_data.load_character_data('fengge')"
-python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; invalidate_bm25_cache('persona_fengge')"
+uv run python -c "import init_persona_data; init_persona_data.load_character_data('fengge')"
+uv run python -c "from src.retrieval.advanced_search import invalidate_bm25_cache; invalidate_bm25_cache('persona_fengge')"
 ```
 
 | 人物 | collection | 块数 | 语料 |
