@@ -4,6 +4,7 @@ FastAPI 路由端点
 """
 
 import asyncio
+from copy import deepcopy
 import json
 import threading
 import time
@@ -132,9 +133,9 @@ class UploadResponse(BaseModel):
 
 _session_store: dict[str, dict] = {}
 
-# 答案缓存：character_id::query -> (expire_ts, answer, route_history)
+# 答案缓存：用户::角色::问题 -> (expire_ts, 答案及前端返回字段)
 # 只缓存"新会话首问"，避免带上下文的追问被错误命中
-_ANSWER_CACHE: dict[str, tuple[float, str, list]] = {}
+_ANSWER_CACHE: dict[str, tuple[float, dict]] = {}
 _ANSWER_CACHE_TTL = 3600
 
 # 用户长期记忆的异步提取任务引用集（防 GC：create_task 的返回值若不持有，任务可能被回收）
@@ -1206,6 +1207,13 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                 stage_mark("first_token_ms", (_first_token_at[0] - t0) * 1000)
             await token_queue.put(token)
 
+        def accept_answer(payload: dict) -> None:
+            """生成与缓存回放共用写入路径；在返回正文前保存本轮问答。"""
+            result_box.update(deepcopy(payload))
+            append_conversation(session_id, request.query, result_box["final_answer"])
+            _session_store[session_id].update({**result_box, "query": request.query})
+            _persist_session_db(session_id)
+
         async def run_pipeline():
             """在后台任务中运行一对一编排（framework/supervisor_agent.py）"""
             # persona 场景配置（contextvar 按请求隔离，create_task 复制父上下文）
@@ -1288,13 +1296,14 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                 info_gap_qs = accumulated.get("info_gap_questions")
                 if answer:
                     answer = sanitize_output(answer)
-                    append_conversation(session_id, request.query, answer)
-                    result_box.update({
+                    accept_answer({
                         "route_history": accumulated.get("route_history", []),
                         "final_answer": answer,
                         "analysis": accumulated.get("analysis", ""),
                         "retrieved_docs": accumulated.get("retrieved_docs", []),
                         "info_gap_questions": info_gap_qs,
+                        "graph_used": bool(accumulated.get("graph_used", False)),
+                        "doc_map": _build_doc_map(accumulated.get("retrieved_docs", []) or []),
                     })
                     # 用户长期记忆提取：回答返回后异步执行（不占用户等待时间）
                     if _user_key and settings.memory_enabled:
@@ -1304,18 +1313,13 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                         )
                         _MEMORY_TASKS.add(_mt)
                         _mt.add_done_callback(_MEMORY_TASKS.discard)
-                    # _session_store 仍同步更新（供刷新后恢复答案），
-                    # 但 SSE 最终结果只读 result_box，与并发请求互不干扰
-                    # query 同步更新：前端刷新后可用它校验“答案属于哪个问题”，
-                    # 防止恢复机制把另一个标签页的回答错贴到当前问题下
-                    _session_store[session_id].update({**result_box, "query": request.query})
-                    _persist_session_db(session_id)
-                result_box["graph_used"] = bool(accumulated.get("graph_used", False))
-                if not history_before and not request.regenerate:
+                if answer and not history_before and not request.regenerate:
+                    # 只存回放需要的字段；不保留整段检索原文，也不共享可变列表。
                     _ANSWER_CACHE[cache_key] = (
                         time.time() + _ANSWER_CACHE_TTL,
-                        answer,
-                        accumulated.get("route_history", []),
+                        deepcopy({key: result_box.get(key) for key in (
+                            "final_answer", "route_history", "info_gap_questions", "graph_used", "doc_map",
+                        )}),
                     )
                     # 过期清理：字典只进不出是慢泄漏（长期运行每条 (角色,问题) 占一条），
                     # 超过软上限时先清过期项，清完仍超则按插入序淘汰最旧的
@@ -1335,34 +1339,31 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             yield f"data: {json.dumps({'type': 'start', 'session_id': session_id})}\n\n"
             yield f"data: {json.dumps({'type': 'thinking', 'content': f'{character.name}正在思考...'})}\n\n"
 
-            # 新会话首问命中缓存：直接回放，跳过整个图执行。
+            # 缓存只跳过模型生成；会话写入、引用和最终事件仍走公共流程。
             # 重新生成时不读缓存——重答的意义就是给一个不同的回答。
             cached = _ANSWER_CACHE.get(cache_key)
-            if not history_before and not request.regenerate and cached and cached[0] > time.time():
+            if (not history_before and not request.regenerate and cached
+                    and cached[0] > time.time() and cached[1].get("final_answer")):
                 logger.info("cache_hit ip=%s key=%s", client_ip, cache_key)
                 was_cache_hit = True
-                cached_answer, cached_route = cached[1], cached[2]
-                yield f"data: {json.dumps({'type': 'trace', 'route_history': cached_route})}\n\n"
-                yield f"data: {json.dumps({'type': 'result', 'content': cached_answer})}\n\n"
-                yield f"data: {json.dumps({'type': 'end', 'session_id': session_id})}\n\n"
-                return
+                accept_answer(cached[1])
+            else:
+                pipeline_task = asyncio.create_task(run_pipeline())
 
-            pipeline_task = asyncio.create_task(run_pipeline())
+                while True:
+                    item = await token_queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, dict) and "__node_done__" in item:
+                        node_name = item["__node_done__"]
+                        yield f"data: {json.dumps({'type': 'agent_done', 'agent': node_name})}\n\n"
+                    elif isinstance(item, str):
+                        yield f"data: {json.dumps({'type': 'token', 'content': item})}\n\n"
 
-            while True:
-                item = await token_queue.get()
-                if item is None:
-                    break
-                if isinstance(item, dict) and "__node_done__" in item:
-                    node_name = item["__node_done__"]
-                    yield f"data: {json.dumps({'type': 'agent_done', 'agent': node_name})}\n\n"
-                elif isinstance(item, str):
-                    yield f"data: {json.dumps({'type': 'token', 'content': item})}\n\n"
+                await pipeline_task
 
-            await pipeline_task
-
-            if pipeline_error:
-                raise pipeline_error[0]
+                if pipeline_error:
+                    raise pipeline_error[0]
 
             final_answer = result_box.get("final_answer", "")
             route_history = result_box.get("route_history", [])
@@ -1371,7 +1372,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
 
             # 引用标注映射：正文 [n] / 推断 [Gk] → 资料（来源/章节），前端渲染悬浮出处。
             # 编号与 _build_context 的两套序列一致，规则见 _build_doc_map。
-            _doc_map = _build_doc_map(result_box.get("retrieved_docs", []) or [])
+            _doc_map = result_box.get("doc_map") or []
 
             yield f"data: {json.dumps({'type': 'trace', 'route_history': route_history})}\n\n"
 
@@ -1396,7 +1397,8 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             # 避免后台构建的成百次 LLM 调用与本次回答争夺 DeepSeek API / CPU（见上方注释）。
             # 失败退避：构建失败（如上游空响应熔断）后 1 小时内不自动重试，
             # 防止每次对话都重新触发一次注定失败的几百次 LLM 调用拖垮服务。
-            if settings.graph_rag_enabled and settings.graph_auto_build and character.zone == "education":
+            if (not was_cache_hit and settings.graph_rag_enabled and settings.graph_auto_build
+                    and character.zone == "education"):
                 try:
                     from src.retrieval.knowledge_graph import graph_exists as _ge
                     _col = character.chroma_collection
@@ -1421,6 +1423,8 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     character=character_id,
                     prompt_chars=prompt_chars,
                     answer_chars=len(final_answer),
+                    prompt_tokens=0 if was_cache_hit else None,
+                    completion_tokens=0 if was_cache_hit else None,
                     latency_ms=int((time.time() - t0) * 1000),
                     cache_hit=was_cache_hit,
                     stages=stages_snapshot(),

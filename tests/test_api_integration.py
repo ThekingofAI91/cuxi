@@ -31,9 +31,11 @@ class FakePipeline:
 
     def __init__(self):
         self.calls = 0
+        self.histories = []
 
     async def __call__(self, state, on_stage=None):
         self.calls += 1
+        self.histories.append(list(state.get("history", [])))
         if on_stage is not None:
             await on_stage("supervisor")
         answer = "测试回答：荣格认为这是好事儿。"
@@ -65,6 +67,8 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "rate_limit_per_day", 1000)
     monkeypatch.setattr(settings, "upload_limit_per_day", 100)
     monkeypatch.setattr(settings, "upload_max_mb", 10)
+    monkeypatch.setattr(routes, "_SESSION_META_FILE", tmp_path / "session_meta.json")
+    monkeypatch.setattr(routes, "_DELETED_SESSIONS_FILE", tmp_path / "deleted_sessions.json")
 
     deps._RATE_STORE.clear()
     routes._ANSWER_CACHE.clear()
@@ -318,6 +322,91 @@ def test_cache_hit_skips_graph(client):
     assert fake.calls == 1  # 第二次未再次执行图，命中缓存
     result = [e for e in _sse_events(r2) if e.get("type") == "result"]
     assert result and "测试回答" in result[0]["content"]
+
+    from src.core.session_store import get_store
+    row = get_store().get("s-b")
+    assert json.loads(row["history"]) == [["你是谁", result[0]["content"]]]
+    assert row["query"] == "你是谁" and row["final_answer"] == result[0]["content"]
+    assert json.loads(row["route_history"]) == ["supervisor", "retriever", "analyzer"]
+    pending = c.get("/conversation/pending/s-b").json()
+    assert pending["pending"] is True and pending["final_answer"] == result[0]["content"]
+    usage = monitor_mod.get_monitor().summary(0)
+    assert usage["requests"] == 2 and usage["cache_hits"] == 1
+    cached_usage = monitor_mod.get_monitor()._conn.execute(
+        "SELECT prompt_tokens, completion_tokens, cost FROM usage_log WHERE cache_hit=1",
+    ).fetchone()
+    assert tuple(cached_usage) == (0, 0, 0.0)
+
+
+def test_followup_after_cache_hit_uses_the_cached_turn_as_history(client):
+    c, fake = client
+    for sid in ("followup-source", "followup-cached"):
+        response = c.post("/persona/query", json={
+            "query": "什么是阴影", "session_id": sid, "character_id": "jung",
+        })
+        assert response.status_code == 200
+    assert fake.calls == 1
+
+    followup = c.post("/persona/query", json={
+        "query": "刚才的解释可以举个例子吗", "session_id": "followup-cached", "character_id": "jung",
+    })
+    assert followup.status_code == 200 and fake.calls == 2
+    assert fake.histories[-1] == [("什么是阴影", "测试回答：荣格认为这是好事儿。")]
+
+    from framework.runtime import get_conversation_history
+    assert len(get_conversation_history("followup-cached")) == 2
+    assert len(get_conversation_history("followup-source")) == 1
+
+
+@pytest.mark.parametrize("with_questions", [False, True])
+def test_cache_replays_citations_graph_and_questions_without_shared_mutation(client, monkeypatch, with_questions):
+    from langchain_core.documents import Document
+    import framework.supervisor_agent as supervisor
+
+    c, _ = client
+    calls = []
+    docs = [
+        Document(page_content="原文资料", metadata={"source": "原著.pdf", "heading": "第一章"}),
+        Document(page_content="关系证据", metadata={"source": "图谱.md", "kg_inferred": True}),
+    ]
+    questions = [{"question": "你更关心哪个方面？", "options": ["概念", "应用"]}] if with_questions else None
+
+    async def rich_answer(state, on_stage=None):
+        calls.append(state)
+        return {"final_answer": "原文依据 [1]，图谱推断 [G1]。", "retrieved_docs": docs,
+                "graph_used": True, "route_history": ["supervisor", "retrieval_agent"],
+                "info_gap_questions": questions}
+
+    monkeypatch.setattr(supervisor, "run_supervisor_agent", rich_answer)
+    monkeypatch.setattr(settings, "graph_auto_build", False)
+
+    def ask(sid):
+        response = c.post("/persona/query", json={
+            "query": "带引用的缓存问题", "session_id": sid, "character_id": "jung",
+        })
+        assert response.status_code == 200
+        return [event for event in _sse_events(response) if event["type"] in (
+            "trace", "result", "questions", "citations",
+        )]
+
+    generated = ask("rich-source")
+    replayed = ask("rich-replayed")
+    assert len(calls) == 1 and replayed == generated
+    answer_event = next(event for event in replayed if event["type"] in ("result", "questions"))
+    assert answer_event["type"] == ("questions" if with_questions else "result")
+    assert answer_event["graph_used"] is True
+    assert [doc["n"] for doc in answer_event["doc_map"]] == ["1", "G1"]
+    assert any(event["type"] == "citations" for event in replayed)
+    if with_questions:
+        assert answer_event["questions"] == questions
+
+    # 修改某个会话的恢复副本，不能污染其他新会话的缓存回放。
+    routes._session_store["rich-replayed"]["doc_map"][0]["source"] = "污染来源"
+    routes._session_store["rich-replayed"]["route_history"].append("污染路由")
+    if with_questions:
+        routes._session_store["rich-replayed"]["info_gap_questions"][0]["options"].append("污染选项")
+    assert ask("rich-third") == generated
+    assert len(calls) == 1
 
 
 def test_rate_limit_429(client, monkeypatch):
