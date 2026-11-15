@@ -1,6 +1,11 @@
 """Day 2 模块功能测试"""
 import sys
-sys.path.insert(0, "C:\\Users\\liu\\Desktop\\Multi-Agent-RAG-Academic-Assistant")
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.document_processing.parser import MarkdownParser
 from src.retrieval.chunker import AdaptiveChunker
@@ -67,17 +72,22 @@ print()
 
 # 3. 测试 Embedder（mock 模式—不实际加载模型）
 print("=" * 60)
-print("3️⃣  测试 Embedder 初始化和降级方案")
+print("3️⃣  测试 Embedder 初始化和 mock 向量化")
 print("=" * 60)
 
 from src.retrieval.embedder import Embedder
 embedder = Embedder()
+embedder._model = SimpleNamespace(
+    encode=lambda texts, **kwargs: np.tile([1.0, 0.0, 0.0], (len(texts), 1)),
+)
+embedder._dimension = 3
 print(f"Embedder 模型名: {embedder.model_name}")
 print(f"Embedder 设备: {embedder.device}")
 print(f"Embedder 维度: {embedder.dimension}")
 
-# 测试降级嵌入（无模型时）
+# 测试替身提供确定的合法向量，不触发真实模型下载。
 vec = embedder.embed_query("测试查询")
+assert vec == [1.0, 0.0, 0.0]
 print(f"查询向量维度: {len(vec)}")
 print(f"向量前5个值: {vec[:5]}")
 

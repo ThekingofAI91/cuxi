@@ -573,6 +573,10 @@ def load_character_data(character_id: str, dry_run: bool = False, allow_ocr: boo
         return
 
     embedder = get_embedder()
+    # 第一批向量成功生成后才清旧库，模型加载或首次推理失败时保留原数据。
+    first_vectors = embedder.embed_documents(
+        [c.page_content for c in all_chunks[:EMBED_BATCH]]
+    )
     client = _client()
 
     # 先清旧数据，避免新旧混在一起（id 复用）。失败就此打住，不要带上半截状态。
@@ -593,7 +597,9 @@ def load_character_data(character_id: str, dry_run: bool = False, allow_ocr: boo
     for start in range(0, len(all_chunks), EMBED_BATCH):
         end = min(start + EMBED_BATCH, len(all_chunks))
         batch = all_chunks[start:end]
-        vectors = embedder.embed_documents([c.page_content for c in batch])
+        vectors = first_vectors if start == 0 else embedder.embed_documents(
+            [c.page_content for c in batch]
+        )
         collection.add(
             ids=[f"{character_id}_{j}" for j in range(start, end)],
             documents=[c.page_content for c in batch],

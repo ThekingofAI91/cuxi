@@ -295,7 +295,7 @@ async def advanced_retrieval(
     Returns:
         (retrieved_docs, all_contexts) 元组
     """
-    from src.retrieval.embedder import get_embedder
+    from src.retrieval.embedder import EmbeddingError, get_embedder
 
     embedder = get_embedder()
 
@@ -408,13 +408,26 @@ async def advanced_retrieval(
 
     bm25_task = asyncio.create_task(_bm25_first_pass()) if use_bm25 else None
     bm25_index = None
+    embedding_error = None
 
     try:
         _add_boards("vector", ["original"], await vec_task)
-    except Exception:
-        # 向量路失败时取消仍在跑的 BM25 任务，避免"异常从未被读取"告警
-        if bm25_task is not None and not bm25_task.done():
+    except EmbeddingError as e:
+        if bm25_task is None:
+            raise
+        embedding_error = e
+        from src.core.logger import get_logger
+        get_logger("retrieval").warning(
+            "embedding_unavailable collection=%s fallback=bm25_only error=%s",
+            collection.name, e,
+        )
+        if trace_out is not None:
+            trace_out.degradation = {"strategy": "bm25_only", "reason": "embedding_unavailable"}
+    except BaseException:
+        # 取消或其他向量库异常仍向上传递，同时收走并行任务的异常。
+        if bm25_task is not None:
             bm25_task.cancel()
+            await asyncio.gather(bm25_task, return_exceptions=True)
         raise
 
     if bm25_task is not None:
@@ -422,6 +435,8 @@ async def advanced_retrieval(
             bm25_index, first_groups = await bm25_task
             _add_boards("bm25", ["original"], first_groups)
         except Exception as e:
+            if embedding_error is not None:
+                raise EmbeddingError("嵌入模型不可用，BM25 检索也失败") from e
             print(f"[Advanced Retrieval] BM25 检索失败，跳过: {e}")
 
     stage_mark("retrieval_ms", (time.perf_counter() - _retrieval_t0) * 1000)
@@ -462,6 +477,8 @@ async def advanced_retrieval(
         candidate = doc_candidates[doc_id]
         metadata = dict(candidate["metadata"])
         metadata["rrf_score"] = round(doc_rrf_scores[doc_id], 6)
+        if embedding_error is not None:
+            metadata["retrieval_mode"] = "bm25_only"
         # 附加语料来源类型（original/oral/secondary/...），便于溯源与下游提示
         if "source_type" not in metadata:
             metadata["source_type"] = classify_source(metadata.get("source", ""))

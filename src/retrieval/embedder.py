@@ -19,6 +19,10 @@ from langchain_core.documents import Document
 from src.core.config import settings
 
 
+class EmbeddingError(RuntimeError):
+    """嵌入模型不可用或输出无效；调用方不得把失败当作可入库的向量。"""
+
+
 # ============================================================
 # 嵌入器
 # ============================================================
@@ -74,16 +78,18 @@ class Embedder:
                         import torch
                         torch.set_num_threads(max(1, settings.torch_num_threads))
                         from sentence_transformers import SentenceTransformer
-                        self._model = SentenceTransformer(
+                        model = SentenceTransformer(
                             self.model_name,
                             device=self.device,
                         )
-                        self._dimension = self._model.get_embedding_dimension()
+                        dimension = model.get_embedding_dimension()
+                        if not isinstance(dimension, int) or dimension <= 0:
+                            raise ValueError("模型未返回有效的嵌入维度")
+                        self._model = model
+                        self._dimension = dimension
                         print(f"[Embedder] 模型加载完成，嵌入维度: {self._dimension}")
                     except Exception as e:
-                        print(f"[Embedder] 模型加载失败: {e}")
-                        print("[Embedder] 使用降级方案（随机向量）— 仅用于测试")
-                        self._dimension = settings.embedding_dimension
+                        raise EmbeddingError(f"嵌入模型 {self.model_name} 加载失败") from e
         return self._model
 
     @property
@@ -91,7 +97,9 @@ class Embedder:
         """返回嵌入向量维度"""
         if self._dimension is None:
             _ = self.model  # 触发加载
-        return self._dimension or settings.embedding_dimension
+        if self._dimension is None:
+            raise EmbeddingError(f"嵌入模型 {self.model_name} 未返回有效维度")
+        return self._dimension
 
     def embed_query(self, text: str) -> list[float]:
         """
@@ -155,32 +163,30 @@ class Embedder:
 
     def _embed(self, texts: list[str]) -> list[list[float]]:
         """实际执行嵌入的核心方法"""
-        if self.model is None:
-            # 降级方案：返回随机向量（仅用于测试）
-            print("[Embedder] 使用降级嵌入（随机向量）")
-            rng = np.random.default_rng(42)
-            return rng.random((len(texts), self.dimension)).tolist()
-
+        model = self.model
         try:
             with self._encode_sem:
-                embeddings = self.model.encode(
+                embeddings = model.encode(
                     texts,
                     batch_size=32,
                     show_progress_bar=False,
                     normalize_embeddings=True,  # L2 归一化，提高余弦相似度计算效率
                 )
-            return embeddings.tolist()
+            vectors = np.asarray(embeddings)
+            if vectors.shape != (len(texts), self.dimension):
+                raise ValueError("模型返回的向量条数或维度不匹配")
+            if not np.isfinite(vectors).all() or (np.linalg.norm(vectors, axis=1) == 0).any():
+                raise ValueError("模型返回了非有限值或零向量")
+            return vectors.tolist()
         except Exception as e:
-            print(f"[Embedder] 嵌入过程出错: {e}")
-            # 降级
-            rng = np.random.default_rng(42)
-            return rng.random((len(texts), self.dimension)).tolist()
+            raise EmbeddingError(f"嵌入模型 {self.model_name} 向量化失败") from e
 
     # ---- 缓存相关 ----
 
     def _get_text_hash(self, text: str) -> str:
-        """计算文本的 SHA256 哈希（作为缓存 key）"""
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+        """按模型和缓存版本隔离；旧版缓存可能含失败时写入的随机向量。"""
+        key = f"embedding-v2\0{self.model_name}\0{text}"
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:16]
 
     def _get_cache_path(self, text_hash: str) -> Path:
         """获取缓存文件路径"""
