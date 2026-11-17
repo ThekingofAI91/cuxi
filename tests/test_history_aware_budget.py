@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from framework import runtime as rt
-from framework import supervisor_agent as sa
+from framework import chat_agent as sa
 from src.core.config import settings
 
 

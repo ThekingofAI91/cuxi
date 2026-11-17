@@ -48,9 +48,9 @@ async def analysis_agent(state: AgentState) -> dict[str, Any]:
     print(f"[Analysis Agent] 角色人设: {'有' if character_role_prompt else '无'}")
 
     try:
-        # ---- 名人对话场景：直接以角色口吻回答（复用 supervisor 的生成逻辑）----
+        # ---- 名人对话场景：直接以角色口吻回答（复用 chat_agent 的生成逻辑）----
         # 基于检索资料 + 对话历史，流式输出角色口吻回答，不再产出结构化 JSON 报告；
-        # supervisor 直接以 analysis 作为最终回答，省掉一次长 LLM 二次生成。
+        # chat_agent 直接以 analysis 作为最终回答，省掉一次长 LLM 二次生成。
         if character_role_prompt:
             from framework.runtime import _generate_direct_response
             # 上下文格式按分区：教育区保留来源标注（要可溯源），

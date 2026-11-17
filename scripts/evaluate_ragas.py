@@ -37,12 +37,12 @@ SAMPLE_QUESTIONS = {
 async def run_one(character, char_config, question: str) -> dict:
     """执行一次完整流水线，返回回答与检索上下文（供 RAGAS 打分）
 
-    走生产同一条路：framework/supervisor_agent.run_supervisor_agent
-    （supervisor 自持 search_library 工具）。2026-09-30 前本脚本跑的是已删除的
+    走生产同一条路：framework/chat_agent.run_chat_agent
+    （chat_agent 自持 search_library 工具）。2026-09-30 前本脚本跑的是已删除的
     LangGraph 图，故历史 RAGAS 数值与新口径不严格可比，重跑后再对外引用。
     """
     from framework.runtime import set_scene_config
-    from framework.supervisor_agent import run_supervisor_agent
+    from framework.chat_agent import run_chat_agent
     from scenes.persona_chat.prompt_builder import build_character_prompt, build_post_history_directive
     from src.core.state import AgentState
 
@@ -67,7 +67,7 @@ async def run_one(character, char_config, question: str) -> dict:
         "user_memory": None,
         "stream_callback": None,
     }
-    final = await run_supervisor_agent(state)
+    final = await run_chat_agent(state)
     docs = final.get("retrieved_docs", []) or []
     return {
         "question": question,

@@ -39,19 +39,6 @@ class PersonaChatSceneConfig:
     default_character: str = "jung"
 
     # ---- Agent 系统提示词 ----
-    supervisor_system_prompt: str = field(default_factory=lambda: """
-你是一个智能任务路由器。
-
-可用的 Agent：
-- retriever: 需要查人物著作/资料时调用
-- analyzer: 需要分析、回答问题时调用
-
-决策规则：
-1. 大部分问题走 analyzer
-2. 需要引用名人原著的，先调 retriever 再调 analyzer
-根据用户问题，输出路由决策。
-""".strip())
-
     direct_response_system_prompt: str = field(default_factory=lambda: """
 请直接回答用户的问题；资料不足时明确说明依据边界，不编造事实或来源。
 """.strip())

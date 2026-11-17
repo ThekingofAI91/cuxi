@@ -164,7 +164,7 @@ def get_chat_llm(*, with_fallback: bool = True, **kwargs: Any) -> Runnable:
 # 流式版本仅在"尚未向用户推送任何 token"时重试（此时重复推送风险为零，安全），
 # 并额外卡一个「首 token 超时」——上游空壳会挂到它自身超时才回，等满纯属白等。
 #
-# 重试全耗尽后的表现由调用方决定：supervisor 已不再回退「无资料直答」
+# 重试全耗尽后的表现由调用方决定：chat_agent 已不再回退「无资料直答」
 # （会丢掉本轮检索资料），改为抛 LLMEmptyResponseError 明确失败。
 
 _EMPTY_RETRY_ATTEMPTS = 2

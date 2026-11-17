@@ -55,7 +55,7 @@ flowchart TD
     UI -->|SSE| API[FastAPI 路由层]
 
     subgraph OneOnOne["一对一对话(自研 async 编排)"]
-        Sup[Supervisor<br/>持有 search_library 工具]
+        Sup[Chat Agent<br/>持有 search_library 工具]
         Tools[工具层<br/>向量 / BM25 / Cross-Encoder / GraphRAG]
         Cite[引用出处<br/>注入清单直出]
         Compress[历史压缩<br/>后台任务]
@@ -249,7 +249,7 @@ node --test tests/frontend_roundtable_choice.test.cjs tests/frontend_roundtable_
 ```
 ├── main.py                        # FastAPI 入口(启动预热 + 会话恢复)
 ├── init_persona_data.py           # 语料入库
-├── framework/                     # 编排层:supervisor / 圆桌 / 传奇 / 场景运行时
+├── framework/                     # 编排层:chat_agent / 圆桌 / 传奇 / 场景运行时
 ├── scenes/persona_chat/           # 角色定义 / 提示词装配 / 角色卡 IO
 ├── src/api/                       # REST + SSE 路由 / 限流鉴权 / 评测端点
 ├── src/core/                      # 配置 / LLM 客户端 / 会话 / 监控

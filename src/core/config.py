@@ -170,13 +170,13 @@ class Settings(BaseSettings):
     entertainment_context_chars: int = 150
 
     # 【已废弃 2026-09-30】轻聊快速通道（整句白名单 → 跳过检索直答）已删除。
-    # 寒暄现在由 supervisor_agent 的模型自行决定"不检索 / 轻量检索"；
+    # 寒暄现在由 chat_agent 的模型自行决定"不检索 / 轻量检索"；
     # 模型不调工具时同样是 1 次 LLM 往返，不比为规则快速通道慢。
     # 保留字段仅为兼容旧 .env，读写它不再有任何效果。
     light_chat_enabled: bool = False
 
     # 检索力度不再按角色分区走两条路，而是由检索工具 search_library 的 strong
-    # 参数在运行时决定（framework/supervisor_agent.py）：
+    # 参数在运行时决定（framework/chat_agent.py）：
     #   strong=True  → 强检索：向量/BM25 混合召回 + RRF 前 3 直通 + 尾部精排选 3
     #                  + 知识图谱，6 条带来源
     #   strong=False → 轻量检索：仅向量+BM25 召回 top-3，作为软背景、不带来源
@@ -185,10 +185,10 @@ class Settings(BaseSettings):
     # 为什么这么分：教育区要凭据、可溯源，值一次额外 LLM 往返（3-8s）换"不该查时
     # 一次都不查"；娱乐区检索是 23ms 的软背景、靠角色卡撑人设，加一次往返得不偿失。
     #
-    # 工具轮次上限：模型最多请求几轮检索（下限被夹在 1，见 supervisor_agent 里的
+    # 工具轮次上限：模型最多请求几轮检索（下限被夹在 1，见 chat_agent 里的
     # max(1, ...)）。
     #
-    # 2026-09-30 由 1 调到 3（编排层改由 supervisor_agent 承担）：一对一的检索决策权
+    # 2026-09-30 由 1 调到 3（编排层改由 chat_agent 承担）：一对一的检索决策权
     # 完全交给模型，给它多轮空间做"多角度追查"（第一轮查原话 → 不够 → 换角度再查），
     # 最多 3 轮检索 + 1 轮收尾作答（收尾轮不带工具，保证拿到资料后能逼出答案）。
     #

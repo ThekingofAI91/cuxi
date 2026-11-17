@@ -1,9 +1,15 @@
 """
-Supervisor Agent —— 一对一对话的唯一执行体。
+Chat Agent —— 一对一对话的唯一执行体。
+
+命名（2026-11-17 由 supervisor_agent 改名）：
+    它不是 supervisor。supervisor 的语义是"调度多个 worker"，而这里从进门到出门
+    只有一个执行体：模型自己持有检索工具，自己决定这轮查不查，最后自己把回答写完，
+    全程没有任何 agent 被它路由。叫 supervisor 会被追问"你底下管着几个人"，
+    而答案是零个人——所以按"它到底在做什么"叫 chat_agent。
 
 架构定性（2026-09-30，取代 tool_agent 两段式）：
-    supervisor 不再只是"纯规则路由 + 把检索外包给 tool_agent"，
-    而是本项目唯一的真 agent：**检索工具由 supervisor 自己持有**，
+    chat_agent 不再只是"纯规则路由 + 把检索外包给 tool_agent"，
+    而是本项目唯一的真 agent：**检索工具由它自己持有**，
     "这轮要不要查、查多深"由模型在生成过程中决定，代码只负责执行并回填原文。
     判据来自 Anthropic《Building Effective Agents》——
     Workflow = 路径由代码预定义；Agent = LLM 运行时决定流程与工具调用。
@@ -23,8 +29,9 @@ Supervisor Agent —— 一对一对话的唯一执行体。
     轮数上限 = tool_max_rounds + 1，最后一轮不带工具，逼出答案而不是继续要资料。
 
 进度事件：
-    on_stage 收到的名字沿用旧节点标识（supervisor / retrieval_agent），
-    前端 AGENT_STEP_LABELS（frontend/assets/js/chat.js）已有对应中文文案，前端零改动。
+    on_stage 收到的名字是 chat_agent / retrieval_agent，
+    前端 AGENT_STEP_LABELS（frontend/assets/js/chat.js）有对应中文文案；
+    旧值 supervisor 保留同名映射，历史会话的 route_history 才不会显示空白。
 
 文件内容：
     本文件同时容纳执行体与它调用的检索实现（retrieve_documents，原
@@ -356,13 +363,13 @@ def build_search_tool(
         sink["graph_used"] = bool(sink.get("graph_used")) or graph_used
 
         if error:
-            print(f"[Supervisor Agent] search_library 检索出错: {error}")
+            print(f"[Chat Agent] search_library 检索出错: {error}")
             return "资料库暂时查不到内容。请凭你自己的记忆与判断回答，不要编造具体出处。"
         if not docs:
-            print("[Supervisor Agent] search_library 无命中")
+            print("[Chat Agent] search_library 无命中")
             return "资料库里没有查到相关内容。请凭你自己的记忆与判断回答，不要编造具体出处。"
 
-        print(f"[Supervisor Agent] search_library 命中 {len(docs)} 条（strong={strong}）")
+        print(f"[Chat Agent] search_library 命中 {len(docs)} 条（strong={strong}）")
         return render_docs_for_tool(docs, strong=strong)
 
     return StructuredTool.from_function(
@@ -434,7 +441,7 @@ def _finalize_tool_calls(pending: dict) -> list[dict]:
         try:
             args = json.loads(raw_args) if raw_args else {}
         except Exception:
-            print(f"[Supervisor Agent] 工具参数 JSON 解析失败，按空参处理: {raw_args[:80]}")
+            print(f"[Chat Agent] 工具参数 JSON 解析失败，按空参处理: {raw_args[:80]}")
             args = {}
         calls.append({
             "name": name,
@@ -452,7 +459,7 @@ async def _invoke_tool(tool: StructuredTool, call: dict) -> str:
     try:
         return await tool.ainvoke(call["args"])
     except Exception as e:
-        print(f"[Supervisor Agent] 工具执行失败: {e}")
+        print(f"[Chat Agent] 工具执行失败: {e}")
         return "检索失败，暂时查不到资料。请凭你自己的记忆与判断回答，不要编造具体出处。"
 
 
@@ -487,7 +494,7 @@ async def _stream_round(target, messages: list, stream_callback) -> tuple[str, l
                 raise  # 已经推给用户了，重来会重复
             if attempt >= _EMPTY_ROUND_ATTEMPTS:
                 raise
-            print(f"[Supervisor Agent] 本轮流式异常且无输出（第 {attempt + 1} 次），重试…")
+            print(f"[Chat Agent] 本轮流式异常且无输出（第 {attempt + 1} 次），重试…")
             continue
 
         calls = _finalize_tool_calls(pending)
@@ -495,20 +502,20 @@ async def _stream_round(target, messages: list, stream_callback) -> tuple[str, l
             return "".join(texts), calls
         if attempt >= _EMPTY_ROUND_ATTEMPTS:
             return "", []
-        print(f"[Supervisor Agent] 上游返回空轮（第 {attempt + 1} 次），重试…")
+        print(f"[Chat Agent] 上游返回空轮（第 {attempt + 1} 次），重试…")
     return "", []
 
 
-async def run_supervisor_agent(
+async def run_chat_agent(
     state: AgentState,
     on_stage: StageCallback = None,
 ) -> dict[str, Any]:
-    """一对一对话的完整编排：supervisor 自己决定查不查、查多深，并生成回答。
+    """一对一对话的完整编排：chat_agent 自己决定查不查、查多深，并生成回答。
 
     Args:
         state: 与图时代同构的输入 state（query / history / zone /
             character_role_prompt / stream_callback / sampling / ...）。
-        on_stage: 可选的进度回调，参数是阶段名（supervisor / retrieval_agent）。
+        on_stage: 可选的进度回调，参数是阶段名（chat_agent / retrieval_agent）。
             前端据此显示"判断该怎么回应""翻查原著"。不传则静默。
 
     Returns:
@@ -551,10 +558,10 @@ async def run_supervisor_agent(
         if on_stage is not None:
             await on_stage(name)
 
-    print(f"\n[Supervisor Agent] 收到 query: {query}")
-    print(f"[Supervisor Agent] 分区: {zone} | 历史轮次: {len(history)}")
+    print(f"\n[Chat Agent] 收到 query: {query}")
+    print(f"[Chat Agent] 分区: {zone} | 历史轮次: {len(history)}")
 
-    await _stage("supervisor")
+    await _stage("chat_agent")
 
     sink: dict = {"docs": [], "graph_used": False}
     tool = build_search_tool(sink, history=history, zone=zone, on_retrieval=_stage)
@@ -611,11 +618,11 @@ async def run_supervisor_agent(
                 if _round_tokens:
                     stage_mark("prefill_ms", (_round_tokens[0] - _round_start) * 1000)
                 if not text.strip() and not answer_parts[:-1]:
-                    print("[Supervisor Agent] 本轮重试后仍无任何输出，交给上层兜底")
+                    print("[Chat Agent] 本轮重试后仍无任何输出，交给上层兜底")
                 break
 
             used_tool = True
-            print(f"[Supervisor Agent] 第 {round_idx + 1} 轮：模型请求检索 {len(calls)} 次")
+            print(f"[Chat Agent] 第 {round_idx + 1} 轮：模型请求检索 {len(calls)} 次")
             messages.append(AIMessage(content=text, tool_calls=calls))
             for call in calls:
                 _t_tool = time.perf_counter()
@@ -627,7 +634,7 @@ async def run_supervisor_agent(
 
         answer = "".join(answer_parts).strip()
         docs = sink.get("docs") or []
-        print(f"[Supervisor Agent] 完成：检索 {len(docs)} 条，回答 {len(answer)} 字")
+        print(f"[Chat Agent] 完成：检索 {len(docs)} 条，回答 {len(answer)} 字")
 
         # ---- 兜底：模型空手但资料已查到，别让检索白花钱 ----
         # 用同一份装配逻辑再生成一次（资料带进去），而不是走另一个节点，
@@ -641,7 +648,7 @@ async def run_supervisor_agent(
                 if zone == "entertainment"
                 else _build_context(docs)
             )
-            print("[Supervisor Agent] 模型空手但有资料，带资料重生成一次")
+            print("[Chat Agent] 模型空手但有资料，带资料重生成一次")
             _round_start = time.perf_counter()
             _round_tokens.clear()
             answer = await _generate_direct_response(
@@ -670,7 +677,7 @@ async def run_supervisor_agent(
                 _EMPTY_UPSTREAM_MSG, docs=sink.get("docs") or []
             )
 
-        route_history.append("supervisor")
+        route_history.append("chat_agent")
         if used_tool:
             route_history.append("retrieval_agent")
 
@@ -688,8 +695,8 @@ async def run_supervisor_agent(
         # 工具化失败不能拖垮回答：sink 里的资料是这一轮已经花掉的检索成本，
         # 挂到异常上带出去（routes 层会落一条日志），否则 sink 随栈销毁、
         # 这批资料连排查都用不上。用户侧仍只看到 error 事件，不推资料内容。
-        print(f"[Supervisor Agent] 编排失败: {e}")
-        route_history.append("supervisor")
+        print(f"[Chat Agent] 编排失败: {e}")
+        route_history.append("chat_agent")
         raise LLMEmptyResponseError(
             _EMPTY_UPSTREAM_MSG, docs=sink.get("docs") or []
         ) from e

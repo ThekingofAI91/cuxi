@@ -85,7 +85,7 @@ except Exception:  # pragma: no cover
 
 from src.core.config import settings
 from src.core.llm import ainvoke_nonempty, astream_nonempty, get_chat_llm
-from framework.supervisor_agent import retrieve_documents
+from framework.chat_agent import retrieve_documents
 from framework.roundtable_intents import (
     IntentValidationError, normalize_transcript, request_validated_intent, validate_intent,
 )

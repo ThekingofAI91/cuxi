@@ -7,7 +7,7 @@
 - 角色卡导出/导入：card_io.export_card / parse_card 往返与非法输入
 
 （2026-09-30：轻聊快速通道的整句白名单判定已随规则快速通道一起删除——
-寒暄与闲聊现在由 supervisor_agent 的模型自行决定"不检索 / 轻量检索"。）
+寒暄与闲聊现在由 chat_agent 的模型自行决定"不检索 / 轻量检索"。）
 """
 import pytest
 

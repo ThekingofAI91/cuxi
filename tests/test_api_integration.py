@@ -23,10 +23,10 @@ from src.core.config import settings  # noqa: E402
 
 
 class FakePipeline:
-    """打桩一对一编排（framework/supervisor_agent.run_supervisor_agent）。
+    """打桩一对一编排（framework/chat_agent.run_chat_agent）。
 
-    supervisor 自己持有检索工具，本桩只需返回与真实现同构的 dict；
-    on_stage 对应前端 agent_done 进度事件（阶段名 supervisor / retrieval_agent）。
+    chat_agent 自己持有检索工具，本桩只需返回与真实现同构的 dict；
+    on_stage 对应前端 agent_done 进度事件（阶段名 chat_agent / retrieval_agent）。
     """
 
     def __init__(self):
@@ -37,14 +37,14 @@ class FakePipeline:
         self.calls += 1
         self.histories.append(list(state.get("history", [])))
         if on_stage is not None:
-            await on_stage("supervisor")
+            await on_stage("chat_agent")
         answer = "测试回答：荣格认为这是好事儿。"
         return {
             "final_answer": answer,
             "analysis": answer,
             "retrieved_docs": [],
             "graph_used": False,
-            "route_history": ["supervisor", "retriever", "analyzer"],
+            "route_history": ["chat_agent", "retriever", "analyzer"],
         }
 
 
@@ -81,11 +81,11 @@ def client(tmp_path, monkeypatch):
     monitor_mod._monitor = None
 
     # 编排函数在 routes 内是延迟导入（每次调用都从源模块取属性），
-    # 所以打桩要落在 framework.supervisor_agent 上，而不是 routes 的模块属性。
-    import framework.supervisor_agent as _sa
+    # 所以打桩要落在 framework.chat_agent 上，而不是 routes 的模块属性。
+    import framework.chat_agent as _sa
 
     fake = FakePipeline()
-    monkeypatch.setattr(_sa, "run_supervisor_agent", fake)
+    monkeypatch.setattr(_sa, "run_chat_agent", fake)
     c = TestClient(app)
     return c, fake
 
@@ -274,7 +274,7 @@ def test_roundtable_archive_is_independent_of_stream_subscriptions(client):
 @pytest.mark.parametrize("partial_output", [False, True])
 def test_query_failure_ends_stream_and_allows_retry(client, monkeypatch, partial_output):
     c, fake = client
-    import framework.supervisor_agent as supervisor
+    import framework.chat_agent as chat_agent_mod
     from framework.runtime import get_conversation_history
     from src.core.llm import LLMEmptyResponseError
 
@@ -284,7 +284,7 @@ def test_query_failure_ends_stream_and_allows_retry(client, monkeypatch, partial
             raise RuntimeError("上游连接中断")
         raise LLMEmptyResponseError("模型暂时没有返回内容")
 
-    monkeypatch.setattr(supervisor, "run_supervisor_agent", failing_pipeline)
+    monkeypatch.setattr(chat_agent_mod, "run_chat_agent", failing_pipeline)
     payload = {"query": "什么是阴影？", "session_id": "failed-query", "character_id": "jung"}
     response = c.post("/persona/query", json=payload)
     assert response.status_code == 200
@@ -298,7 +298,7 @@ def test_query_failure_ends_stream_and_allows_retry(client, monkeypatch, partial
     assert not routes._ANSWER_CACHE
     assert monitor_mod.get_monitor().summary(0)["errors"] == 1
 
-    monkeypatch.setattr(supervisor, "run_supervisor_agent", fake)
+    monkeypatch.setattr(chat_agent_mod, "run_chat_agent", fake)
     retry = c.post("/persona/query", json=payload)
     retry_events = _sse_events(retry)
     assert retry.status_code == 200
@@ -327,7 +327,7 @@ def test_cache_hit_skips_graph(client):
     row = get_store().get("s-b")
     assert json.loads(row["history"]) == [["你是谁", result[0]["content"]]]
     assert row["query"] == "你是谁" and row["final_answer"] == result[0]["content"]
-    assert json.loads(row["route_history"]) == ["supervisor", "retriever", "analyzer"]
+    assert json.loads(row["route_history"]) == ["chat_agent", "retriever", "analyzer"]
     pending = c.get("/conversation/pending/s-b").json()
     assert pending["pending"] is True and pending["final_answer"] == result[0]["content"]
     usage = monitor_mod.get_monitor().summary(0)
@@ -361,7 +361,7 @@ def test_followup_after_cache_hit_uses_the_cached_turn_as_history(client):
 @pytest.mark.parametrize("with_questions", [False, True])
 def test_cache_replays_citations_graph_and_questions_without_shared_mutation(client, monkeypatch, with_questions):
     from langchain_core.documents import Document
-    import framework.supervisor_agent as supervisor
+    import framework.chat_agent as chat_agent_mod
 
     c, _ = client
     calls = []
@@ -374,10 +374,10 @@ def test_cache_replays_citations_graph_and_questions_without_shared_mutation(cli
     async def rich_answer(state, on_stage=None):
         calls.append(state)
         return {"final_answer": "原文依据 [1]，图谱推断 [G1]。", "retrieved_docs": docs,
-                "graph_used": True, "route_history": ["supervisor", "retrieval_agent"],
+                "graph_used": True, "route_history": ["chat_agent", "retrieval_agent"],
                 "info_gap_questions": questions}
 
-    monkeypatch.setattr(supervisor, "run_supervisor_agent", rich_answer)
+    monkeypatch.setattr(chat_agent_mod, "run_chat_agent", rich_answer)
     monkeypatch.setattr(settings, "graph_auto_build", False)
 
     def ask(sid):

@@ -62,7 +62,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # 模型自决查不查、寒暄直出、多轮追加检索，这些在隔离链路里根本不会发生。
         # 2026-10-31 实测：历史 166 题的 contexts 无一为空，即模型从未获得"决定不查"的机会。
         if request.retrieval_mode == "agent":
-            from framework.supervisor_agent import run_supervisor_agent
+            from framework.chat_agent import run_chat_agent
             from src.api.deps import sampling_for as _sampling_for
             from src.retrieval.stitch import with_continuation as _stitch_agent
             from scenes.persona_chat.prompt_builder import (
@@ -99,7 +99,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
                 "retrieval_trace": None,
                 "info_gap_questions": None,
             }
-            result = await run_supervisor_agent(agent_state)
+            result = await run_chat_agent(agent_state)
             docs = result.get("retrieved_docs") or []
             ctxs = [
                 _stitch_agent(d.page_content or "", d.metadata or {})[0]
@@ -161,7 +161,7 @@ async def persona_eval_endpoint(request: EvalQueryRequest):
         # ---- 1.5 知识图谱增强（与主链路 retrieve_documents 同口径）----
         # 此前评估端点直接调 advanced_retrieval，完全绕过主链路的图谱门——
         # 荣格图谱建成后的首轮"图谱增强版评测"跑了几题才发现测的还是无图谱基线。
-        # 这里复刻 supervisor_agent 的三信号触发 + 证据文档并入（评估无轻量通道，省略 not light_retrieval）
+        # 这里复刻 chat_agent 的三信号触发 + 证据文档并入（评估无轻量通道，省略 not light_retrieval）
         graph_used = False
         # 图谱侧轨迹：即便没触发也要留结构（triggered=False + 原因），
         # 「为什么这题没走图谱」和「走了图谱但没命中」是两种完全不同的失败。

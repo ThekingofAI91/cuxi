@@ -27,7 +27,7 @@ class AgentState(TypedDict):
     analysis: str                       # Analysis Agent 写入
     code_result: str                    # Code Agent 写入
     verification: str                   # Verification Agent 写入
-    final_answer: str                   # Supervisor 最终汇总
+    final_answer: str                   # 最终回答
 
     # ---- 对话管理 ----
     history: list[dict]                 # 对话历史（超限时由图外异步任务压缩为摘要）
@@ -62,5 +62,5 @@ class AgentState(TypedDict):
     stream_callback: Optional[Any]      # 流式 token 回调 (async callable, token: str) -> None
 
     # ---- 内部控制 ----
-    next_agent: Optional[str]           # Supervisor 路由决策结果
+    next_agent: Optional[str]           # 图时代的路由结果，现架构不再使用
     error: Optional[str]                # 错误信息

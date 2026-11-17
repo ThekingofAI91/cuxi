@@ -1,5 +1,5 @@
 """
-一对一编排（framework/supervisor_agent）测试。
+一对一编排（framework/chat_agent）测试。
 
 覆盖五件事：
 1. 增量累积：真实上游按 chunk 下发工具调用，拼错就整个工具调用失效
@@ -18,8 +18,8 @@ from langchain_core.documents import Document
 from langchain_core.messages import AIMessageChunk, ToolMessage
 
 from framework import runtime as rt
-from framework import supervisor_agent as sa
-from framework.supervisor_agent import (
+from framework import chat_agent as sa
+from framework.chat_agent import (
     SEARCH_TOOL_NAME,
     _collect_tool_calls,
     _finalize_tool_calls,
@@ -166,12 +166,12 @@ def test_strong_true_runs_full_pipeline_with_citation_rule(monkeypatch):
         [_text("格物致知的关键在于向内求。")],
     ]))
 
-    out = asyncio.run(sa.run_supervisor_agent(_base_state()))
+    out = asyncio.run(sa.run_chat_agent(_base_state()))
 
     assert cap["strong"] is True
     assert out["final_answer"] == "格物致知的关键在于向内求。"
     assert len(out["retrieved_docs"]) == 2
-    assert out["route_history"] == ["supervisor", "retrieval_agent"]
+    assert out["route_history"] == ["chat_agent", "retrieval_agent"]
     # 回填给模型的 ToolMessage 必须带引用标注规则，否则正文不会标 [n]、
     # 前端的引用出处折叠区（判据是正文含 [n]）会整块消失
     tool_msgs = [m for m in llm.seen_messages[-1] if isinstance(m, ToolMessage)]
@@ -187,7 +187,7 @@ def test_strong_false_runs_light_pipeline_with_memory_wording(monkeypatch):
         [_text("最近还好。")],
     ]))
 
-    out = asyncio.run(sa.run_supervisor_agent(
+    out = asyncio.run(sa.run_chat_agent(
         _base_state(zone="entertainment", character_role_prompt="你是峰哥。")
     ))
 
@@ -207,7 +207,7 @@ def test_strong_defaults_to_true_when_model_omits_it(monkeypatch):
         [_text("回答")],
     ]))
 
-    asyncio.run(sa.run_supervisor_agent(_base_state()))
+    asyncio.run(sa.run_chat_agent(_base_state()))
     assert cap["strong"] is True
 
 
@@ -235,11 +235,11 @@ def test_model_answers_directly_without_search(monkeypatch):
     monkeypatch.setattr(sa, "retrieve_documents", fake_retrieve)
     _patch_llm(monkeypatch, ScriptedLLM([[_text("你好。坐下吧，不必拘谨。")]]))
 
-    out = asyncio.run(sa.run_supervisor_agent(_base_state(query="你好")))
+    out = asyncio.run(sa.run_chat_agent(_base_state(query="你好")))
 
     assert triggered["n"] == 0
     assert out["retrieved_docs"] == []
-    assert out["route_history"] == ["supervisor"]
+    assert out["route_history"] == ["chat_agent"]
     assert out["final_answer"] == "你好。坐下吧，不必拘谨。"
 
 
@@ -255,7 +255,7 @@ def test_tool_failure_does_not_break_the_answer(monkeypatch):
         [_text("凭我自己的记忆，格物在心上做。")],
     ]))
 
-    out = asyncio.run(sa.run_supervisor_agent(_base_state()))
+    out = asyncio.run(sa.run_chat_agent(_base_state()))
 
     assert out["final_answer"] == "凭我自己的记忆，格物在心上做。"
     tool_msgs = [m for m in llm.seen_messages[-1] if isinstance(m, ToolMessage)]
@@ -279,7 +279,7 @@ def test_docs_are_rescued_when_model_returns_nothing(monkeypatch):
 
     monkeypatch.setattr(rt, "_generate_direct_response", fake_direct)
 
-    out = asyncio.run(sa.run_supervisor_agent(_base_state()))
+    out = asyncio.run(sa.run_chat_agent(_base_state()))
 
     assert out["final_answer"] == "兜底生成的角色回答"
     assert captured["context"] and "王阳明大传.pdf" in captured["context"]
@@ -297,7 +297,7 @@ def test_empty_round_is_retried(monkeypatch):
         [_text("重试后拿到的回答")],   # 第 2 次尝试：正常
     ]))
 
-    out = asyncio.run(sa.run_supervisor_agent(_base_state()))
+    out = asyncio.run(sa.run_chat_agent(_base_state()))
 
     assert llm.calls == 2
     assert out["final_answer"] == "重试后拿到的回答"
@@ -311,7 +311,7 @@ def test_tool_only_round_is_not_treated_as_empty(monkeypatch):
         [_text("答案")],
     ]))
 
-    asyncio.run(sa.run_supervisor_agent(_base_state()))
+    asyncio.run(sa.run_chat_agent(_base_state()))
 
     # 两轮各调一次 astream；若把纯工具轮误判成空轮，这里会变成 3 次
     assert llm.calls == 2
@@ -321,7 +321,7 @@ def test_tool_only_round_is_not_treated_as_empty(monkeypatch):
 # 六、阶段事件（前端"判断该怎么回应""翻查原著"靠它）
 # ============================================================
 
-def test_stage_events_emit_supervisor_then_retrieval(monkeypatch):
+def test_stage_events_emit_chat_agent_then_retrieval(monkeypatch):
     _patch_retrieval(monkeypatch, FAKE_DOCS)
     _patch_llm(monkeypatch, ScriptedLLM([
         _search_round('{"query": "格物致知"}'),
@@ -332,9 +332,9 @@ def test_stage_events_emit_supervisor_then_retrieval(monkeypatch):
     async def on_stage(name):
         stages.append(name)
 
-    asyncio.run(sa.run_supervisor_agent(_base_state(), on_stage=on_stage))
+    asyncio.run(sa.run_chat_agent(_base_state(), on_stage=on_stage))
 
-    assert stages[0] == "supervisor"
+    assert stages[0] == "chat_agent"
     assert stages[-1] == "retrieval_agent"
 
 
@@ -346,6 +346,6 @@ def test_no_retrieval_stage_when_model_does_not_search(monkeypatch):
     async def on_stage(name):
         stages.append(name)
 
-    asyncio.run(sa.run_supervisor_agent(_base_state(query="你好"), on_stage=on_stage))
+    asyncio.run(sa.run_chat_agent(_base_state(query="你好"), on_stage=on_stage))
 
-    assert stages == ["supervisor"]
+    assert stages == ["chat_agent"]

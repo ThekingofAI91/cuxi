@@ -50,8 +50,8 @@ def _bind_retrieval_mocks(graph_exists_val, trigger_val, with_kg_docs):
         "src.retrieval.advanced_search.advanced_retrieval": patch(
             "src.retrieval.advanced_search.advanced_retrieval", return_value=adv_result),
         # graph_exists 在 retrieval_agent 顶部 import，需 patch 模块属性
-        "framework.supervisor_agent.graph_exists": patch(
-            "framework.supervisor_agent.graph_exists", return_value=graph_exists_val),
+        "framework.chat_agent.graph_exists": patch(
+            "framework.chat_agent.graph_exists", return_value=graph_exists_val),
         # 以下在函数体内动态 import，patch 源模块即可
         "src.retrieval.knowledge_graph.should_trigger_graph_retrieval": patch(
             "src.retrieval.knowledge_graph.should_trigger_graph_retrieval",
@@ -71,7 +71,7 @@ async def test_graph_used_true_when_ai_triggers():
     for m in mocks.values():
         m.start()
     try:
-        from framework.supervisor_agent import retrieve_documents
+        from framework.chat_agent import retrieve_documents
         docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():
@@ -88,7 +88,7 @@ async def test_graph_used_false_when_skipped():
     for m in mocks.values():
         m.start()
     try:
-        from framework.supervisor_agent import retrieve_documents
+        from framework.chat_agent import retrieve_documents
         docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():
@@ -103,7 +103,7 @@ async def test_graph_used_false_when_no_graph_built():
     for m in mocks.values():
         m.start()
     try:
-        from framework.supervisor_agent import retrieve_documents
+        from framework.chat_agent import retrieve_documents
         docs, graph_used, error = await retrieve_documents("什么是集体潜意识？")
     finally:
         for m in mocks.values():

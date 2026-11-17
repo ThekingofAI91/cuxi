@@ -1215,7 +1215,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
             _persist_session_db(session_id)
 
         async def run_pipeline():
-            """在后台任务中运行一对一编排（framework/supervisor_agent.py）"""
+            """在后台任务中运行一对一编排（framework/chat_agent.py）"""
             # persona 场景配置（contextvar 按请求隔离，create_task 复制父上下文）
             # 按角色注入对应的 chroma_collection，避免 adler 用户误检索荣格大库
             # （修复：先前全局 persona_chat_config 的 chroma_collection 写死为 persona_jung）
@@ -1236,7 +1236,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     character, query=request.query, scan_text=_scan_text
                 )
 
-                # 检索力度不由 API 层预判分区：改由 supervisor_agent 的
+                # 检索力度不由 API 层预判分区：改由 chat_agent 的
                 # search_library 工具入参 strong 在运行时决定——模型按请求性质选
                 # 强检索（全管线 5 条，可溯源）或轻量（top-3 软背景，娱乐区默认）；
                 # 完全不检索就表现为"模型不调这个工具"，没有单独的开关参数。
@@ -1280,17 +1280,17 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
                     "stream_callback": stream_callback,
                 }
 
-                # 一对一：supervisor 自己持有检索工具的唯一执行体
-                # （framework/supervisor_agent.py）。教育区/娱乐区不再分两条路，
+                # 一对一：chat_agent 自己持有检索工具的唯一执行体
+                # （framework/chat_agent.py）。教育区/娱乐区不再分两条路，
                 # 检索力度由工具的 strong 参数在运行时决定。
-                from framework.supervisor_agent import run_supervisor_agent
+                from framework.chat_agent import run_chat_agent
 
                 async def _on_stage(name: str) -> None:
                     # 阶段进度：agent_done 事件，前端据此显示"判断该怎么回应""翻查原著"。
                     # 阶段名沿用旧节点标识，前端映射表零改动。
                     await token_queue.put({"__node_done__": name, "output": {}})
 
-                accumulated = await run_supervisor_agent(initial_state, on_stage=_on_stage)
+                accumulated = await run_chat_agent(initial_state, on_stage=_on_stage)
 
                 answer = accumulated.get("final_answer", "")
                 info_gap_qs = accumulated.get("info_gap_questions")
@@ -1436,7 +1436,7 @@ async def persona_query_endpoint(http_request: Request, request: PersonaQueryReq
         except Exception as e:
             logger.exception("query_error ip=%s char=%s", client_ip, character_id)
             # LLMEmptyResponseError 会把本轮已花掉的检索结果挂在自己身上带出来
-            # （sink 是 supervisor 的局部变量，不挂就随栈销毁）。这里落一条日志，
+            # （sink 是 chat_agent 的局部变量，不挂就随栈销毁）。这里落一条日志，
             # 让"资料可用于排查"真的成立——用户侧仍然只收到 error 事件。
             _carried = getattr(e, "docs", None) or []
             if _carried:

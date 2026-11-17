@@ -165,7 +165,7 @@ async def lifespan(app: FastAPI):
 # 创建 FastAPI 应用
 app = FastAPI(
     title="促膝 · Persona Chat",
-    description="名人对话 RAG 系统 - 自研 async 编排，supervisor 自持检索工具",
+    description="名人对话 RAG 系统 - 自研 async 编排，单执行体自持检索工具",
     version="0.1.0",
     lifespan=lifespan,
 )

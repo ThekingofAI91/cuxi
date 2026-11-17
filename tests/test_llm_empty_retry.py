@@ -1,6 +1,6 @@
 """
 `astream_nonempty` 的首 token 超时 + 空响应重试测试；
-外加 supervisor_agent 在「模型整轮无产出」时明确失败（不再回退无资料直答）。
+外加 chat_agent 在「模型整轮无产出」时明确失败（不再回退无资料直答）。
 
 LLM 全部打桩（按脚本产出 chunk / 挂起 / 抛异常），不触真实 API。
 
@@ -21,7 +21,7 @@ import pytest
 from src.core.config import settings
 from src.core.llm import LLMEmptyResponseError, astream_nonempty
 from framework import runtime as rt
-from framework import supervisor_agent as sup_agent
+from framework import chat_agent as sup_agent
 
 
 def _chunk(text):
@@ -131,7 +131,7 @@ def test_no_retry_after_tokens_already_pushed():
 
 
 # ============================================================
-# supervisor_agent：模型空产出 → 明确失败（绝不无资料直答）
+# chat_agent：模型空产出 → 明确失败（绝不无资料直答）
 # ============================================================
 
 def _sup_state(**over):
@@ -170,23 +170,23 @@ class SilentLLM:
 
 
 def _patch_silent_llm(monkeypatch, payload=None):
-    import framework.supervisor_agent as sa
+    import framework.chat_agent as sa
 
     monkeypatch.setattr(sa, "get_chat_llm", lambda **kw: SilentLLM(payload))
 
 
-def test_supervisor_agent_fails_on_persistently_empty_upstream(monkeypatch):
+def test_chat_agent_fails_on_persistently_empty_upstream(monkeypatch):
     """上游整轮无正文也无工具请求（重试耗尽）→ 明确失败，不无资料直答。"""
     _patch_silent_llm(monkeypatch)
     with pytest.raises(LLMEmptyResponseError):
-        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
+        asyncio.run(sup_agent.run_chat_agent(_sup_state()))
 
 
-def test_supervisor_agent_fails_on_whitespace_only_output(monkeypatch):
+def test_chat_agent_fails_on_whitespace_only_output(monkeypatch):
     """正文非空但全是空白 → 等价于没产出，同样明确失败而不是无资料直答。"""
     _patch_silent_llm(monkeypatch, payload="   \n\n")
     with pytest.raises(LLMEmptyResponseError):
-        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
+        asyncio.run(sup_agent.run_chat_agent(_sup_state()))
 
 
 # ============================================================
@@ -252,7 +252,7 @@ def test_failure_carries_retrieved_docs_for_troubleshooting(monkeypatch):
     monkeypatch.setattr(rt, "_generate_direct_response", _empty_direct)
 
     with pytest.raises(LLMEmptyResponseError) as ei:
-        asyncio.run(sup_agent.run_supervisor_agent(_sup_state()))
+        asyncio.run(sup_agent.run_chat_agent(_sup_state()))
 
     assert len(ei.value.docs) == 2
     assert ei.value.docs[0].metadata["source"] == "传习录.pdf"

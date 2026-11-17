@@ -4,7 +4,8 @@
 // 处理进度文案：节点名是实现细节（retrieval_agent 这种），不该直接甩给用户看。
 // 统一映射成"正在做什么"，新增节点记得在这里补一条。
 const AGENT_STEP_LABELS = {
-  supervisor: '判断该怎么回应',
+  chat_agent: '判断该怎么回应',
+  supervisor: '判断该怎么回应', // 2026-11-17 改名前的旧值，历史会话的 route_history 仍在用
   tool_agent: '斟酌要不要查资料',
   retrieval_agent: '翻查原著',
   analysis_agent: '组织回答',

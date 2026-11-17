@@ -2,8 +2,8 @@
 Agent 系统测试：State 定义 / 配置加载 / 各能力函数的基本可用性
 
 （2026-09-30：原 Supervisor 路由测试与 LangGraph 图构建测试随旧图一起删除——
-一对一的编排已收敛到 framework/supervisor_agent.py，路由判据不再存在。
-编排行为测试见 tests/test_supervisor_agent.py。）
+一对一的编排已收敛到 framework/chat_agent.py，路由判据不再存在。
+编排行为测试见 tests/test_chat_agent.py。）
 """
 
 import pytest
@@ -11,7 +11,7 @@ import pytest
 from src.core.state import AgentState
 from src.core.config import settings
 from framework.runtime import set_scene_config
-from framework.supervisor_agent import retrieve_documents
+from framework.chat_agent import retrieve_documents
 from framework.analysis_agent import analysis_agent
 from scenes.persona_chat.config import persona_chat_config
 

@@ -2,7 +2,7 @@
 Runtime 能力层 —— 场景上下文 / 会话历史 / 消息装配 / 生成 / 向量库单例
 
 架构变化（2026-10-02：supervisor.py 改名 runtime.py）：
-    一对一对话的唯一执行体是 framework/supervisor_agent.py：它自己持有
+    一对一对话的唯一执行体是 framework/chat_agent.py：它自己持有
     search_library 工具（检索实现也在该文件），"这轮查不查、查多深"由模型
     运行时决定（strong 参数）。本模块是它与其他模块依赖的"能力库"——
     消息装配、直接生成、会话历史、向量库单例、场景上下文。
@@ -135,7 +135,7 @@ def _load_session(session_id: str) -> tuple[list[tuple[str, str]], int]:
         raw = json.loads(row.get("history") or "[]")
         turns = [(str(q), str(a)) for q, a in raw]
     except Exception as e:
-        print(f"[Supervisor] 历史反序列化失败，按空历史处理: session={session_id}, {e}")
+        print(f"[Runtime] 历史反序列化失败，按空历史处理: session={session_id}, {e}")
         turns = []
     return turns, int(row.get("version") or 0)
 
@@ -162,7 +162,7 @@ def delete_conversation_history(session_id: str) -> bool:
     existed = _get_session_store().get(session_id) is not None
     if existed:
         _get_session_store().delete(session_id)
-        print(f"[Supervisor] 已删除会话历史: session={session_id}")
+        print(f"[Runtime] 已删除会话历史: session={session_id}")
     return existed
 
 
@@ -185,10 +185,10 @@ def _persist_append(session_id: str, query: str, answer: str) -> list[tuple[str,
                     turns = turns[-max_turns:]
                 if store.set_history_cas(session_id, turns, version):
                     return overflow
-            print(f"[Supervisor] 历史 CAS 冲突重试耗尽，改为无条件写入: session={session_id}")
+            print(f"[Runtime] 历史 CAS 冲突重试耗尽，改为无条件写入: session={session_id}")
             store.set_history(session_id, turns)
     except Exception as e:
-        print(f"[Supervisor] 对话历史持久化失败: {e}")
+        print(f"[Runtime] 对话历史持久化失败: {e}")
         return []
     return overflow
 
@@ -233,7 +233,7 @@ def truncate_conversation_history(session_id: str, keep_turns: int) -> int:
             store.set_history(session_id, turns)
             return len(turns)
     except Exception as e:
-        print(f"[Supervisor] 截断后历史持久化失败: {e}")
+        print(f"[Runtime] 截断后历史持久化失败: {e}")
         return -1
 
 
@@ -253,13 +253,13 @@ def pop_last_turn(session_id: str, expect_query: str | None = None) -> bool:
                 if not turns:
                     return False
                 if expect_query is not None and turns[-1][0] != expect_query:
-                    print(f"[Supervisor] pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
+                    print(f"[Runtime] pop_last_turn 校验失败，最后一轮不是待重答的问题，跳过")
                     return False
                 turns.pop()
                 if store.set_history_cas(session_id, turns, version):
                     return True
     except Exception as e:
-        print(f"[Supervisor] 弹轮后历史持久化失败: {e}")
+        print(f"[Runtime] 弹轮后历史持久化失败: {e}")
         return False
     return False
 
@@ -312,15 +312,15 @@ async def _summarize_old_turns(session_id: str, turns: list[tuple[str, str]]):
                     ])
                     summary = (compact.content or "").strip() or summary
                 except Exception as e:
-                    print(f"[Supervisor] 摘要二次精简失败，保留本次摘要并限制长度: {e}")
+                    print(f"[Runtime] 摘要二次精简失败，保留本次摘要并限制长度: {e}")
                 summary = summary[:max_chars]
-            print(f"[Supervisor] 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
+            print(f"[Runtime] 旧对话摘要已更新: session={session_id}, 压缩了{len(turns)}轮")
             try:
                 _get_session_store().set_summary(session_id, summary)
             except Exception as e:
-                print(f"[Supervisor] 摘要持久化失败: {e}")
+                print(f"[Runtime] 摘要持久化失败: {e}")
         except Exception as e:
-            print(f"[Supervisor] 摘要生成失败: {e}")
+            print(f"[Runtime] 摘要生成失败: {e}")
 
 
 def format_history_for_prompt(history: list[tuple[str, str]], max_turns: int = None, session_id: str = None) -> str:
@@ -346,7 +346,7 @@ def format_history_for_prompt(history: list[tuple[str, str]], max_turns: int = N
 
 
 # ============================================================
-# Supervisor Node 实现
+# 直接回答的消息装配
 # ============================================================
 
 def build_direct_messages(
@@ -516,5 +516,5 @@ async def _generate_direct_response(
             response = await ainvoke_nonempty(llm, messages)
             return (response.content if hasattr(response, "content") else "").strip()
     except Exception as e:
-        print(f"[Supervisor] 直接回复生成失败: {e}")
+        print(f"[Runtime] 直接回复生成失败: {e}")
         return f"你好！我是{fallback}，请问有什么可以帮你的？"
