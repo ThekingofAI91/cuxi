@@ -5,7 +5,7 @@
 ```
 忠实度 8.94 / 相关性 9.75 / 口吻一致性 8.74   历史 166 题 LLM-as-Judge 五维评测（0–10 分）
 寒暄首字 ~2s / 文本检索中位 1.90s / 重复提问精排 0.05s   历史单机 CPU 实测
-pytest 659 项 / 前端圆桌 28 项   覆盖编排 / 检索 / 状态隔离 / 异常处理 / 断线恢复
+pytest 678 项 / 前端圆桌 28 项   覆盖编排 / 检索 / 状态隔离 / 异常处理 / 断线恢复
 ```
 
 一次由评测驱动的修复:首轮评测王阳明忠实度 4.25,归因是传记语料缺失而非检索问题,补语料后 4.25 → 9.54。详见[评测](#评测)一节。
@@ -55,13 +55,13 @@ flowchart TD
     UI -->|SSE| API[FastAPI 路由层]
 
     subgraph OneOnOne["一对一对话(自研 async 编排)"]
-        Sup[Chat Agent<br/>持有 search_library 工具]
+        Chat[Chat Agent<br/>持有 search_library 工具]
         Tools[工具层<br/>向量 / BM25 / Cross-Encoder / GraphRAG]
         Cite[引用出处<br/>注入清单直出]
         Compress[历史压缩<br/>后台任务]
-        Sup -->|调用| Tools
-        Sup -->|回答定稿后| Cite
-        Sup -->|后台| Compress
+        Chat -->|调用| Tools
+        Chat -->|回答定稿后| Cite
+        Chat -->|后台| Compress
     end
 
     subgraph Roundtable["争鸣圆桌(LangGraph)"]
@@ -89,7 +89,7 @@ flowchart TD
     Roundtable -->|checkpoint + 执行状态| SQLite
 
     LLM[LLM API<br/>主 / 备自动降级]
-    Sup -->|流式| LLM
+    Chat -->|流式| LLM
     Bid -->|请缨判断| LLM
     Participants -->|流式| LLM
 ```
@@ -102,6 +102,8 @@ flowchart TD
 | 谁决定下一步 | 模型决定查不查、查多深(工具参数 `strong`) | 角色先投标；用户查看请缨后点将，或由代班主持按紧迫度裁决 |
 | 挂起 | 不需要图级挂起 | `interrupt()` + SQLite checkpoint,重启可恢复 |
 | 结束 | 单次回答即结束 | 用户明确结束，或代班主持在无人请缨时收场；两种模式都受配额、轮数与调用预算约束 |
+
+一对一的执行体在 `framework/chat_agent.py`。它**只有一个执行体**，不调度任何其他 agent，检索工具挂在模型自己身上——这也是它不叫 supervisor 的原因：supervisor 意味着底下有一群 worker，而这里没有。争鸣在 `framework/roundtable.py`，剧情引擎在 `framework/legend.py`。
 
 争鸣每场选择 2–3 位人物，开场按名单依次发言，各自独立生成，只看议题、人设和本人的知识库资料。两种主持模式在每轮交锋前都会并发问每位**还有配额、且上一轮交锋没发言**的角色「此刻有没有非说不可的话」,各自提交紧迫度(1-5)、请缨理由、回应对象与原话,以及反驳、澄清、区分或追问的意图。代班主持按紧迫度排序,平手时让最久没开口的人先说；「我来主持」展示本轮全部回执及已发言次数,由用户从请缨者中选择。只有一人请缨也要点击,没有倒计时或自动代选；无人请缨时可查看弃权、失败信息并点击结束讨论。
 
@@ -129,7 +131,7 @@ flowchart TD
 | `_defaults-education.md` / `_defaults-entertainment.md` | 自建角色创建时复制的口吻与后历史指令模板，使用 `{{char}}` 代入角色名 |
 | `legend-narrator.md` | 传奇叙述者契约:铁律、叙事节奏、三类文面标记;含 `{{world}}` `{{state_block}}` 等占位符,由 `legend.py` 注入 |
 
-分工原则:**技能包管"怎么做"(口径与输出格式),向量库管"说的是否有依据"(可标 n 追溯到原书章节)**——两者不能互相替代,563 万字语料塞不进任何一段说明。
+分工原则:**技能包管"怎么做"(口径与输出格式),向量库管"说的是否有依据"(可标 n 追溯到原书章节)**——两者不能互相替代,592 万字语料塞不进任何一段说明。
 
 角色的所有设定均从技能包读取，`characters/*.py` 只保留身份展示、分区、资源路径与采样参数。修改 Markdown 后按文件修改时间更新缓存，无需重启；分节留空就是清空该项，不再从 Python 回填。角色技能缺失或人设为空时明确报错，避免悄悄使用另一份旧设定。
 
@@ -144,7 +146,7 @@ flowchart TD
 几个有记录的取舍(完整推导见 [`docs/engineering-notes.md`](docs/engineering-notes.md)):
 
 - **Multi-Query + HyDE 整体删除**。实测改写 3.5s+ 超预算、生成率 93% 但三轮实验测不出质量增益——删了整条链路和四个配置项。
-- **索引块数 -97.4%**。扫描件 OCR 逐行碎片拼接去重后重新分块,18.8 万块 → 4,965 块,检索质量反而提升。
+- **索引块数 -97%**。扫描件 OCR 逐行碎片拼接去重后重新分块,18.8 万块 → 5,700 块,检索质量反而提升。
 - **来源可信度加权**。二手解读强降权(0.25),防第三者评价冒充本人原话;代价是《被讨厌的勇气》里的流行概念排不进 top-K——这个冲突还没解掉。
 - **精排分数 LRU 缓存**(2000 条,含内容指纹):重复提问精排零推理。
 - **块尾续接**:按页分块导致 64% 的块断在句中,注入时用 metadata 把下一块首句补上,只写 metadata 不重建索引。
@@ -203,7 +205,7 @@ flowchart TD
 
 ### 本地验证
 
-2026-11-14 核对：pytest 收集到 **659 项**测试；前端圆桌测试 **28/28 通过**，覆盖显式点将、全部回执展示、重复提交、断线恢复和纪要渲染。
+2026-11-17 核对：pytest 收集到 **678 项**测试；前端圆桌测试 **28/28 通过**，覆盖显式点将、全部回执展示、重复提交、断线恢复和纪要渲染。
 
 ```bash
 # 检查 Python 测试数量与导入
@@ -216,7 +218,7 @@ uv run --extra dev python -m pytest tests/ -q
 node --test tests/frontend_roundtable_choice.test.cjs tests/frontend_roundtable_summary.test.cjs
 ```
 
-完整 pytest 包含实际检索与模型调用用例，需要本地语料和可用 API 配置。上述 659 项是本次收集数量；最近一次完整执行的结果见[工程笔记](docs/engineering-notes.md)。
+完整 pytest 包含实际检索与模型调用用例，需要本地语料和可用 API 配置。上述 678 项是本次收集数量；最近一次完整执行的结果见[工程笔记](docs/engineering-notes.md)。
 
 ---
 
