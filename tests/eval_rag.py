@@ -94,6 +94,9 @@ def get_judge_llm() -> ChatOpenAI:
         # 推理模型的 reasoning_content 会吃输出预算导致 JSON 截断（同 knowledge_graph/
         # legend 口径），结构化判官必须关思考
         reasoning_effort="none",
+        # json_object 让网关从协议层保证输出是合法 JSON（新网关实测可用），
+        # 减少"整块解析失败"；不支持的模型在下面按模型名摘掉
+        model_kwargs={"response_format": {"type": "json_object"}},
     )
     if judge_model:
         kwargs["model"] = judge_model
@@ -103,9 +106,12 @@ def get_judge_llm() -> ChatOpenAI:
         if judge_model.lower().startswith("kimi"):
             kwargs["temperature"] = 1
             kwargs.pop("reasoning_effort", None)
+            kwargs.pop("model_kwargs", None)
             print(f"判官模型（独立配置）: {judge_model}（kimi 兼容：temperature=1，不传 reasoning_effort）")
         else:
-            print(f"判官模型（独立配置）: {judge_model}（temperature=0.1，reasoning_effort=none）")
+            print(f"判官模型（独立配置）: {judge_model}（temperature=0.1，reasoning_effort=none，json_object）")
+    else:
+        print("判官模型: 跟随主模型（temperature=0.1，reasoning_effort=none，json_object）")
     return get_chat_llm(**kwargs)
 
 
@@ -200,18 +206,23 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 # ============================================================
 # 评估函数
 # ============================================================
-async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> Optional[dict]:
+async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> tuple[Optional[dict], str]:
     """
     判官调用 + JSON 解析，带两层容错：
     1. 空响应：ainvoke_nonempty 立即重试（上游中转的空壳 200 故障）
     2. 格式坏：重问一次；仍失败返回 None —— 该指标记「无效」，
        绝不默默记 5 分污染平均（旧版曾因此把忠实度"评"出 5.8，事后发现
        18/23 个低分全是解析失败默认分）
+
+    Returns:
+        (解析结果或 None, 最后一次原始输出)。原始输出落盘到 judge_raw——
+        没有它就只能猜"模型没输出"还是"我们解析太严"（2026-11-24 踩过）。
     """
     judge_gap = float(os.environ.get("EVAL_JUDGE_GAP_SEC", "20"))
     if judge_gap > 0:
         # 距离上一次 LLM 调用（取答案）强制留出间隔，否则必撞中转 rpm 限额
         await asyncio.sleep(judge_gap)
+    last_raw = ""
     for i in range(attempts):
         try:
             resp = await ainvoke_nonempty(llm, [("user", prompt)])
@@ -223,16 +234,17 @@ async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> Optional[di
                 await asyncio.sleep(judge_gap)
             continue
         text = getattr(resp, "content", "") or ""
+        last_raw = text
         try:
             obj = extract_json(text)
             if isinstance(obj, dict) and ("score" in obj or "faithfulness" in obj):
-                return obj
+                return obj, text
         except Exception:
             pass
         print(f"     判官输出无法解析（第 {i + 1}/{attempts} 次），重试…")
         if i + 1 < attempts and judge_gap > 0:
             await asyncio.sleep(judge_gap)
-    return None
+    return None, last_raw
 
 
 async def evaluate_single(
@@ -249,14 +261,43 @@ async def evaluate_single(
     prompt = COMBINED_JUDGE_PROMPT.format(
         question=question, contexts=contexts_text, answer=answer, key_points=key_points_text,
     )
-    obj = await _judge(llm, prompt)
+    obj, raw = await _judge(llm, prompt)
 
-    def sub(metric: str) -> dict:
-        v = (obj or {}).get(metric)
-        return v if isinstance(v, dict) else {}
+    def sub(name: str):
+        """取某一维的原始值：可能是 {"score":..,"reason":..}，也可能是模型偷懒给的扁平 4。
 
-    def metric(sd: dict) -> Optional[int]:
-        return normalize_score(sd.get("score")) if sd and "score" in sd else None
+        2026-11-25 实测：模型还会把某一维**嵌套进另一个维里**——judge_raw 里明文看到
+        context_precision 被塞进了 relevancy 对象内部（多打了一层括号），顶层就没有这个键。
+        所以顶层取不到时，往各维的值里再找一层。
+        """
+        v = (obj or {}).get(name)
+        if v is None:
+            for val in (obj or {}).values():
+                if isinstance(val, dict) and name in val:
+                    return val[name]
+        return v
+
+    def metric(v) -> Optional[int]:
+        """兼容三种形态：{"score":4} / 4 / "4"。解析不出才返回 None。
+
+        2026-11-25：此前只认 {"score":..}，模型把某一维写成扁平整数时（实测 14/22 个
+        context_precision 缺失都是这种）会被判成"输出无法解析"，白白丢掉。
+        """
+        if isinstance(v, bool):  # bool 是 int 子类，先挡掉
+            return None
+        if isinstance(v, (int, float)):
+            return normalize_score(v)
+        if isinstance(v, str):
+            try:
+                return normalize_score(float(v.strip()))
+            except ValueError:
+                return None
+        if isinstance(v, dict) and "score" in v:
+            return normalize_score(v["score"])
+        return None
+
+    def field(v, key, default):
+        return v.get(key, default) if isinstance(v, dict) else default
 
     f, r, c, k = sub("faithfulness"), sub("relevancy"), sub("context_precision"), sub("key_points_coverage")
     v = sub("voice_consistency")
@@ -269,20 +310,21 @@ async def evaluate_single(
     }
     return {
         **scores,
+        "judge_raw": (raw or "")[:2000],
         "details": {
-            "faithfulness_reason": f.get("reason", "判官输出无法解析"),
-            "faithfulness_unsupported_claims": f.get("unsupported_claims", []),
+            "faithfulness_reason": field(f, "reason", "判官输出无法解析"),
+            "faithfulness_unsupported_claims": field(f, "unsupported_claims", []),
             "faithfulness_parse": "ok" if scores["faithfulness"] is not None else "failed",
-            "relevancy_reason": r.get("reason", "判官输出无法解析"),
+            "relevancy_reason": field(r, "reason", "判官输出无法解析"),
             "relevancy_parse": "ok" if scores["relevancy"] is not None else "failed",
-            "context_precision_reason": c.get("reason", "判官输出无法解析"),
+            "context_precision_reason": field(c, "reason", "判官输出无法解析"),
             "context_precision_parse": "ok" if scores["context_precision"] is not None else "failed",
-            "key_points_reason": k.get("reason", "判官输出无法解析"),
-            "covered_points": k.get("covered_points", []),
-            "missed_points": k.get("missed_points", []),
+            "key_points_reason": field(k, "reason", "判官输出无法解析"),
+            "covered_points": field(k, "covered_points", []),
+            "missed_points": field(k, "missed_points", []),
             "key_points_parse": "ok" if scores["key_points_coverage"] is not None else "failed",
-            "voice_reason": v.get("reason", "判官输出无法解析"),
-            "voice_out_of_character": v.get("out_of_character", []),
+            "voice_reason": field(v, "reason", "判官输出无法解析"),
+            "voice_out_of_character": field(v, "out_of_character", []),
             "voice_parse": "ok" if scores["voice_consistency"] is not None else "failed",
         },
     }
