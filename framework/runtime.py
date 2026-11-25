@@ -467,9 +467,14 @@ async def _generate_direct_response(
         user_memory: 用户长期记忆块（retrieve_memory_block 渲染产物），
               空串/None 不注入。
     """
+    # 这三个在 try 之前先占位：except 里的重试要用 llm 和 messages，
+    # 而它们是在 try 内部才构造的——不预置就得靠 locals() 去掏，既脏又可能漏
+    fallback = "AI助手"
+    llm = None
+    messages = None
     try:
         config = get_scene_config()
-        fallback = config.display_name if config else "AI助手"
+        fallback = config.display_name if config else fallback
 
         # 名人对话回答通常需要更长篇幅，放宽 token 上限（避免尾部"建议"被截断）
         # 娱乐区由调用方传入更小的 max_tokens（如 300），实现极短回答
@@ -516,5 +521,18 @@ async def _generate_direct_response(
             response = await ainvoke_nonempty(llm, messages)
             return (response.content if hasattr(response, "content") else "").strip()
     except Exception as e:
-        print(f"[Runtime] 直接回复生成失败: {e}")
+        print(f"[Runtime] 直接回复生成失败: {type(e).__name__}: {e}")
+        # 非流式路径（评测、接口直取答案）可以安全重试一次：此时还没有任何内容
+        # 推给调用方，重试不会造成重复输出。2026-11-25 实测：不重试的话失败会被
+        # 伪装成一句寒暄话返回，评测侧看起来"答了"，实际是 0 分假答案。
+        if not stream_callback and llm is not None and messages is not None:
+            try:
+                await asyncio.sleep(1.5)
+                _resp = await ainvoke_nonempty(llm, messages)
+                _text = (_resp.content if hasattr(_resp, "content") else "").strip()
+                if _text:
+                    print("[Runtime] 重试成功，返回正文")
+                    return _text
+            except Exception as e2:
+                print(f"[Runtime] 重试仍失败: {type(e2).__name__}: {e2}")
         return f"你好！我是{fallback}，请问有什么可以帮你的？"

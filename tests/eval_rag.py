@@ -206,63 +206,132 @@ COMBINED_JUDGE_PROMPT = """你是一个严格的评估专家。被测系统是�
 # ============================================================
 # 评估函数
 # ============================================================
-async def _judge(llm: ChatOpenAI, prompt: str, attempts: int = 2) -> tuple[Optional[dict], str]:
+_GREETING_PREFIXES = ("你好！我是", "你好，我是")
+_GREETING_SUFFIX = "有什么可以帮你的？"
+
+
+def _is_greeting_fallback(answer: str) -> bool:
+    """判断这是不是 runtime 生成失败后的兜底寒暄，而不是真答案。
+
+    framework/runtime.py 的 _generate_direct_response 在异常时返回
+    「你好！我是{display_name}，请问有什么可以帮你的？」——它和正常回答一样
+    走 SSE 回来，评测侧不识别就会当成 0 分答案计入均值（假 0 分）。
     """
-    判官调用 + JSON 解析，带两层容错：
-    1. 空响应：ainvoke_nonempty 立即重试（上游中转的空壳 200 故障）
-    2. 格式坏：重问一次；仍失败返回 None —— 该指标记「无效」，
-       绝不默默记 5 分污染平均（旧版曾因此把忠实度"评"出 5.8，事后发现
-       18/23 个低分全是解析失败默认分）
+    t = (answer or "").strip()
+    if not t or len(t) > 60:
+        return False
+    return t.startswith(_GREETING_PREFIXES) and t.endswith(_GREETING_SUFFIX)
+
+
+async def _judge(
+    llm: ChatOpenAI,
+    prompt: str,
+    attempts: int = 2,
+    fallback_llm: ChatOpenAI = None,
+) -> tuple[Optional[dict], str, str]:
+    """
+    判官调用 + JSON 解析，四层容错：
+    1. 空响应：ainvoke_nonempty 内部立即重试（上游中转的空壳 200 故障）
+    2. 仍失败：换备用模型再试一轮（两个模型故障时段常常错开）
+    3. 每次重试之间有指数退避，不是连着硬打
+    4. 格式坏：重问；仍失败返回 None —— 该指标记「无效」，
+       绝不默默记 5 分污染平均（旧版曾因此把忠实度"评"出 5.8）
+
+    2026-11-25：此前只重试两次且没有退避、不会换模型，全量跑批稳定留下 3 题空结果。
+    判官是整条评测里最贵也最不能失败的一步，必须自带兜底。
 
     Returns:
-        (解析结果或 None, 最后一次原始输出)。原始输出落盘到 judge_raw——
-        没有它就只能猜"模型没输出"还是"我们解析太严"（2026-11-24 踩过）。
+        (解析结果或 None, 最后一次原始输出, 最后一次失败原因)
     """
     judge_gap = float(os.environ.get("EVAL_JUDGE_GAP_SEC", "20"))
+    empty_retries = int(os.environ.get("EVAL_JUDGE_EMPTY_RETRIES", "2"))
+    backoff = float(os.environ.get("EVAL_JUDGE_BACKOFF_SEC", "2"))
     if judge_gap > 0:
         # 距离上一次 LLM 调用（取答案）强制留出间隔，否则必撞中转 rpm 限额
         await asyncio.sleep(judge_gap)
+
     last_raw = ""
+    last_err = ""
     for i in range(attempts):
+        # 第一次走主判官，之后换备用模型；备用没配就还用主模型
+        cur = llm if (i == 0 or fallback_llm is None) else fallback_llm
+        tag = "主" if cur is llm else "备"
         try:
-            resp = await ainvoke_nonempty(llm, [("user", prompt)])
+            resp = await ainvoke_nonempty(cur, [("user", prompt)], attempts=empty_retries)
         except Exception as e:
-            # 429/网络异常同样按"该次失败"处理，等一个间隔再试——
+            # 429/网络异常同样按"该次失败"处理，退避后再试——
             # 若让异常炸出去，整道题的评估就废了
-            print(f"     判官调用失败（第 {i + 1}/{attempts} 次）: {str(e)[:60]}")
-            if i + 1 < attempts and judge_gap > 0:
-                await asyncio.sleep(judge_gap)
+            last_err = f"{tag}模型 {type(e).__name__}: {str(e)[:120]}"
+            print(f"     判官调用失败（第 {i + 1}/{attempts} 次，{tag}模型）: {str(e)[:60]}")
+            if i + 1 < attempts:
+                await asyncio.sleep(backoff * (2 ** i))
             continue
+
         text = getattr(resp, "content", "") or ""
-        last_raw = text
+        if text.strip():
+            last_raw = text
+        else:
+            last_err = f"{tag}模型返回空内容（重试 {empty_retries + 1} 次仍空）"
+            print(f"     判官返回空内容（第 {i + 1}/{attempts} 次，{tag}模型）")
+            if i + 1 < attempts:
+                await asyncio.sleep(backoff * (2 ** i))
+            continue
+
         try:
             obj = extract_json(text)
             if isinstance(obj, dict) and ("score" in obj or "faithfulness" in obj):
-                return obj, text
-        except Exception:
-            pass
-        print(f"     判官输出无法解析（第 {i + 1}/{attempts} 次），重试…")
-        if i + 1 < attempts and judge_gap > 0:
-            await asyncio.sleep(judge_gap)
-    return None, last_raw
+                if tag == "备":
+                    print("     ↳ 备用模型补上了本次评分")
+                return obj, text, ""
+        except Exception as e:
+            last_err = f"{tag}模型输出无法解析: {type(e).__name__}: {str(e)[:100]}"
+
+        print(f"     判官输出无法解析（第 {i + 1}/{attempts} 次，{tag}模型），重试…")
+        if i + 1 < attempts:
+            await asyncio.sleep(backoff * (2 ** i))
+
+    print(f"     判官最终失败：{last_err or '未知原因'}")
+    return None, last_raw, last_err
 
 
-async def evaluate_single(
-    llm: ChatOpenAI,
-    question: str,
-    answer: str,
-    contexts: list[str],
-    key_points: list[str],
-) -> dict:
-    """评估单个问题：单次判官调用返回五维评分，避免连续调用撞中转 rpm 限额。"""
-    contexts_text = "\n\n---\n\n".join(contexts) if contexts else "（无上下文）"
-    key_points_text = "\n".join(f"- {kp}" for kp in key_points)
+def get_judge_fallback_llm() -> Optional[ChatOpenAI]:
+    """判官备用模型：主判官连续空响应时换它再试一轮。
 
-    prompt = COMBINED_JUDGE_PROMPT.format(
-        question=question, contexts=contexts_text, answer=answer, key_points=key_points_text,
+    只在 fallback_model 已配置、且与判官模型不同名时才构造（同名换一次没意义）。
+    构造失败就返回 None，让 _judge 只用主模型，不因兜底配置把整批评测拖挂。
+    """
+    fb_model = (getattr(settings, "llm_fallback_model", "") or "").strip()
+    judge_model = (
+        os.environ.get("EVAL_JUDGE_MODEL", "").strip()
+        or getattr(settings, "eval_judge_model", "")
+        or getattr(settings, "llm_model", "")
+        or ""
     )
-    obj, raw = await _judge(llm, prompt)
+    if not fb_model or fb_model == judge_model:
+        return None
+    kwargs = dict(
+        model=fb_model,
+        temperature=0.1,
+        max_tokens=4000,
+        max_retries=0,
+        reasoning_effort="none",
+        model_kwargs={"response_format": {"type": "json_object"}},
+    )
+    try:
+        llm = get_chat_llm(**kwargs)
+        print(f"判官备用模型: {fb_model}（主判官持续空响应时切它）")
+        return llm
+    except Exception as e:
+        print(f"判官备用模型构造失败，只用主判官: {type(e).__name__}: {str(e)[:80]}")
+        return None
 
+
+def parse_judge_scores(obj: Optional[dict]) -> dict:
+    """把判官返回的 JSON 对象折算成五维分数 + 明细。
+
+    单独拆出来是为了能离线重算：judge_raw 已经落盘，解析逻辑改了以后
+    不必重新调判官（每题要花一次 LLM 调用），直接拿 raw 走一遍就行。
+    """
     def sub(name: str):
         """取某一维的原始值：可能是 {"score":..,"reason":..}，也可能是模型偷懒给的扁平 4。
 
@@ -310,7 +379,6 @@ async def evaluate_single(
     }
     return {
         **scores,
-        "judge_raw": (raw or "")[:2000],
         "details": {
             "faithfulness_reason": field(f, "reason", "判官输出无法解析"),
             "faithfulness_unsupported_claims": field(f, "unsupported_claims", []),
@@ -327,6 +395,30 @@ async def evaluate_single(
             "voice_out_of_character": field(v, "out_of_character", []),
             "voice_parse": "ok" if scores["voice_consistency"] is not None else "failed",
         },
+    }
+
+
+async def evaluate_single(
+    llm: ChatOpenAI,
+    question: str,
+    answer: str,
+    contexts: list[str],
+    key_points: list[str],
+    fallback_llm: ChatOpenAI = None,
+) -> dict:
+    """评估单个问题：单次判官调用返回五维评分，避免连续调用撞中转 rpm 限额。"""
+    contexts_text = "\n\n---\n\n".join(contexts) if contexts else "（无上下文）"
+    key_points_text = "\n".join(f"- {kp}" for kp in key_points)
+
+    prompt = COMBINED_JUDGE_PROMPT.format(
+        question=question, contexts=contexts_text, answer=answer, key_points=key_points_text,
+    )
+    obj, raw, err = await _judge(llm, prompt, fallback_llm=fallback_llm)
+
+    return {
+        **parse_judge_scores(obj),
+        "judge_raw": (raw or "")[:2000],
+        "judge_error": err or "",
     }
 
 
@@ -413,8 +505,9 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
     if difficulty:
         print(f"难度筛选: {difficulty}")
 
-    # 初始化评判 LLM
+    # 初始化评判 LLM（备用模型用于主判官连续空响应时兜底）
     llm = get_judge_llm()
+    judge_fb = get_judge_fallback_llm()
     print(f"评判模型: {settings.llm_model}")
 
     # 存储结果（断点续跑：加载已完成的有效记录，本次只补缺口）
@@ -468,10 +561,30 @@ async def run_evaluation(difficulty: str = None, limit: int = None, pace_sec: fl
             print(f"     获取回答失败: {answer}")
             continue
 
+        # 管线生成失败时 runtime 会兜底返回一句寒暄（framework/runtime.py），
+        # 那不是答案，会变成假 0 分。识别出来重取，最多两次。
+        _character = item.get("character", "jung")
+        for _a in range(2):
+            if not _is_greeting_fallback(answer):
+                break
+            print(f"     ⚠ 疑似兜底寒暄话（{len(answer)} 字），重取答案 {_a + 1}/2…")
+            await asyncio.sleep(2.0)
+            try:
+                system_response = await get_system_answer(question, character=_character)
+            except Exception as e:
+                print(f"     重取失败: {type(e).__name__}: {str(e)[:60]}")
+                break
+            answer = system_response["answer"]
+            contexts = system_response["contexts"]
+            elapsed = time.time() - start
+        if _is_greeting_fallback(answer):
+            print("     ⚠ 重取后仍是寒暄话，按管线失败跳过（不计入均值）")
+            continue
+
         # 评估回答（单题容错：Judge LLM 走外部中转，偶发异常不应炸掉整个评估）
         eval_start = time.time()
         try:
-            eval_result = await evaluate_single(llm, question, answer, contexts, key_points)
+            eval_result = await evaluate_single(llm, question, answer, contexts, key_points, fallback_llm=judge_fb)
         except Exception as e:
             print(f"     单题评估异常，跳过该题: {e}")
             continue
