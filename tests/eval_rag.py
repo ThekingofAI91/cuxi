@@ -97,12 +97,15 @@ def get_judge_llm() -> ChatOpenAI:
     )
     if judge_model:
         kwargs["model"] = judge_model
-        # 不同模型的参数支持不一致：kimi-k3 只接受 temperature=1（否则 400
-        # "only 1 is allowed for this model"）；reasoning_effort 也未必支持，
-        # 一并去掉，让模型用它自己的默认值。
-        kwargs["temperature"] = 1
-        kwargs.pop("reasoning_effort", None)
-        print(f"判官模型（独立配置）: {judge_model}（temperature=1，不传 reasoning_effort）")
+        # 只有 kimi 系列要求 temperature=1 且不认 reasoning_effort（2026-10 踩过：
+        # kimi-k3 传 temperature≠1 直接 400）。其它模型保持"关思考 + 低温度"——
+        # 否则判官会跑完整推理，每题多等几十秒（2026-11-24 实测：3 题 4 分钟）。
+        if judge_model.lower().startswith("kimi"):
+            kwargs["temperature"] = 1
+            kwargs.pop("reasoning_effort", None)
+            print(f"判官模型（独立配置）: {judge_model}（kimi 兼容：temperature=1，不传 reasoning_effort）")
+        else:
+            print(f"判官模型（独立配置）: {judge_model}（temperature=0.1，reasoning_effort=none）")
     return get_chat_llm(**kwargs)
 
 
